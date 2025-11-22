@@ -4,7 +4,7 @@ URL patterns for trading bot endpoints
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-# Import views (we'll create these next)
+# Import views
 from . import views as bot_views
 from . import indicators_views
 
