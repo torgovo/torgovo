@@ -30,7 +30,9 @@ urlpatterns = [
     path('quantum-ai/<uuid:bot_id>/stop/', bot_views.stop_quantum_ai_bot, name='stop_quantum_ai_bot'),
 
     # Technical indicators endpoints
-    path('indicators/', include(indicators_urls)),
+    path('indicators/ema/', indicators_views.EMAIndicatorView.as_view(), name='ema_webhook'),
+    path('indicators/rsi/', indicators_views.RSIIndicatorView.as_view(), name='rsi_webhook'),
+    path('indicators/bollinger-bands/', indicators_views.BollingerBandsView.as_view(), name='bb_webhook'),
 
     # Bot statistics and monitoring
     path('stats/overview/', bot_views.bots_overview, name='bots_overview'),
