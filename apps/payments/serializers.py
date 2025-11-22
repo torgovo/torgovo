@@ -4,6 +4,7 @@ Serializers for payment processing models
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from django.db import models
 
 from .models import (
     PaymentMethod, Transaction, Invoice, WithdrawalRequest,
