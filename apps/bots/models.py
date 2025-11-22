@@ -599,3 +599,209 @@ class BotExecutionLog(TimeStampedModel):
 
     def __str__(self):
         return f"{self.bot_type} {self.bot_id} - {self.action}"
+
+
+class PairConfig(TimeStampedModel):
+    """Quantum AI pair configuration model for admin setup."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='pair_configs'
+    )
+    pair_symbol = models.CharField(max_length=20)
+    slug = models.SlugField(max_length=50, unique=True)
+
+    # Trading parameters
+    quantity = models.FloatField(null=True, blank=True)
+    favor_levels = models.IntegerField(default=3)
+    against_levels = models.IntegerField(default=3)
+    favor_level_qty = models.FloatField(null=True, blank=True)
+    against_level_qty = models.FloatField(null=True, blank=True)
+    favor_level_difference = models.FloatField(null=True, blank=True)
+    against_level_difference = models.FloatField(null=True, blank=True)
+
+    # Order configuration
+    Order_Type = models.CharField(
+        max_length=10,
+        choices=[
+            ('market', 'Market'),
+            ('limit', 'Limit'),
+        ],
+        default='market'
+    )
+    Amount_Type = models.CharField(
+        max_length=10,
+        choices=[
+            ('coin', 'Coin'),
+            ('dollar', 'Dollar'),
+        ],
+        default='dollar'
+    )
+    SLTP_Type = models.CharField(
+        max_length=20,
+        choices=[
+            ('percentage', 'Percentage'),
+            ('dollars', 'Dollars'),
+        ],
+        default='dollars'
+    )
+    Stop_Loss = models.FloatField(null=True, blank=True)
+    Take_Profit = models.FloatField(null=True, blank=True)
+
+    # RSI Configuration
+    RSI_Lower = models.FloatField(default=30.0)
+    RSI_Upper = models.FloatField(default=70.0)
+    RSI_Entry = models.CharField(
+        max_length=10,
+        choices=[
+            ('buy', 'Buy'),
+            ('sell', 'Sell'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+
+    # Bollinger Bands Configuration
+    BB_Entry = models.CharField(
+        max_length=10,
+        choices=[
+            ('buy', 'Buy'),
+            ('sell', 'Sell'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+
+    # Combined Entry Signals
+    EMA_RSI_Entry = models.CharField(
+        max_length=10,
+        choices=[
+            ('buy', 'Buy'),
+            ('sell', 'Sell'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+    EMA_BB_Entry = models.CharField(
+        max_length=10,
+        choices=[
+            ('buy', 'Buy'),
+            ('sell', 'Sell'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+    BB_RSI_Entry = models.CharField(
+        max_length=10,
+        choices=[
+            ('buy', 'Buy'),
+            ('sell', 'Sell'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+    EMA_BB_RSI_Entry = models.CharField(
+        max_length=10,
+        choices=[
+            ('buy', 'Buy'),
+            ('sell', 'Sell'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+
+    # Exit Signals
+    BB_Exit = models.CharField(
+        max_length=10,
+        choices=[
+            ('tp', 'Take Profit'),
+            ('sl', 'Stop Loss'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+    RSI_Exit = models.CharField(
+        max_length=10,
+        choices=[
+            ('tp', 'Take Profit'),
+            ('sl', 'Stop Loss'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+    EMA_RSI_Exit = models.CharField(
+        max_length=10,
+        choices=[
+            ('tp', 'Take Profit'),
+            ('sl', 'Stop Loss'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+    EMA_BB_Exit = models.CharField(
+        max_length=10,
+        choices=[
+            ('tp', 'Take Profit'),
+            ('sl', 'Stop Loss'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+    BB_RSI_Exit = models.CharField(
+        max_length=10,
+        choices=[
+            ('tp', 'Take Profit'),
+            ('sl', 'Stop Loss'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+    EMA_BB_RSI_Exit = models.CharField(
+        max_length=10,
+        choices=[
+            ('tp', 'Take Profit'),
+            ('sl', 'Stop Loss'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+    SL_Exit = models.CharField(
+        max_length=10,
+        choices=[
+            ('tp', 'Take Profit'),
+            ('sl', 'Stop Loss'),
+            ('both', 'Both'),
+            ('None', 'None'),
+        ],
+        default='None'
+    )
+
+    class Meta:
+        db_table = 'bots_pair_configs'
+        unique_together = ['user', 'pair_symbol']
+        indexes = [
+            models.Index(fields=['user', 'pair_symbol']),
+            models.Index(fields=['slug']),
+        ]
+
+    def save(self, *args, **kwargs):
+        """Generate slug if not exists."""
+        if not self.slug:
+            self.slug = f"{self.user.username}-{self.pair_symbol.lower().replace('/', '-')}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.user.username} - {self.pair_symbol}"
