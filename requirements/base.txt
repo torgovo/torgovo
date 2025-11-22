@@ -15,9 +15,11 @@ django-redis==5.4.0
 # Trading & Exchange Integration
 ccxt==4.1.64
 python-binance==1.0.19
-binance-connector-python==3.6.0
 alpaca-trade-api==3.1.0
 websocket-client==1.6.4
+
+# API Documentation
+drf-yasg==1.21.7
 
 # Authentication & Social
 django-allauth==0.57.0
