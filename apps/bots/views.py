@@ -44,7 +44,7 @@ class WebhookAlertViewSet(generics.ModelViewSet):
         """Return appropriate serializer based on action."""
         if self.action == 'create':
             return WebhookAlertCreateSerializer
-        return WebhookSerializer
+        return WebhookAlertSerializer
 
 
 class GridBotViewSet(generics.ModelViewSet):
