@@ -5,7 +5,8 @@ import time
 import logging
 from decimal import Decimal
 from typing import Dict, Any
-from .base import BaseTradingStrategy
+from django.utils import timezone
+from .base import BaseTradingStrategy, TradingBotException
 
 logger = logging.getLogger('trading')
 
