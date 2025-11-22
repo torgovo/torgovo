@@ -3,6 +3,7 @@ Serializers for admin endpoints
 """
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.db import models
 from apps.authentication.serializers import UserProfileSerializer
 
 User = get_user_model()
