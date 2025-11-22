@@ -1,0 +1,275 @@
+"""
+Views for exchange integration endpoints
+"""
+import logging
+from decimal import Decimal
+from django.shortcuts import get_object_or_404
+from django.contrib.auth.decorators import login_required
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+
+from .models import (
+    ExchangeCredentials, TradingPair, ExchangeStatus,
+    BlockchainAddress, Exchange
+)
+from .serializers import (
+    ExchangeCredentialsSerializer, TradingPairSerializer,
+    ExchangeStatusSerializer, BlockchainAddressSerializer
+)
+
+logger = logging.getLogger('apps')
+
+
+class ExchangeCredentialsViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing exchange credentials.
+    """
+    serializer_class = ExchangeCredentialsSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return ExchangeCredentials.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=False, methods=['get'])
+    def active(self, request):
+        """Get active exchange credentials."""
+        active_credentials = self.get_queryset().filter(is_active=True)
+        serializer = self.get_serializer(active_credentials, many=True)
+        return Response(serializer.data)
+
+
+class TradingPairViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for viewing available trading pairs.
+    """
+    serializer_class = TradingPairSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = TradingPair.objects.filter(is_active=True)
+        exchange_name = self.request.query_params.get('exchange', None)
+        if exchange_name:
+            queryset = queryset.filter(exchange__name=exchange_name)
+        return queryset
+
+    @action(detail=False, methods=['get'])
+    def popular(self, request):
+        """Get popular trading pairs."""
+        popular_pairs = self.get_queryset()[:20]
+        serializer = self.get_serializer(popular_pairs, many=True)
+        return Response(serializer.data)
+
+
+class ExchangeStatusViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for exchange status information.
+    """
+    serializer_class = ExchangeStatusSerializer
+    queryset = ExchangeStatus.objects.all()
+
+    @action(detail=True, methods=['get'])
+    def trading_pairs(self, request, pk=None):
+        """Get trading pairs for a specific exchange."""
+        exchange_status = self.get_object()
+        pairs = TradingPair.objects.filter(exchange=exchange_status.exchange, is_active=True)
+        serializer = TradingPairSerializer(pairs, many=True)
+        return Response(serializer.data)
+
+
+class BlockchainAddressViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing blockchain addresses.
+    """
+    serializer_class = BlockchainAddressSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return BlockchainAddress.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=False, methods=['get'])
+    def cryptocurrency(self, request):
+        """Get addresses for specific cryptocurrency."""
+        crypto = request.query_params.get('crypto', None)
+        if crypto:
+            addresses = self.get_queryset().filter(cryptocurrency=crypto.upper())
+            serializer = self.get_serializer(addresses, many=True)
+            return Response(serializer.data)
+        return Response({'error': 'Cryptocurrency parameter required'},
+                      status=status.HTTP_400_BAD_REQUEST)
+
+
+@login_required
+@swagger_auto_schema(
+    method='get',
+    responses={200: openapi.Response(
+        description='List of supported exchanges',
+        schema=openapi.Schema(
+            type=openapi.TYPE_ARRAY,
+            items=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'name': openapi.Schema(type=openapi.TYPE_STRING),
+                    'display_name': openapi.Schema(type=openapi.TYPE_STRING),
+                    'is_active': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                    'supported_features': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Schema(type=openapi.TYPE_STRING)
+                    )
+                }
+            )
+        )
+    )}
+)
+def list_exchanges(request):
+    """List all supported cryptocurrency exchanges."""
+    try:
+        exchanges = Exchange.objects.filter(is_active=True)
+        exchange_data = []
+
+        for exchange in exchanges:
+            exchange_data.append({
+                'name': exchange.name,
+                'display_name': exchange.display_name,
+                'is_active': exchange.is_active,
+                'supports_testnet': exchange.supports_testnet,
+                'supported_features': exchange.supported_features,
+                'fee_rates': exchange.fee_rates
+            })
+
+        return Response({
+            'success': True,
+            'data': exchange_data
+        })
+
+    except Exception as e:
+        logger.error(f"Error listing exchanges: {str(e)}")
+        return Response({
+            'success': False,
+            'error': 'Failed to retrieve exchanges'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@login_required
+@swagger_auto_schema(
+    method='get',
+    manual_parameters=[
+        openapi.Parameter(
+            'exchange_name',
+            openapi.IN_PATH,
+            description='Exchange name (binance, bybit, etc.)',
+            type=openapi.TYPE_STRING,
+            required=True
+        )
+    ],
+    responses={200: openapi.Response(
+        description='List of trading symbols for exchange',
+        schema=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'symbols': openapi.Schema(
+                    type=openapi.TYPE_ARRAY,
+                    items=openapi.Schema(type=openapi.TYPE_STRING)
+                )
+            }
+        )
+    )}
+)
+def get_exchange_symbols(request, exchange_name):
+    """Get trading symbols for a specific exchange."""
+    try:
+        exchange = get_object_or_404(Exchange, name=exchange_name, is_active=True)
+        pairs = TradingPair.objects.filter(exchange=exchange, is_active=True)
+
+        symbols = [pair.symbol for pair in pairs]
+
+        return Response({
+            'success': True,
+            'exchange': exchange.display_name,
+            'symbols': symbols
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting exchange symbols for {exchange_name}: {str(e)}")
+        return Response({
+            'success': False,
+            'error': f'Failed to retrieve symbols for {exchange_name}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@login_required
+@swagger_auto_schema(
+    method='get',
+    manual_parameters=[
+        openapi.Parameter(
+            'pairs',
+            openapi.IN_QUERY,
+            description='Comma-separated list of trading pairs',
+            type=openapi.TYPE_STRING,
+            required=False
+        )
+    ],
+    responses={200: openapi.Response(
+        description='Current exchange rates',
+        schema=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'rates': openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    additional_properties=openapi.Schema(type=openapi.TYPE_NUMBER)
+                )
+            }
+        )
+    )}
+)
+def get_exchange_rates(request):
+    """Get current exchange rates for trading pairs."""
+    try:
+        pairs_param = request.GET.get('pairs', None)
+        rates = {}
+
+        if pairs_param:
+            # Get specific pairs
+            symbols = [s.strip().upper() for s in pairs_param.split(',')]
+            trading_pairs = TradingPair.objects.filter(
+                symbol__in=symbols,
+                is_active=True
+            ).select_related('exchange')
+        else:
+            # Get all active pairs (limited to avoid huge response)
+            trading_pairs = TradingPair.objects.filter(
+                is_active=True
+            ).select_related('exchange')[:50]
+
+        # This would typically integrate with exchange APIs
+        # For now, return sample data
+        for pair in trading_pairs:
+            # In production, this would call actual exchange APIs
+            rates[pair.symbol] = {
+                'price': Decimal('45000.00'),  # Sample price
+                'exchange': pair.exchange.name,
+                'volume_24h': Decimal('1234567.89'),
+                'change_24h': Decimal('2.5')
+            }
+
+        return Response({
+            'success': True,
+            'rates': rates,
+            'timestamp': timezone.now().isoformat()
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting exchange rates: {str(e)}")
+        return Response({
+            'success': False,
+            'error': 'Failed to retrieve exchange rates'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
