@@ -24,6 +24,9 @@ urlpatterns = [
     # Technical indicator endpoints (webhooks)
     path('api/indicators/', include('apps.bots.urls.indicators')),
 
+    # Admin endpoints
+    path('api/admin/', include('apps.users.urls')),
+
     # Health check
     path('health/', TemplateView.as_view(template_name='health.html'), name='health'),
 ]
