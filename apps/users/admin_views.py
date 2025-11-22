@@ -114,14 +114,14 @@ def admin_dashboard_stats(request):
         ).count()
 
         # Financial statistics
-        total_deposits = QuantumAIDeposit.objects.filter(
+        total_deposits = Deposit.objects.filter(
             status='approved'
         ).aggregate(
-            total=Sum('usdt_amount'),
+            total=Sum('amount'),
             count=Count('id')
         )
 
-        pending_deposits = QuantumAIDeposit.objects.filter(
+        pending_deposits = Deposit.objects.filter(
             status='pending'
         ).count()
 
