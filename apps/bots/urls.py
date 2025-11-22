@@ -39,9 +39,3 @@ urlpatterns = [
     path('stats/performance/<uuid:bot_id>/', bot_views.bot_performance, name='bot_performance'),
 ]
 
-# Technical indicators URLs
-indicators_urls = [
-    path('ema/', indicators_views.EMAIndicatorView.as_view(), name='ema_webhook'),
-    path('rsi/', indicators_views.RSIIndicatorView.as_view(), name='rsi_webhook'),
-    path('bollinger-bands/', indicators_views.BollingerBandsView.as_view(), name='bb_webhook'),
-]
