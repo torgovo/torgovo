@@ -21,9 +21,7 @@ urlpatterns = [
     path('api/', include('apps.subscriptions.urls')),
     path('api/', include('apps.users.urls')),
 
-    # Technical indicator endpoints (webhooks)
-    path('api/indicators/', include('apps.bots.urls.indicators')),
-
+    
     # Admin endpoints
     path('api/admin/', include('apps.users.urls')),
 
