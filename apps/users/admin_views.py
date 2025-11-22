@@ -175,20 +175,18 @@ def admin_create_blockchain_address(request):
         coin_type = request.data.get('coin_type')
         blockchain = request.data.get('blockchain')
         address = request.data.get('address')
-        label = request.data.get('label', '')
 
         if not all([coin_type, blockchain, address]):
             return Response({
                 'error': 'Missing required fields: coin_type, blockchain, address'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        from apps.payments.models import BlockchainAddress
-
         blockchain_addr = BlockchainAddress.objects.create(
             coin_type=coin_type,
             blockchain=blockchain,
             address=address,
-            label=label
+            admin_only_configurable=True,
+            is_active=True
         )
 
         return Response({
@@ -198,7 +196,9 @@ def admin_create_blockchain_address(request):
                 'coin_type': blockchain_addr.coin_type,
                 'blockchain': blockchain_addr.blockchain,
                 'address': blockchain_addr.address,
-                'label': blockchain_addr.label,
+                'is_active': blockchain_addr.is_active,
+                'admin_only_configurable': blockchain_addr.admin_only_configurable,
+                'created_at': blockchain_addr.created_at,
             }
         }, status=status.HTTP_201_CREATED)
 
