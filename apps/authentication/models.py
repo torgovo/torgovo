@@ -37,6 +37,17 @@ class CustomUser(AbstractUser):
     two_factor_secret = models.CharField(max_length=32, blank=True)
     last_login_ip = models.GenericIPAddressField(null=True, blank=True)
 
+    # Trading Credentials (for Bot compatibility)
+    API = models.CharField(max_length=255, blank=True)
+    SECRET = models.CharField(max_length=255, blank=True)
+    Demo = models.BooleanField(default=False)
+    
+    # Telegram Configuration
+    Token = models.CharField(max_length=255, blank=True, help_text="Telegram Bot Token")
+    Bot_ID = models.CharField(max_length=255, blank=True, help_text="Telegram Chat ID")
+    Channel_Token = models.CharField(max_length=255, blank=True, help_text="Telegram Channel Bot Token")
+    Channel_Bot_ID = models.CharField(max_length=255, blank=True, help_text="Telegram Channel ID")
+
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['username']
 
@@ -175,7 +186,12 @@ class UserProfile(TimeStampedModel):
 
     def can_create_more_bots(self):
         """Check if user can create more bots."""
-        from apps.bots.models import WebhookAlert, GridBot, MartingaleBot, QuantumAIBot
+        from django.apps import apps
+        
+        WebhookAlert = apps.get_model('bots', 'WebhookAlert')
+        GridBot = apps.get_model('bots', 'GridBot')
+        MartingaleBot = apps.get_model('bots', 'MartingaleBot')
+        QuantumAIBot = apps.get_model('bots', 'QuantumAIBot')
 
         current_bot_count = (
             WebhookAlert.objects.filter(user=self.user, is_deleted=False).count() +
@@ -188,7 +204,8 @@ class UserProfile(TimeStampedModel):
 
     def get_exchange_credential(self, exchange_name):
         """Get decrypted exchange credentials."""
-        from apps.exchanges.models import ExchangeCredentials
+        from django.apps import apps
+        ExchangeCredentials = apps.get_model('exchanges', 'ExchangeCredentials')
 
         try:
             cred = ExchangeCredentials.objects.get(

@@ -17,7 +17,7 @@ django-ratelimit==4.1.0
 django-otp==1.3.0
 
 # Database connection pooling
-django-db-geventpool==1.4.2
+django-db-geventpool==4.0.8
 
 # Health checks
 django-health-check==3.18.1

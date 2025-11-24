@@ -8,7 +8,7 @@ from django.dispatch import receiver
 from django.contrib.auth.signals import user_logged_in, user_logged_out
 from django.core.mail import send_mail
 from django.conf import settings
-from .models import CustomUser, UserProfile, UserActivityLog
+from .models import CustomUser, UserProfile
 
 
 def generate_otp_code(length=6):
@@ -33,30 +33,15 @@ def save_user_profile(sender, instance, **kwargs):
 @receiver(user_logged_in)
 def log_user_login(sender, request, user, **kwargs):
     """Log user login activity."""
-    UserActivityLog.objects.create(
-        user=user,
-        action='login',
-        description=f"User {user.email} logged in successfully.",
-        ip_address=get_client_ip(request),
-        user_agent=request.META.get('HTTP_USER_AGENT', ''),
-        method='POST',
-        status_code=200
-    )
+    # TODO: Implement UserActivityLog model and log login activity
+    pass
 
 
 @receiver(user_logged_out)
 def log_user_logout(sender, request, user, **kwargs):
     """Log user logout activity."""
-    if user:
-        UserActivityLog.objects.create(
-            user=user,
-            action='logout',
-            description=f"User {user.email} logged out.",
-            ip_address=get_client_ip(request),
-            user_agent=request.META.get('HTTP_USER_AGENT', ''),
-            method='POST',
-            status_code=200
-        )
+    # TODO: Implement UserActivityLog model and log logout activity
+    pass
 
 
 def get_client_ip(request):

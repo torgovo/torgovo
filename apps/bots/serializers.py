@@ -3,7 +3,7 @@ Serializers for trading bots
 """
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import WebhookAlert, GridBot, MartingaleBot, QuantumAIBot, Order, TechnicalIndicator
+from .models import WebhookAlert, GridBot, MartingaleBot, QuantumAIBot, Order, TechnicalIndicator, PairConfig
 
 User = get_user_model()
 
@@ -171,6 +171,15 @@ class QuantumAIBotCreateSerializer(serializers.ModelSerializer):
         fields = ['bot_name', 'auto_compound', 'compound_frequency', 'risk_level']
 
 
+class PairConfigSerializer(serializers.ModelSerializer):
+    """Serializer for PairConfig model."""
+    user = serializers.HiddenField(default=serializers.CurrentUserDefault())
+
+    class Meta:
+        model = PairConfig
+        fields = '__all__'
+
+
 class OrderSerializer(serializers.ModelSerializer):
     """Serializer for Order model."""
     user = serializers.HiddenField(default=serializers.CurrentUserDefault())
@@ -183,7 +192,8 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = [
-            'id', 'Time', 'user', 'user_info', 'pair', 'PairConfig', 'Side',
+        fields = [
+            'id', 'Time', 'user', 'user_info', 'Pair', 'PairConfig', 'Side',
             'Category', 'Order_type', 'Quantity', 'Price',
             'Exchange', 'Take_Profit', 'Stop_Loss', 'Description',
             'Details', 'executed_price', 'fees', 'status',
