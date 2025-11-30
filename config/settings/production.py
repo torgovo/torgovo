@@ -1,39 +1,3 @@
-"""
-Production settings for Torgovo Crypto Trading Platform
-"""
-from .base import *
-
-DEBUG = False
-
-ALLOWED_HOSTS = config(
-    'ALLOWED_HOSTS',
-    default='',
-    cast=lambda v: [s.strip() for s in v.split(',')]
-)
-
-# Security
-SECURE_SSL_REDIRECT = True
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-SECURE_BROWSER_XSS_FILTER = True
-SECURE_CONTENT_TYPE_NOSNIFF = True
-SECURE_HSTS_SECONDS = 31536000  # 1 year
-SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-SECURE_HSTS_PRELOAD = True
-X_FRAME_OPTIONS = 'DENY'
-
-# Session and CSRF Security
-SESSION_COOKIE_SECURE = True
-SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = 'Lax'
-CSRF_COOKIE_SECURE = True
-CSRF_COOKIE_HTTPONLY = True
-CSRF_COOKIE_SAMESITE = 'Lax'
-
-# CORS for production
-CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOWED_ORIGINS = config(
-    'CORS_ALLOWED_ORIGINS',
-    default='',
     cast=lambda v: [s.strip() for s in v.split(',')]
 )
 CORS_ALLOW_CREDENTIALS = True
@@ -61,7 +25,7 @@ LOGGING = {
         'file': {
             'level': 'INFO',
             'class': 'logging.handlers.RotatingFileHandler',
-            'filename': '/var/log/torgovo/django.log',
+            'filename': BASE_DIR / 'logs' / 'django.log',
             'maxBytes': 1024*1024*15,  # 15MB
             'backupCount': 10,
             'formatter': 'verbose',
@@ -69,7 +33,7 @@ LOGGING = {
         'error_file': {
             'level': 'ERROR',
             'class': 'logging.handlers.RotatingFileHandler',
-            'filename': '/var/log/torgovo/django_errors.log',
+            'filename': BASE_DIR / 'logs' / 'django_errors.log',
             'maxBytes': 1024*1024*15,  # 15MB
             'backupCount': 10,
             'formatter': 'verbose',
@@ -77,7 +41,7 @@ LOGGING = {
         'trading_file': {
             'level': 'INFO',
             'class': 'logging.handlers.RotatingFileHandler',
-            'filename': '/var/log/torgovo/trading.log',
+            'filename': BASE_DIR / 'logs' / 'trading.log',
             'maxBytes': 1024*1024*15,  # 15MB
             'backupCount': 20,
             'formatter': 'verbose',
@@ -143,17 +107,19 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_TASK_ACKS_LATE = True
 
 # Static files for production
-STATIC_ROOT = '/var/www/torgovo/static/'
-MEDIA_ROOT = '/var/www/torgovo/media/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Monitoring and Error Tracking
-if config('SENTRY_DSN', default=''):
+SENTRY_DSN = config('SENTRY_DSN', default='')
+
+if SENTRY_DSN and SENTRY_DSN.strip() and SENTRY_DSN.startswith('http'):
     import sentry_sdk
     from sentry_sdk.integrations.django import DjangoIntegration
     from sentry_sdk.integrations.celery import CeleryIntegration
 
     sentry_sdk.init(
-        dsn=config('SENTRY_DSN'),
+        dsn=SENTRY_DSN,
         integrations=[
             DjangoIntegration(
                 transaction_style='url',

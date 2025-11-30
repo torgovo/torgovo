@@ -192,7 +192,6 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = [
-        fields = [
             'id', 'Time', 'user', 'user_info', 'Pair', 'PairConfig', 'Side',
             'Category', 'Order_type', 'Quantity', 'Price',
             'Exchange', 'Take_Profit', 'Stop_Loss', 'Description',

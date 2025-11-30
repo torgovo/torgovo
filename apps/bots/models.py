@@ -261,10 +261,6 @@ class Indicator(TimeStampedModel):
         return f"Indicators for {self.Pair} - {self.user.email}"
 
 
-    def __str__(self):
-        return f"Indicators for {self.Pair} - {self.user.email}"
-
-
 class PairConfig(TimeStampedModel):
     amount_choices = [
         ('coin', 'Coins'),
@@ -440,7 +436,7 @@ class Order(TimeStampedModel):
         ]
     
     def __str__(self):
-        return f"{self.Side} {self.Quantity} {self.pair} @ {self.Exchange}"
+        return f"{self.Side} {self.Quantity} {self.Pair} @ {self.Exchange}"
 
 
 class TechnicalIndicator(TimeStampedModel):
