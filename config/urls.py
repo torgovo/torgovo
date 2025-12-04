@@ -7,16 +7,16 @@ from django.http import HttpResponse
 urlpatterns = [
     path('admin/', admin.site.urls),
     
-    # API endpoints - temporarily disabled incomplete apps
-    # path('api/auth/', include('apps.authentication.urls')),
-    # path('api/webhooks/', include('apps.webhooks.urls')),
-    # path('api/bots/', include('apps.bots.urls')),
-    # path('api/exchanges/', include('apps.webhooks.urls')),
-    # path('api/payments/', include('apps.payments.urls')),
-    # path('api/subscriptions/', include('apps.subscriptions.urls')),
-    # path('api/users/', include('apps.users.urls')),
-    # path('api/investments/', include('apps.investments.urls')),
-    # path('api/referrals/', include('apps.referrals.urls')),
+    # API endpoints
+    path('api/auth/', include('apps.authentication.urls')),
+    path('api/webhooks/', include('apps.webhooks.urls')),
+    path('api/bots/', include('apps.bots.urls')),
+    path('api/exchanges/', include('apps.exchanges.urls')),
+    path('api/payments/', include('apps.payments.urls')),
+    path('api/subscriptions/', include('apps.subscriptions.urls')),
+    path('api/users/', include('apps.users.urls')),
+    path('api/investments/', include('apps.investments.urls')),
+    path('api/referrals/', include('apps.referrals.urls')),
     
     # Allauth - temporarily disabled
     # path('accounts/', include('allauth.urls')),

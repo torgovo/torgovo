@@ -5,74 +5,137 @@ import logging
 from decimal import Decimal
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, generics
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework.views import APIView
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
 from .models import (
-    PaymentMethod, Transaction, Invoice, WithdrawalRequest,
-    PaymentGateway, Refund
+    SubscriptionPlan, QuantumAIDeposit, BlockchainAddress,
+    WithdrawalRequest, PaymentTransaction, ReferralPayout
 )
 from .serializers import (
-    PaymentMethodSerializer, TransactionSerializer,
-    InvoiceSerializer, WithdrawalRequestSerializer,
-    PaymentGatewaySerializer, RefundSerializer
+    SubscriptionPlanSerializer, QuantumAIDepositSerializer,
+    BlockchainAddressSerializer, WithdrawalRequestSerializer,
+    PaymentTransactionSerializer, ReferralPayoutSerializer
 )
+from apps.bots.models import QuantumAIBot
 
 logger = logging.getLogger('apps')
 
 
-class PaymentMethodViewSet(viewsets.ModelViewSet):
+class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    ViewSet for managing payment methods.
+    ViewSet for viewing subscription plans.
     """
-    serializer_class = PaymentMethodSerializer
+    serializer_class = SubscriptionPlanSerializer
+    queryset = SubscriptionPlan.objects.filter(is_active=True)
+    permission_classes = [IsAuthenticated]
+
+
+class QuantumDepositViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing Quantum AI deposits.
+    """
+    queryset = QuantumAIDeposit.objects.all()
+    serializer_class = QuantumAIDepositSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return PaymentMethod.objects.filter(user=self.request.user)
+        if self.request.user.is_staff:
+            return QuantumAIDeposit.objects.all().order_by('-created_at')
+        return QuantumAIDeposit.objects.filter(user=self.request.user).order_by('-created_at')
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
-    @action(detail=True, methods=['post'])
-    def set_default(self, request, pk=None):
-        """Set a payment method as default."""
-        payment_method = self.get_object()
-
-        # Unset all other payment methods for this user
-        PaymentMethod.objects.filter(
-            user=request.user,
-            payment_type=payment_method.payment_type
-        ).update(is_default=False)
-
-        # Set this one as default
-        payment_method.is_default = True
-        payment_method.save()
-
-        return Response({
-            'success': True,
-            'message': f'{payment_method.payment_type.title()} payment method set as default'
-        })
+    @action(detail=False, methods=['get'])
+    def pending(self, request):
+        """Get pending deposits."""
+        if not request.user.is_staff:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        pending_deposits = QuantumAIDeposit.objects.filter(status='pending').order_by('-created_at')
+        serializer = self.get_serializer(pending_deposits, many=True)
+        return Response(serializer.data)
 
 
-class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
+class WithdrawalRequestViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for viewing transaction history.
+    ViewSet for managing withdrawal requests.
     """
-    serializer_class = TransactionSerializer
+    queryset = WithdrawalRequest.objects.all()
+    serializer_class = WithdrawalRequestSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Transaction.objects.filter(user=self.request.user).order_by('-created_at')
+        if self.request.user.is_staff:
+            return WithdrawalRequest.objects.all().order_by('-created_at')
+        return WithdrawalRequest.objects.filter(user=self.request.user).order_by('-created_at')
+
+    def perform_create(self, serializer):
+        serializer.save(
+            user=self.request.user,
+            ip_address=self.get_client_ip(),
+            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+        )
+
+    def get_client_ip(self):
+        """Get client IP address."""
+        x_forwarded_for = self.request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            ip = x_forwarded_for.split(',')[0].strip()
+        else:
+            ip = self.request.META.get('REMOTE_ADDR', '')
+        return ip
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """Cancel a withdrawal request."""
+        withdrawal = self.get_object()
+
+        if withdrawal.user != request.user and not request.user.is_staff:
+            return Response({
+                'success': False,
+                'error': 'Permission denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        if withdrawal.status not in ['pending', 'processing']:
+            return Response({
+                'success': False,
+                'error': 'Withdrawal cannot be cancelled'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        withdrawal.status = 'rejected'
+        withdrawal.admin_notes = request.data.get('notes', 'Cancelled by user')
+        withdrawal.save()
+
+        return Response({
+            'success': True,
+            'message': 'Withdrawal request cancelled successfully'
+        })
+
+
+class PaymentTransactionViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for viewing payment transaction history.
+    """
+    queryset = PaymentTransaction.objects.all()
+    serializer_class = PaymentTransactionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return PaymentTransaction.objects.all().order_by('-created_at')
+        return PaymentTransaction.objects.filter(user=self.request.user).order_by('-created_at')
 
     @action(detail=False, methods=['get'])
     def recent(self, request):
         """Get recent transactions."""
-        recent_transactions = self.get_queryset()[:10]
+        recent_transactions = self.get_queryset()[:20]
         serializer = self.get_serializer(recent_transactions, many=True)
         return Response(serializer.data)
 
@@ -88,236 +151,147 @@ class TransactionViewSet(viewsets.ReadOnlyModelViewSet):
                       status=status.HTTP_400_BAD_REQUEST)
 
 
-class InvoiceViewSet(viewsets.ModelViewSet):
+class BlockchainAddressListView(generics.ListAPIView):
     """
-    ViewSet for managing invoices.
+    List available blockchain addresses for deposits.
     """
-    serializer_class = InvoiceSerializer
+    serializer_class = BlockchainAddressSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return BlockchainAddress.objects.filter(is_active=True)
+
+
+class CreateDepositView(APIView):
+    """
+    Create a new deposit for a Quantum AI bot.
+    """
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        return Invoice.objects.filter(user=self.request.user).order_by('-created_at')
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
-
-    @action(detail=True, methods=['post'])
-    def pay(self, request, pk=None):
-        """Pay an invoice."""
-        invoice = self.get_object()
-
-        if invoice.status != 'pending':
-            return Response({
-                'success': False,
-                'error': 'Invoice cannot be paid'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        payment_method_id = request.data.get('payment_method_id')
-        if not payment_method_id:
-            return Response({
-                'success': False,
-                'error': 'Payment method is required'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
+    @swagger_auto_schema(
+        request_body=QuantumAIDepositSerializer,
+        responses={201: QuantumAIDepositSerializer}
+    )
+    def post(self, request, bot_id):
+        """Create a deposit for the specified bot."""
         try:
-            payment_method = get_object_or_404(
-                PaymentMethod,
-                id=payment_method_id,
-                user=request.user,
-                is_active=True
-            )
-
-            # Process payment (integrates with payment gateway)
-            # This is a simplified version
-            transaction = Transaction.objects.create(
-                user=request.user,
-                invoice=invoice,
-                amount=invoice.amount,
-                transaction_type='payment',
-                status='completed',
-                payment_method=payment_method
-            )
-
-            # Update invoice status
-            invoice.status = 'paid'
-            invoice.paid_at = timezone.now()
-            invoice.save()
-
-            return Response({
-                'success': True,
-                'message': 'Invoice paid successfully',
-                'transaction_id': transaction.id
-            })
-
-        except Exception as e:
-            logger.error(f"Error paying invoice {invoice.id}: {str(e)}")
+            bot = get_object_or_404(QuantumAIBot, id=bot_id, user=request.user)
+            
+            serializer = QuantumAIDepositSerializer(data=request.data)
+            if serializer.is_valid():
+                serializer.save(user=request.user, quantum_bot=bot)
+                
+                return Response({
+                    'success': True,
+                    'message': 'Deposit created successfully',
+                    'deposit': serializer.data
+                }, status=status.HTTP_201_CREATED)
+            
             return Response({
                 'success': False,
-                'error': 'Failed to process payment'
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        except Exception as e:
+            logger.error(f"Error creating deposit: {str(e)}")
+            return Response({
+                'success': False,
+                'error': 'Failed to create deposit'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    @action(detail=True, methods=['get'])
-    def receipt(self, request, pk=None):
-        """Get invoice receipt details."""
-        invoice = self.get_object()
 
-        if invoice.status != 'paid':
-            return Response({
-                'success': False,
-                'error': 'Invoice is not paid'
-            }, status=status.HTTP_400_BAD_REQUEST)
+class ApproveDepositView(APIView):
+    """
+    Approve a pending deposit (admin only).
+    """
+    permission_classes = [IsAdminUser]
 
-        transaction = Transaction.objects.filter(
-            invoice=invoice,
-            status='completed'
-        ).first()
-
-        if not transaction:
-            return Response({
-                'success': False,
-                'error': 'No transaction found for this invoice'
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        receipt_data = {
-            'invoice': {
-                'id': invoice.id,
-                'number': invoice.invoice_number,
-                'amount': invoice.amount,
-                'description': invoice.description,
-                'created_at': invoice.created_at,
-                'paid_at': invoice.paid_at
-            },
-            'transaction': {
-                'id': transaction.id,
-                'amount': transaction.amount,
-                'transaction_id': transaction.transaction_id,
-                'payment_method': transaction.payment_method.method_type if transaction.payment_method else None,
-                'completed_at': transaction.updated_at
-            },
-            'user': {
-                'email': request.user.email,
-                'name': request.user.get_full_name() or request.user.email
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'notes': openapi.Schema(type=openapi.TYPE_STRING),
+                'usdt_amount': openapi.Schema(type=openapi.TYPE_NUMBER),
             }
-        }
-
-        return Response({
-            'success': True,
-            'receipt': receipt_data
-        })
-
-
-class WithdrawalRequestViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for managing withdrawal requests.
-    """
-    serializer_class = WithdrawalRequestSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        return WithdrawalRequest.objects.filter(user=self.request.user).order_by('-created_at')
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
-
-    @action(detail=True, methods=['post'])
-    def cancel(self, request, pk=None):
-        """Cancel a withdrawal request."""
-        withdrawal = self.get_object()
-
-        if withdrawal.status not in ['pending', 'processing']:
-            return Response({
-                'success': False,
-                'error': 'Withdrawal cannot be cancelled'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        withdrawal.status = 'cancelled'
-        withdrawal.cancelled_at = timezone.now()
-        withdrawal.notes = request.data.get('notes', withdrawal.notes)
-        withdrawal.save()
-
-        return Response({
-            'success': True,
-            'message': 'Withdrawal request cancelled successfully'
-        })
-
-
-class PaymentGatewayViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    ViewSet for payment gateway information.
-    """
-    serializer_class = PaymentGatewaySerializer
-    queryset = PaymentGateway.objects.filter(is_active=True)
-
-    @action(detail=True, methods=['get'])
-    def supported_methods(self, request, pk=None):
-        """Get supported payment methods for a gateway."""
-        gateway = self.get_object()
-        return Response({
-            'success': True,
-            'gateway': gateway.name,
-            'supported_methods': gateway.supported_methods,
-            'currencies': gateway.supported_currencies,
-            'fees': gateway.transaction_fees
-        })
-
-
-class RefundViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for managing refunds.
-    """
-    serializer_class = RefundSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        return Refund.objects.filter(user=self.request.user).order_by('-created_at')
-
-    @action(detail=True, methods=['post'])
-    def approve(self, request, pk=None):
-        """Approve a refund (admin only)."""
-        if not request.user.is_staff:
-            return Response({
-                'success': False,
-                'error': 'Permission denied'
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        refund = self.get_object()
-
-        if refund.status != 'pending':
-            return Response({
-                'success': False,
-                'error': 'Refund cannot be approved'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        # Process refund
-        refund.status = 'approved'
-        refund.processed_at = timezone.now()
-        refund.processed_by = request.user
-        refund.admin_notes = request.data.get('admin_notes', '')
-        refund.save()
-
-        return Response({
-            'success': True,
-            'message': 'Refund approved successfully'
-        })
-
-    @action(detail=False, methods=['get'])
-    def by_transaction(self, request):
-        """Get refunds for a specific transaction."""
-        transaction_id = request.query_params.get('transaction_id', None)
-        if transaction_id:
-            try:
-                transaction = Transaction.objects.get(
-                    id=transaction_id,
-                    user=request.user
-                )
-                refunds = Refund.objects.filter(transaction=transaction)
-                serializer = self.get_serializer(refunds, many=True)
-                return Response(serializer.data)
-            except Transaction.DoesNotExist:
+        ),
+        responses={200: openapi.Response('Deposit approved')}
+    )
+    def post(self, request, deposit_id):
+        """Approve a deposit."""
+        try:
+            deposit = get_object_or_404(QuantumAIDeposit, id=deposit_id)
+            
+            if deposit.status != 'pending':
                 return Response({
                     'success': False,
-                    'error': 'Transaction not found'
-                }, status=status.HTTP_404_NOT_FOUND)
+                    'error': 'Deposit is not in pending status'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            notes = request.data.get('notes', '')
+            usdt_amount = request.data.get('usdt_amount')
+            
+            if usdt_amount:
+                deposit.usdt_amount = Decimal(str(usdt_amount))
+            
+            deposit.approve(request.user, notes)
+            
+            return Response({
+                'success': True,
+                'message': 'Deposit approved successfully'
+            })
+            
+        except Exception as e:
+            logger.error(f"Error approving deposit {deposit_id}: {str(e)}")
+            return Response({
+                'success': False,
+                'error': 'Failed to approve deposit'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        return Response({'error': 'Transaction ID parameter required'},
-                      status=status.HTTP_400_BAD_REQUEST)
+
+class RejectDepositView(APIView):
+    """
+    Reject a pending deposit (admin only).
+    """
+    permission_classes = [IsAdminUser]
+
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'reason': openapi.Schema(type=openapi.TYPE_STRING, description='Reason for rejection'),
+            },
+            required=['reason']
+        ),
+        responses={200: openapi.Response('Deposit rejected')}
+    )
+    def post(self, request, deposit_id):
+        """Reject a deposit."""
+        try:
+            deposit = get_object_or_404(QuantumAIDeposit, id=deposit_id)
+            
+            if deposit.status != 'pending':
+                return Response({
+                    'success': False,
+                    'error': 'Deposit is not in pending status'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            reason = request.data.get('reason', '')
+            if not reason:
+                return Response({
+                    'success': False,
+                    'error': 'Reason is required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            deposit.reject(request.user, reason)
+            
+            return Response({
+                'success': True,
+                'message': 'Deposit rejected successfully'
+            })
+            
+        except Exception as e:
+            logger.error(f"Error rejecting deposit {deposit_id}: {str(e)}")
+            return Response({
+                'success': False,
+                'error': 'Failed to reject deposit'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

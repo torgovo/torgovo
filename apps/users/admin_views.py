@@ -10,7 +10,8 @@ from django.db.models import Count, Sum, Q
 from django.utils import timezone
 from datetime import timedelta
 
-from apps.bots.models import WebhookAlert, GridBot, MartingaleBot, QuantumAIBot, Order, BlockchainAddress
+from apps.bots.models import WebhookAlert, GridBot, MartingaleBot, QuantumAIBot, Order
+from apps.payments.models import BlockchainAddress, QuantumAIDeposit as Deposit
 from core.permissions import IsAdminUser
 from core.pagination import StandardResultsSetPagination
 from .admin_serializers import UserAdminSerializer, UserAdminDetailSerializer

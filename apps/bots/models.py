@@ -489,5 +489,41 @@ class RunningThreads(TimeStampedModel):
         db_table = 'bots_running_threads'
 
 
+class BotExecutionLog(TimeStampedModel):
+    """
+    Log of bot execution activities and signals.
+    """
+    LEVEL_CHOICES = [
+        ('info', 'Info'),
+        ('warning', 'Warning'),
+        ('error', 'Error'),
+        ('critical', 'Critical'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='bot_logs'
+    )
+    bot_type = models.CharField(max_length=50)
+    bot_id = models.UUIDField()
+    action = models.CharField(max_length=100)
+    message = models.TextField()
+    level = models.CharField(max_length=20, choices=LEVEL_CHOICES, default='info')
+    data = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'bots_execution_logs'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'bot_type', 'bot_id']),
+            models.Index(fields=['level']),
+            models.Index(fields=['-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.bot_type} log: {self.action} - {self.user.email}"
+
+
 
 

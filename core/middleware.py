@@ -7,7 +7,6 @@ import logging
 from django.utils.deprecation import MiddlewareMixin
 from django.http import JsonResponse
 from django.conf import settings
-from django.contrib.auth.models import AnonymousUser
 
 logger = logging.getLogger('apps')
 
@@ -28,9 +27,14 @@ class RequestLoggingMiddleware(MiddlewareMixin):
 
         # Log request details
         user_info = 'Anonymous'
-        if hasattr(request, 'user') and not isinstance(request.user, AnonymousUser):
-            if request.user.is_authenticated:
-                user_info = f"User:{request.user.email}"
+        # Safely access user attribute (might not exist if AuthenticationMiddleware hasn't run yet)
+        user = getattr(request, 'user', None)
+        if user and hasattr(user, 'is_authenticated'):
+            try:
+                if user.is_authenticated:
+                    user_info = f"User:{user.email}"
+            except:
+                pass
 
         logger.info(
             f"[{request.request_id}] {request.method} {request.path} - {user_info}",
@@ -188,29 +192,39 @@ class RateLimitMiddleware(MiddlewareMixin):
 
     def get_client_id(self, request):
         """Get client identifier for rate limiting."""
-        if hasattr(request, 'user') and request.user.is_authenticated:
-            return f"user:{request.user.id}"
+        user = getattr(request, 'user', None)
+        if user and hasattr(user, 'is_authenticated'):
+            try:
+                if user.is_authenticated:
+                    return f"user:{user.id}"
+            except:
+                pass
+        
+        # Use IP address for anonymous users
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            ip = x_forwarded_for.split(',')[0].strip()
         else:
-            # Use IP address for anonymous users
-            x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-            if x_forwarded_for:
-                ip = x_forwarded_for.split(',')[0].strip()
-            else:
-                ip = request.META.get('REMOTE_ADDR', 'unknown')
-            return f"ip:{ip}"
+            ip = request.META.get('REMOTE_ADDR', 'unknown')
+        return f"ip:{ip}"
 
     def get_rate_limit(self, request):
         """Get rate limit based on user subscription."""
-        if hasattr(request, 'user') and request.user.is_authenticated:
-            if request.user.is_staff or request.user.is_superuser:
-                return 5000  # Admin: 5000 requests per minute
+        user = getattr(request, 'user', None)
+        if user and hasattr(user, 'is_authenticated'):
+            try:
+                if user.is_authenticated:
+                    if user.is_staff or user.is_superuser:
+                        return 5000  # Admin: 5000 requests per minute
 
-            user_profile = getattr(request.user, 'profile', None)
-            if user_profile:
-                if user_profile.subscription_plan == 'premium':
-                    return 1000  # Premium: 1000 requests per minute
-                elif user_profile.subscription_plan == 'enterprise':
-                    return 3000  # Enterprise: 3000 requests per minute
+                    user_profile = getattr(user, 'profile', None)
+                    if user_profile:
+                        if user_profile.subscription_plan == 'premium':
+                            return 1000  # Premium: 1000 requests per minute
+                        elif user_profile.subscription_plan == 'enterprise':
+                            return 3000  # Enterprise: 3000 requests per minute
+            except:
+                pass
 
         return 100  # Default: 100 requests per minute
 
@@ -218,9 +232,12 @@ class RateLimitMiddleware(MiddlewareMixin):
         """Remove old rate limit entries."""
         keys_to_remove = []
         for key in self.rate_limits:
-            entry_time = int(key.split(':')[1])
-            if current_time - entry_time > 5:  # Keep last 5 minutes
-                keys_to_remove.append(key)
+            try:
+                entry_time = int(key.split(':')[-1])
+                if current_time - entry_time > 5:  # Keep last 5 minutes
+                    keys_to_remove.append(key)
+            except:
+                pass
 
         for key in keys_to_remove:
             del self.rate_limits[key]

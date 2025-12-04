@@ -56,6 +56,7 @@ services:
       - FRONTEND_URL=${FRONTEND_URL}
       - BASE_URL=${BASE_URL}
     volumes:
+      - .:/app
       - static_volume:/app/staticfiles
       - media_volume:/app/media
     ports:
@@ -70,7 +71,7 @@ services:
       sh -c "
         python manage.py migrate &&
         python manage.py collectstatic --noinput &&
-        gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 300
+        python manage.py runserver 0.0.0.0:8000
       "
 
   # Celery Worker

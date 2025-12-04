@@ -9,6 +9,32 @@ from core.models import TimeStampedModel, SoftDeleteModel
 from core.utils import encrypt_api_key, decrypt_api_key
 
 
+
+class Exchange(TimeStampedModel):
+    """
+    Configuration for supported cryptocurrency exchanges.
+    """
+    name = models.CharField(max_length=20, unique=True)
+    display_name = models.CharField(max_length=50)
+    api_base_url = models.URLField(blank=True)
+    websocket_url = models.URLField(blank=True)
+    is_active = models.BooleanField(default=True)
+    supports_testnet = models.BooleanField(default=True)
+    supported_features = models.JSONField(default=list, help_text="List of supported features (spot, futures, etc.)")
+    rate_limit_per_minute = models.PositiveIntegerField(default=1200)
+    fee_rates = models.JSONField(default=dict, help_text="Standard fee rates")
+
+    class Meta:
+        db_table = 'exchanges_exchange'
+        indexes = [
+            models.Index(fields=['name']),
+            models.Index(fields=['is_active']),
+        ]
+
+    def __str__(self):
+        return self.display_name
+
+
 class ExchangeCredentials(SoftDeleteModel):
     """
     Encrypted storage for exchange API credentials.
