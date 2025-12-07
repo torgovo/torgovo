@@ -127,7 +127,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # Custom User Model
-AUTH_USER_MODEL = 'authentication.CustomUser'
+AUTH_USER_MODEL = 'users.CustomUser'
 
 # Internationalization
 LANGUAGE_CODE = 'en-us'

@@ -1,16 +1,11 @@
 from django.contrib import admin
-from django.contrib.auth.admin import UserAdmin
 from .models import (
-    CustomUser, UserProfile, EmailVerification,
+    UserProfile, EmailVerification,
     PhoneVerification, PasswordResetToken, LoginAttempt
 )
+# NOTE: CustomUser admin is registered in apps.users.admin 
+# since AUTH_USER_MODEL = 'users.CustomUser'
 
-@admin.register(CustomUser)
-class CustomUserAdmin(UserAdmin):
-    list_display = ('email', 'username', 'phone_number', 'is_phone_verified', 'is_email_verified', 'is_staff')
-    list_filter = ('is_staff', 'is_superuser', 'is_active', 'groups')
-    search_fields = ('email', 'username', 'phone_number')
-    ordering = ('email',)
 
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):

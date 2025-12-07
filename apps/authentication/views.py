@@ -16,8 +16,10 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from .models import (
     EmailVerification, PhoneVerification,
-    PasswordResetToken, LoginAttempt
+    PasswordResetToken, LoginAttempt, UserProfile
 )
+# Import CustomUser from users app (AUTH_USER_MODEL = 'users.CustomUser')
+from apps.users.models import CustomUser
 from .serializers import (
     UserRegistrationSerializer, UserLoginSerializer,
     UserProfileSerializer, UserSerializer,

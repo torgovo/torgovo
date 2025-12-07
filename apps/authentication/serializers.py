@@ -11,9 +11,11 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import (
-    CustomUser, UserProfile, EmailVerification,
+    UserProfile, EmailVerification,
     PhoneVerification, PasswordResetToken
 )
+# Import CustomUser from users app (AUTH_USER_MODEL = 'users.CustomUser')
+from apps.users.models import CustomUser
 from core.utils import generate_secret_key
 
 

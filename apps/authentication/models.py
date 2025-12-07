@@ -1,80 +1,16 @@
 """
 Authentication models for Torgovo Crypto Trading Platform
+Compatible with users.CustomUser as AUTH_USER_MODEL
 """
-import uuid
-from django.contrib.auth.models import AbstractUser
+
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
-from django.core.validators import RegexValidator
-from django.contrib.auth.validators import UnicodeUsernameValidator
 from core.models import TimeStampedModel, SoftDeleteModel
 from core.utils import encrypt_api_key, decrypt_api_key
 
-
-class CustomUser(AbstractUser):
-    """
-    Custom user model for Torgovo platform.
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    email = models.EmailField(unique=True)
-    phone_number = models.CharField(
-        max_length=20,
-        unique=True,
-        null=True,
-        blank=True,
-        validators=[
-            RegexValidator(
-                regex=r'^\+?1?\d{9,15}$',
-                message="Phone number must be entered in the format: '+999999999'. Up to 15 digits allowed."
-            )
-        ]
-    )
-    is_phone_verified = models.BooleanField(default=False)
-    is_email_verified = models.BooleanField(default=False)
-    timezone = models.CharField(max_length=50, default='UTC')
-    two_factor_enabled = models.BooleanField(default=False)
-    two_factor_secret = models.CharField(max_length=32, blank=True)
-    last_login_ip = models.GenericIPAddressField(null=True, blank=True)
-
-    # Trading Credentials (for Bot compatibility)
-    API = models.CharField(max_length=255, blank=True)
-    SECRET = models.CharField(max_length=255, blank=True)
-    Demo = models.BooleanField(default=False)
-    
-    # Telegram Configuration
-    Token = models.CharField(max_length=255, blank=True, help_text="Telegram Bot Token")
-    Bot_ID = models.CharField(max_length=255, blank=True, help_text="Telegram Chat ID")
-    Channel_Token = models.CharField(max_length=255, blank=True, help_text="Telegram Channel Bot Token")
-    Channel_Bot_ID = models.CharField(max_length=255, blank=True, help_text="Telegram Channel ID")
-
-    USERNAME_FIELD = 'email'
-    REQUIRED_FIELDS = ['username']
-
-    class Meta:
-        db_table = 'auth_users'
-        indexes = [
-            models.Index(fields=['email']),
-            models.Index(fields=['phone_number']),
-            models.Index(fields=['is_active']),
-        ]
-
-    def __str__(self):
-        return self.email
-
-    @property
-    def full_name(self):
-        """Get user's full name."""
-        return f"{self.first_name} {self.last_name}".strip()
-
-    @property
-    def has_completed_profile(self):
-        """Check if user has completed their profile."""
-        return bool(
-            self.first_name and
-            self.last_name and
-            (self.is_phone_verified or self.is_email_verified)
-        )
+# NOTE: CustomUser model is defined in apps.users.models
+# This file contains authentication-related models only
 
 
 class UserProfile(TimeStampedModel):
@@ -89,7 +25,7 @@ class UserProfile(TimeStampedModel):
     ]
 
     user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,
+        settings.AUTH_USER_MODEL,  # FIXED: Restored proper reference
         on_delete=models.CASCADE,
         related_name='profile'
     )
@@ -123,7 +59,7 @@ class UserProfile(TimeStampedModel):
     # Referral system
     referral_code = models.CharField(max_length=20, unique=True, blank=True)
     referred_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        settings.AUTH_USER_MODEL,  # FIXED: Restored proper reference
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -187,7 +123,7 @@ class UserProfile(TimeStampedModel):
     def can_create_more_bots(self):
         """Check if user can create more bots."""
         from django.apps import apps
-        
+
         WebhookAlert = apps.get_model('bots', 'WebhookAlert')
         GridBot = apps.get_model('bots', 'GridBot')
         MartingaleBot = apps.get_model('bots', 'MartingaleBot')
@@ -235,7 +171,7 @@ class EmailVerification(TimeStampedModel):
     Email verification tokens.
     """
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        settings.AUTH_USER_MODEL,  # FIXED: Restored proper reference
         on_delete=models.CASCADE,
         related_name='email_verifications'
     )
@@ -273,7 +209,7 @@ class PhoneVerification(TimeStampedModel):
     Phone verification codes.
     """
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        settings.AUTH_USER_MODEL,  # FIXED: Restored proper reference
         on_delete=models.CASCADE,
         related_name='phone_verifications'
     )
@@ -324,7 +260,7 @@ class PasswordResetToken(TimeStampedModel):
     Password reset tokens.
     """
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        settings.AUTH_USER_MODEL,  # FIXED: Restored proper reference
         on_delete=models.CASCADE,
         related_name='password_reset_tokens'
     )

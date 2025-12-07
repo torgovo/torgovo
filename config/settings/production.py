@@ -1,3 +1,31 @@
+"""
+Production settings for Torgovo Crypto Trading Platform
+"""
+from .base import *
+from decouple import config
+
+# Security settings for production
+DEBUG = False
+SECRET_KEY = config('DJANGO_SECRET_KEY')
+
+ALLOWED_HOSTS = config(
+    'ALLOWED_HOSTS',
+    default='',
+    cast=lambda v: [s.strip() for s in v.split(',')]
+)
+
+# HTTPS and Security
+SECURE_SSL_REDIRECT = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+
+# CORS configuration
+CORS_ALLOWED_ORIGINS = config(
+    'CORS_ALLOWED_ORIGINS',
+    default='',
     cast=lambda v: [s.strip() for s in v.split(',')]
 )
 CORS_ALLOW_CREDENTIALS = True

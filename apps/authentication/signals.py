@@ -8,7 +8,9 @@ from django.dispatch import receiver
 from django.contrib.auth.signals import user_logged_in, user_logged_out
 from django.core.mail import send_mail
 from django.conf import settings
-from .models import CustomUser, UserProfile
+from .models import UserProfile
+# Import CustomUser from users app (AUTH_USER_MODEL = 'users.CustomUser')
+from apps.users.models import CustomUser
 
 
 def generate_otp_code(length=6):
