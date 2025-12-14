@@ -2,11 +2,16 @@
 Payment and deposit models for Quantum AI system
 """
 import uuid
+import pytz
 from decimal import Decimal
 from django.db import models
 from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.utils import timezone
 from core.models import TimeStampedModel, SoftDeleteModel
+from apps.exchanges.models import ExchangeCredentials
+
+User = settings.AUTH_USER_MODEL
 
 
 class SubscriptionPlan(TimeStampedModel):
@@ -73,7 +78,7 @@ class QuantumAIDeposit(SoftDeleteModel):
     currency = models.CharField(max_length=10)
     blockchain = models.CharField(max_length=20)
     from_address = models.CharField(max_length=255)
-    transaction_hash = models.CharField(max_length=255, unique=True)
+    transaction_hash = models.CharField(max_length=255, unique=True, db_index=True)
     block_number = models.BigIntegerField(null=True, blank=True)
     block_confirmations = models.PositiveIntegerField(default=0)
     required_confirmations = models.PositiveIntegerField(default=6)
@@ -378,3 +383,178 @@ class ReferralPayout(SoftDeleteModel):
 
     def __str__(self):
         return f"Referral: {self.amount} - {self.referrer.email}"
+
+
+# ==================== NEW BOT SUBSCRIPTION MODELS ====================
+
+class BotSubscriptionPlan(SoftDeleteModel):
+    """
+    Subscription plans for bot types (custom, grid, martingale, quantum_ai).
+    Separate from general SubscriptionPlan.
+    """
+
+    BOT_TYPE_CHOICES = [
+        ('custom', 'Custom Bot (TradingView)'),
+        ('grid', 'Grid Trading Bot'),
+        ('martingale', 'Martingale Bot'),
+        ('quantum_ai', 'Quantum AI Fund'),
+    ]
+
+    DURATION_CHOICES = [
+        (30, '30 Days'),
+        (90, '90 Days'),
+        (180, '180 Days'),
+        (365, '365 Days'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    bot_type = models.CharField(max_length=20, choices=BOT_TYPE_CHOICES, unique=True)
+    name = models.CharField(max_length=100)
+    price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
+    duration_days = models.IntegerField(choices=DURATION_CHOICES, default=30)
+    description = models.TextField(blank=True)
+    features = models.JSONField(default=list, help_text="List of features included")
+    is_active = models.BooleanField(default=True)
+    requires_approval = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payments_bot_subscription_plans'
+        indexes = [
+            models.Index(fields=['bot_type']),
+            models.Index(fields=['is_active']),
+        ]
+
+    def __str__(self):
+        return f"{self.name} - ${self.price}"
+
+
+class BotSubscription(SoftDeleteModel):
+    """
+    User's subscription to a bot service.
+    Two-step flow: 1) Subscribe 2) Create bot after approval
+    """
+
+    STATUS_CHOICES = [
+        ('pending_payment', 'Pending Payment Upload'),
+        ('pending_approval', 'Pending Admin Approval'),
+        ('active', 'Active'),
+        ('expired', 'Expired'),
+        ('cancelled', 'Cancelled'),
+        ('rejected', 'Rejected'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bot_subscriptions')
+    plan = models.ForeignKey(BotSubscriptionPlan, on_delete=models.CASCADE, related_name='subscriptions')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending_payment', db_index=True)
+
+    # Payment proof
+    payment_screenshot = models.ImageField(upload_to='subscriptions/payments/%Y/%m/%d/', blank=True, null=True)
+    payment_transaction_hash = models.CharField(max_length=255, blank=True, help_text="For crypto payments")
+    payment_blockchain = models.CharField(max_length=20, blank=True, help_text="e.g., BEP20, ERC20, TRC20")
+
+    # Exchange selection (for custom/grid/martingale bots)
+    exchange_name = models.CharField(max_length=20, choices=ExchangeCredentials.EXCHANGE_CHOICES, blank=True)
+
+    # Admin approval fields
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_bot_subscriptions')
+    approved_at = models.DateTimeField(null=True, blank=True)
+    rejected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='rejected_bot_subscriptions')
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True)
+    notes = models.TextField(blank=True, help_text="Admin notes")
+
+    # Timing
+    started_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    # Bot-specific fields
+    webhook_secret = models.CharField(max_length=64, unique=True, blank=True, null=True, help_text="For custom bots")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payments_bot_subscriptions'
+        unique_together = ['user', 'plan']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['approved_at']),
+            models.Index(fields=['expires_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.plan.name} ({self.status})"
+
+    @property
+    def is_expired(self):
+        """Check if subscription has expired"""
+        if not self.expires_at:
+            return False
+        return timezone.now() > self.expires_at
+
+    def get_webhook_json_template(self):
+        """Returns JSON template for TradingView (custom bots only)"""
+        if not self.webhook_secret:
+            return None
+
+        return {
+            "secret": self.webhook_secret,
+            "exchange": self.exchange_name,
+            "action": "{{strategy.order.action}}",
+            "symbol": "{{ticker}}",
+            "amount": "{{order.amount}}",
+            "price": "{{order.price}}"
+        }
+
+    def approve(self, admin_user, notes=""):
+        """
+        Approve subscription and activate it.
+        Creates default PairConfig for grid/martingale bots.
+        """
+        from apps.bots.models import PairConfig
+
+        self.status = 'active'
+        self.approved_by = admin_user
+        self.approved_at = timezone.now()
+        self.started_at = timezone.now()
+        self.expires_at = timezone.now() + timezone.timedelta(days=self.plan.duration_days)
+
+        # Generate webhook secret for custom bots
+        if self.plan.bot_type == 'custom':
+            self.webhook_secret = uuid.uuid4().hex
+
+        self.notes = notes
+        self.save()
+
+        # Create default PairConfig for grid/martingale bots
+        if self.plan.bot_type in ['grid', 'martingale']:
+            PairConfig.objects.get_or_create(
+                user=self.user,
+                subscription=self,
+                pair_symbol=f"{self.exchange_name.upper()}/USDT" if self.exchange_name else "BTC/USDT",
+                bot_type=self.plan.bot_type,
+                defaults={
+                    'slug': f"{self.user.username}-{self.plan.bot_type}",
+                    'favor_levels': 3,
+                    'against_levels': 3,
+                    'favor_level_qty': 0.1,
+                    'against_level_qty': 0.1,
+                    'favor_level_difference': 1.0,
+                    'against_level_difference': 1.0,
+                    'Order_Type': 'market',
+                    'Amount_Type': 'dollar',
+                }
+            )
+
+    def reject(self, admin_user, reason=""):
+        """Reject subscription"""
+        self.status = 'rejected'
+        self.rejected_by = admin_user
+        self.rejected_at = timezone.now()
+        self.rejection_reason = reason
+        self.save()

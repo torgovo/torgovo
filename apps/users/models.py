@@ -5,6 +5,7 @@ Production-ready CustomUser model with trading profile
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.utils.translation import gettext_lazy as _
+# from apps.bots.models import Order
 
 
 class CustomUser(AbstractUser):
@@ -167,10 +168,15 @@ class CustomUser(AbstractUser):
 
     def update_trading_stats(self):
         """Recalculate trading statistics from bot data"""
-        from apps.investments.models import Order
+        # Import inside method to avoid circular import
+        from apps.bots.models import Order
 
-        orders = Order.objects.filter(user=self)
-        self.total_trades_executed = orders.count()
-        self.total_volume_traded = sum([o.quantity * o.price for o in orders])
-        self.total_profit_loss = sum([o.profit_loss for o in orders])
-        self.save()
+        try:
+            orders = Order.objects.filter(user=self)
+            self.total_trades_executed = orders.count()
+            self.total_volume_traded = sum([o.quantity * o.price for o in orders])
+            self.total_profit_loss = sum([o.profit_loss for o in orders])
+            self.save()
+        except Exception as e:
+            # If Order model doesn't exist yet (during migrations), skip
+            print(f"Could not update trading stats: {e}")

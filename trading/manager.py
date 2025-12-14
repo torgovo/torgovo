@@ -4,7 +4,7 @@ Trading Manager for handling multiple trading bots across different users and ex
 import threading
 import logging
 from typing import Dict, Any, Optional
-from django.conf import settings
+from django.utils import timezone
 from django.contrib.auth import get_user_model
 from .exchanges.binance import BinanceBot
 from .exchanges.bybit import BybitBot
@@ -46,13 +46,27 @@ class TradingManager:
 
         Args:
             user: Django user instance
-            bot_type: Type of bot (grid, martingale, quantum_ai)
+            bot_type: Type of bot (grid, martingale, quantum_ai, custom)
             config: Bot configuration dictionary
 
         Returns:
             Bot instance or None if creation fails
         """
+        from apps.payments.models import BotSubscription
+
         bot_key = self._generate_bot_key(user, bot_type, config)
+
+        # Validate subscription exists and is active
+        try:
+            subscription = BotSubscription.objects.get(
+                user=user,
+                plan__bot_type=bot_type,
+                status='active'
+            )
+            config['subscription_id'] = str(subscription.id)  # Pass to bot if needed
+        except BotSubscription.DoesNotExist:
+            self.logger.error(f"No active {bot_type} subscription for user {user.id}")
+            raise ValueError(f"No active subscription found. Please subscribe first.")
 
         with self._lock:
             # Check if bot already exists
@@ -71,6 +85,10 @@ class TradingManager:
                 elif bot_type == 'quantum_ai':
                     bot = self._create_quantum_ai_bot(user, config)
                     self._quantum_ai_bots[bot_key] = bot
+                elif bot_type == 'custom':
+                    # Custom bots use webhook, not TradingManager
+                    self.logger.warning("Custom bots are managed via webhooks, not TradingManager")
+                    return None
                 else:
                     self.logger.error(f"Unsupported bot type: {bot_type}")
                     return None
@@ -103,7 +121,6 @@ class TradingManager:
 
     def _create_quantum_ai_bot(self, user: User, config: Dict[str, Any]) -> QuantumAITradingStrategy:
         """Create quantum AI trading bot."""
-        # Quantum AI bots can trade on multiple exchanges
         exchange_bots = {}
         for exchange_name in config.get('exchanges', []):
             exchange_bots[exchange_name] = self._get_exchange_bot(user, exchange_name)
@@ -152,6 +169,7 @@ class TradingManager:
     def start_bot(self, user: User, bot_type: str, config: Dict[str, Any]) -> bool:
         """
         Start a specific bot.
+        Validates subscription before starting.
 
         Args:
             user: Django user instance
@@ -161,7 +179,20 @@ class TradingManager:
         Returns:
             True if bot started successfully
         """
+        from apps.payments.models import BotSubscription
+
         bot_key = self._generate_bot_key(user, bot_type, config)
+
+        # Verify subscription is active before starting
+        try:
+            subscription = BotSubscription.objects.get(
+                user=user,
+                plan__bot_type=bot_type,
+                status='active'
+            )
+        except BotSubscription.DoesNotExist:
+            self.logger.error(f"Cannot start bot: No active {bot_type} subscription for {user.id}")
+            return False
 
         with self._lock:
             bot = self._bots.get(bot_key)
@@ -177,6 +208,9 @@ class TradingManager:
             )
             bot_thread.start()
 
+            # Update database status
+            self._update_bot_status(user, bot_type, config, is_running=True)
+
             self.logger.info(f"Started {bot_type} bot {bot_key}")
             return True
 
@@ -189,7 +223,6 @@ class TradingManager:
                 bot.run()
             else:
                 self.logger.error(f"Bot {bot_key} doesn't have start() or run() method")
-
         except Exception as e:
             self.logger.error(f"Error running {bot_type} bot {bot_key}: {e}")
 
@@ -217,25 +250,56 @@ class TradingManager:
                         bot.shutdown()
 
                     # Remove from active bots
-                    if bot_key in self._bots:
-                        del self._bots[bot_key]
+                    self._remove_bot_from_dictionaries(bot_key, bot_type)
 
-                    # Remove from specific bot dictionaries
-                    if bot_type == 'grid' and bot_key in self._grid_bots:
-                        del self._grid_bots[bot_key]
-                    elif bot_type == 'martingale' and bot_key in self._martingale_bots:
-                        del self._martingale_bots[bot_key]
-                    elif bot_type == 'quantum_ai' and bot_key in self._quantum_ai_bots:
-                        del self._quantum_ai_bots[bot_key]
+                    # Update database status
+                    self._update_bot_status(user, bot_type, config, is_running=False)
 
                     self.logger.info(f"Stopped and removed {bot_type} bot {bot_key}")
                     return True
-
                 except Exception as e:
                     self.logger.error(f"Error stopping {bot_type} bot {bot_key}: {e}")
                     return False
-
             return False
+
+    def _remove_bot_from_dictionaries(self, bot_key: str, bot_type: str):
+        """Helper to remove bot from all tracking dictionaries."""
+        if bot_key in self._bots:
+            del self._bots[bot_key]
+        if bot_type == 'grid' and bot_key in self._grid_bots:
+            del self._grid_bots[bot_key]
+        elif bot_type == 'martingale' and bot_key in self._martingale_bots:
+            del self._martingale_bots[bot_key]
+        elif bot_type == 'quantum_ai' and bot_key in self._quantum_ai_bots:
+            del self._quantum_ai_bots[bot_key]
+
+    def _update_bot_status(self, user: User, bot_type: str, config: Dict[str, Any], is_running: bool):
+        """Update bot running status in database."""
+        from apps.bots.models import GridBot, MartingaleBot
+
+        try:
+            if bot_type == 'grid':
+                GridBot.objects.filter(
+                    user=user,
+                    trading_pair=config['trading_pair'],
+                    exchange_name=config['exchange_name']
+                ).update(
+                    is_running=is_running,
+                    started_at=timezone.now() if is_running else None,
+                    stopped_at=timezone.now() if not is_running else None
+                )
+            elif bot_type == 'martingale':
+                MartingaleBot.objects.filter(
+                    user=user,
+                    trading_pair=config['trading_pair'],
+                    exchange_name=config['exchange_name']
+                ).update(
+                    is_running=is_running,
+                    started_at=timezone.now() if is_running else None,
+                    stopped_at=timezone.now() if not is_running else None
+                )
+        except Exception as e:
+            self.logger.error(f"Failed to update bot status in DB: {e}")
 
     def get_bot(self, user: User, bot_type: str, config: Dict[str, Any]) -> Optional[Any]:
         """
@@ -264,6 +328,8 @@ class TradingManager:
         Returns:
             True if bot was refreshed successfully
         """
+        from apps.bots.models import PairConfig
+
         bot_key = self._generate_bot_key(user, bot_type, config)
 
         with self._lock:
@@ -273,37 +339,19 @@ class TradingManager:
                 return False
 
             try:
-                # Get fresh configuration from database based on bot type
-                if bot_type == 'grid':
-                    from apps.bots.models import GridBot
-                    db_bot = GridBot.objects.get(
-                        user=user,
-                        bot_name=config['bot_name'],
-                        is_deleted=False
-                    )
-                elif bot_type == 'martingale':
-                    from apps.bots.models import MartingaleBot
-                    db_bot = MartingaleBot.objects.get(
-                        user=user,
-                        bot_name=config['bot_name'],
-                        is_deleted=False
-                    )
-                elif bot_type == 'quantum_ai':
-                    from apps.bots.models import QuantumAIBot
-                    db_bot = QuantumAIBot.objects.get(
-                        user=user,
-                        bot_name=config['bot_name'],
-                        is_deleted=False
-                    )
-                else:
-                    self.logger.error(f"Unknown bot type for refresh: {bot_type}")
-                    return False
+                # Get fresh configuration from database
+                pair_config = PairConfig.objects.get(
+                    subscription__user=user,
+                    pair_symbol=config['trading_pair'],
+                    bot_type=bot_type,
+                    subscription__status='active'
+                )
 
-                # Update bot configuration
-                if hasattr(bot, 'update_config'):
-                    bot.update_config(db_bot)
-                elif hasattr(bot, 'refresh_config'):
-                    bot.refresh_config(db_bot)
+                # Update bot's configuration (your bots must have this method)
+                if hasattr(bot, 'config'):
+                    bot.config = pair_config
+                elif hasattr(bot, 'update_config'):
+                    bot.update_config(pair_config)
 
                 self.logger.info(f"Refreshed configuration for {bot_type} bot {bot_key}")
                 return True
@@ -373,7 +421,7 @@ class TradingManager:
                         'type': bot_type,
                         'bot': bot,
                         'status': 'running' if hasattr(bot, 'is_running') and bot.is_running else 'stopped',
-                        'created_at': getattr(bot, 'created_at', None),
+                        'config': getattr(bot, 'config', {}),
                     }
 
         return user_bots

@@ -4,37 +4,52 @@ URL patterns for trading bot endpoints
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-# Import views
-# from . import views as bot_views
-# from . import indicators_views
+from apps.payments import views
 
+# DRF Router for bot viewsets
 router = DefaultRouter()
-# router.register(r'webhook-alerts', bot_views.WebhookAlertViewSet)
-# router.register(r'grid-bots', bot_views.GridBotViewSet)
-# router.register(r'martingale-bots', bot_views.MartingaleBotViewSet)
-# router.register(r'quantum-ai-bots', bot_views.QuantumAIBotViewSet)
-# router.register(r'orders', bot_views.OrderViewSet)
+router.register(r'custom-bots', views.CustomBotViewSet, basename='custombot')
+router.register(r'grid-bots', views.GridBotViewSet, basename='gridbot')
+router.register(r'martingale-bots', views.MartingaleBotViewSet, basename='martingalebot')
+router.register(r'quantum-funds', views.QuantumAIFundViewSet, basename='quantumfund')
+router.register(r'quantum-investments', views.QuantumAIInvestmentViewSet, basename='quantuminvestment')
+router.register(r'pair-configs', views.PairConfigViewSet, basename='pairconfig')
+router.register(r'orders', views.OrderViewSet, basename='order')
+router.register(r'indicators', views.IndicatorViewSet, basename='indicator')
+router.register(r'telegram-plans', views.TelegramSignalPlanViewSet, basename='telegramplan')
+router.register(r'telegram-subscriptions', views.TelegramSignalSubscriptionViewSet, basename='telegramsub')
 
 app_name = 'bots'
 
 urlpatterns = [
-    # Main API endpoints
+    # DRF Viewset routes
     path('', include(router.urls)),
 
-    # Bot control endpoints
-    # path('grid/<uuid:bot_id>/start/', bot_views.start_grid_bot, name='start_grid_bot'),
-    # path('grid/<uuid:bot_id>/stop/', bot_views.stop_grid_bot, name='stop_grid_bot'),
-    # path('martingale/<uuid:bot_id>/start/', bot_views.start_martingale_bot, name='start_martingale_bot'),
-    # path('martingale/<uuid:bot_id>/stop/', bot_views.stop_martingale_bot, name='stop_martingale_bot'),
-    # path('quantum-ai/<uuid:bot_id>/start/', bot_views.start_quantum_ai_bot, name='start_quantum_ai_bot'),
-    # path('quantum-ai/<uuid:bot_id>/stop/', bot_views.stop_quantum_ai_bot, name='stop_quantum_ai_bot'),
+    # Webhook endpoint (TradingView)
+    path('webhook/<str:user_id>/',
+         views.TradingViewWebhookView.as_view(),
+         name='tradingview-webhook'),
 
-    # Technical indicators endpoints
-    # path('indicators/ema/', indicators_views.EMAIndicatorView.as_view(), name='ema_webhook'),
-    # path('indicators/rsi/', indicators_views.RSIIndicatorView.as_view(), name='rsi_webhook'),
-    # path('indicators/bollinger-bands/', indicators_views.BollingerBandsView.as_view(), name='bb_webhook'),
+    # Old indicator endpoints for manual admin bot
+    path('indicators/binance/<str:username>/<str:pair>/',
+         views.IndicatorView.as_view(),
+         name='binance-indicator'),
+    path('indicators/bybit/<str:username>/<str:pair>/',
+         views.BybitIndicatorView.as_view(),
+         name='bybit-indicator'),
+    path('indicators/close/<str:username>/<str:pair>/',
+         views.CustomOrderClosingView.as_view(),
+         name='close-order'),
+    path('indicators/open/<str:username>/<str:pair>/<str:side>/',
+         views.CustomOrderOpeningView.as_view(),
+         name='open-order'),
+    path('indicators/ema/', views.BinanceEMAView.as_view(), name='binance-ema-webhook'),
+    path('indicators/rsi/', views.BinanceRSIView.as_view(), name='binance-rsi-webhook'),
+    path('indicators/bb/', views.BinanceBBView.as_view(), name='binance-bb-webhook'),
 
-    # Bot statistics and monitoring
-    # path('stats/overview/', bot_views.bots_overview, name='bots_overview'),
-    # path('stats/performance/<uuid:bot_id>/', bot_views.bot_performance, name='bot_performance'),
+    # Bot control actions
+    path('grid/<str:bot_id>/start/', views.GridBotViewSet.as_view({'post': 'start'}), name='grid-bot-start'),
+    path('grid/<str:bot_id>/stop/', views.GridBotViewSet.as_view({'post': 'stop'}), name='grid-bot-stop'),
+    path('martingale/<str:bot_id>/start/', views.MartingaleBotViewSet.as_view({'post': 'start'}), name='martingale-bot-start'),
+    path('martingale/<str:bot_id>/stop/', views.MartingaleBotViewSet.as_view({'post': 'stop'}), name='martingale-bot-stop'),
 ]
