@@ -8,6 +8,14 @@ from django.contrib import messages
 from apps.payments.models import BotSubscriptionPlan, BotSubscription
 from services.subscription_service import SubscriptionService
 
+
+@admin.register(BotSubscriptionPlan)
+class BotSubscriptionPlanAdmin(admin.ModelAdmin):
+    list_display = ['name', 'bot_type', 'price', 'duration_days', 'is_active']
+    list_filter = ['bot_type', 'is_active']
+    search_fields = ['name']
+
+
 @admin.register(BotSubscription)
 class BotSubscriptionAdmin(admin.ModelAdmin):
     list_display = ['user', 'plan', 'status', 'payment_proof', 'approve_reject_buttons']
@@ -92,8 +100,3 @@ class BotSubscriptionAdmin(admin.ModelAdmin):
         # Show rejection form
         return render(request, 'admin/reject_subscription.html', {'subscription_id': subscription_id})
 
-@admin.register(BotSubscriptionPlan)
-class BotSubscriptionPlanAdmin(admin.ModelAdmin):
-    list_display = ['name', 'bot_type', 'price', 'duration_days', 'is_active']
-    list_filter = ['bot_type', 'is_active']
-    search_fields = ['name']

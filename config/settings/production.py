@@ -126,7 +126,16 @@ DATABASES['default'].update({
     },
     'CONN_MAX_AGE': 60,
 })
-
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': 'postgres',
+#         'USER': 'postgres',
+#         'PASSWORD': '808507',
+#         'HOST': 'localhost',  # Or 127.0.0.1
+#         'PORT': '5432',       # Change if using different port
+#     }
+# }
 # Celery for production
 CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://127.0.0.1:6379/0')
 CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://127.0.0.1:6379/0')

@@ -4,9 +4,11 @@ Telegram signals subscription models
 import uuid
 from decimal import Decimal
 from django.db import models
-from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.contrib.auth import get_user_model
 from core.models import TimeStampedModel, SoftDeleteModel
+
+User = get_user_model()
 
 
 class TelegramSignalPlan(TimeStampedModel):
@@ -98,16 +100,19 @@ class TelegramChannel(TimeStampedModel):
 class TelegramSubscription(SoftDeleteModel):
     """
     User subscriptions to Telegram signal channels.
+    Modified flow: User pays → uploads proof + telegram handle → admin approves → adds to group → timer starts
     """
     STATUS_CHOICES = [
+        ('pending_payment', 'Pending Payment Upload'),
+        ('pending_approval', 'Pending Admin Approval'),
         ('active', 'Active'),
         ('expired', 'Expired'),
         ('cancelled', 'Cancelled'),
-        ('suspended', 'Suspended'),
+        ('rejected', 'Rejected'),
     ]
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        User,
         on_delete=models.CASCADE,
         related_name='telegram_subscriptions'
     )
@@ -120,12 +125,49 @@ class TelegramSubscription(SoftDeleteModel):
     telegram_handle = models.CharField(max_length=50, help_text="@username without @")
     telegram_user_id = models.BigIntegerField(null=True, blank=True)
 
-    # Subscription details
-    start_date = models.DateField()
-    end_date = models.DateField()
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
-    auto_renew = models.BooleanField(default=True)
+    # Payment proof fields
+    payment_screenshot = models.ImageField(
+        upload_to='telegram_subscriptions/payments/%Y/%m/%d/',
+        blank=True,
+        null=True
+    )
+    payment_transaction_hash = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="For crypto payments"
+    )
+    payment_blockchain = models.CharField(
+        max_length=20,
+        blank=True,
+        help_text="e.g., BEP20, ERC20, TRC20"
+    )
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2)
 
+    # Admin approval fields
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending_payment', db_index=True)
+    approved_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approved_telegram_subscriptions'
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    rejected_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='rejected_telegram_subscriptions'
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True)
+    admin_notes = models.TextField(blank=True)
+
+    # Subscription timing (starts AFTER admin approval)
+    started_at = models.DateTimeField(null=True, blank=True, help_text="Set when admin approves")
+    end_date = models.DateField(null=True, blank=True)
+    
     # Billing
     billing_cycle = models.CharField(
         max_length=20,
@@ -136,7 +178,6 @@ class TelegramSubscription(SoftDeleteModel):
         ],
         default='monthly'
     )
-    amount_paid = models.DecimalField(max_digits=10, decimal_places=2)
     payment_method = models.CharField(
         max_length=20,
         choices=[
@@ -144,14 +185,18 @@ class TelegramSubscription(SoftDeleteModel):
             ('crypto', 'Cryptocurrency'),
             ('bank', 'Bank Transfer'),
         ],
-        default='stripe'
+        default='crypto'
     )
     stripe_subscription_id = models.CharField(max_length=100, blank=True)
+    auto_renew = models.BooleanField(default=True)
 
     # Usage tracking
     signals_received = models.PositiveIntegerField(default=0)
     last_signal_date = models.DateTimeField(null=True, blank=True)
     success_rate_tracked = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'subscriptions_telegram_subscriptions'
@@ -160,6 +205,7 @@ class TelegramSubscription(SoftDeleteModel):
             models.Index(fields=['plan', 'status']),
             models.Index(fields=['end_date']),
             models.Index(fields=['telegram_handle']),
+            models.Index(fields=['status', 'created_at']),
         ]
 
     def __str__(self):
@@ -171,18 +217,62 @@ class TelegramSubscription(SoftDeleteModel):
         from django.utils import timezone
         return (
             self.status == 'active' and
+            self.end_date and
             self.end_date >= timezone.now().date()
         )
+
+    def approve(self, admin_user, notes=""):
+        """
+        Approve subscription: Admin adds user to Telegram group, timer starts.
+        """
+        from django.utils import timezone
+        from datetime import timedelta
+
+        if self.status not in ['pending_payment', 'pending_approval']:
+            raise ValueError(f"Cannot approve subscription with status: {self.status}")
+
+        self.status = 'active'
+        self.approved_by = admin_user
+        self.approved_at = timezone.now()
+        self.started_at = timezone.now()  # Timer starts NOW
+        
+        # Calculate end date based on billing cycle
+        if self.billing_cycle == 'monthly':
+            days = 30
+        elif self.billing_cycle == 'quarterly':
+            days = 90
+        elif self.billing_cycle == 'yearly':
+            days = 365
+        else:
+            days = 30  # Default
+        
+        self.end_date = timezone.now().date() + timedelta(days=days)
+        self.admin_notes = notes
+        self.save()
+
+    def reject(self, admin_user, reason=""):
+        """Reject subscription"""
+        from django.utils import timezone
+        
+        self.status = 'rejected'
+        self.rejected_by = admin_user
+        self.rejected_at = timezone.now()
+        self.rejection_reason = reason
+        self.save()
 
     def extend_subscription(self, days):
         """Extend subscription by specified days."""
         from django.utils import timezone
-        import datetime
+        from datetime import timedelta
 
-        if self.end_date < timezone.now().date():
+        if self.end_date and self.end_date < timezone.now().date():
             self.end_date = timezone.now().date()
 
-        self.end_date += datetime.timedelta(days=days)
+        if self.end_date:
+            self.end_date += timedelta(days=days)
+        else:
+            self.end_date = timezone.now().date() + timedelta(days=days)
+            
         self.status = 'active'
         self.save()
 
@@ -315,7 +405,7 @@ class SignalResult(TimeStampedModel):
 
     # Verification
     verified_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        User,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,

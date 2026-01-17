@@ -9,62 +9,12 @@ from django.utils import timezone
 from config import settings
 from core.models import TimeStampedModel, SoftDeleteModel
 from core.utils import encrypt_api_key, decrypt_api_key, generate_secret_key
+from apps.exchanges.models import ExchangeCredentials
 
 User = get_user_model()
 
-
-# ==================== EXCHANGE CREDENTIALS ====================
-
-class ExchangeCredential(SoftDeleteModel):
-    """Encrypted exchange API credentials"""
-
-    class Meta:
-        db_table = 'bots_exchange_credentials'
-        unique_together = ['user', 'exchange_name']
-
-    EXCHANGE_CHOICES = [
-        ('binance', 'Binance'),
-        ('bybit', 'Bybit'),
-        ('okx', 'OKX'),
-        ('mexc', 'MEXC'),
-        ('alpaca', 'Alpaca'),
-    ]
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='exchange_credentials')
-    exchange_name = models.CharField(max_length=20, choices=EXCHANGE_CHOICES)
-    api_key_encrypted = models.TextField()
-    secret_key_encrypted = models.TextField()
-    passphrase_encrypted = models.TextField(null=True, blank=True)
-    is_testnet = models.BooleanField(default=False)
-    is_demo = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
-    verification_status = models.CharField(max_length=20, choices=[
-        ('pending', 'Pending'),
-        ('verified', 'Verified'),
-        ('rejected', 'Rejected'),
-    ], default='pending')
-
-    @property
-    def api_key(self):
-        return decrypt_api_key(self.api_key_encrypted)
-
-    @property
-    def secret_key(self):
-        return decrypt_api_key(self.secret_key_encrypted)
-
-    @property
-    def passphrase(self):
-        if self.passphrase_encrypted:
-            return decrypt_api_key(self.passphrase_encrypted)
-        return None
-
-    def set_credentials(self, api_key, secret_key, passphrase=None):
-        self.api_key_encrypted = encrypt_api_key(api_key)
-        self.secret_key_encrypted = encrypt_api_key(secret_key)
-        if passphrase:
-            self.passphrase_encrypted = encrypt_api_key(passphrase)
-        self.save()
+# Exchange choices constant (shared across bot types)
+EXCHANGE_CHOICES = ExchangeCredentials.EXCHANGE_CHOICES
 
 
 # ==================== CUSTOM BOT (TradingView Webhook) ====================
@@ -80,7 +30,7 @@ class CustomBot(SoftDeleteModel):
             models.Index(fields=['exchange_name', 'trading_pair']),
         ]
 
-    EXCHANGE_CHOICES = ExchangeCredential.EXCHANGE_CHOICES
+    EXCHANGE_CHOICES = EXCHANGE_CHOICES
 
     MARKET_TYPE_CHOICES = [
         ('spot', 'Spot Trading'),
@@ -99,8 +49,13 @@ class CustomBot(SoftDeleteModel):
         blank=True
     )
 
+    # Bot identification
+    bot_id = models.CharField(max_length=100, unique=True, blank=True, db_index=True, help_text="Unique bot ID in format xxxxx-xxxxx-xxxxx")
     bot_name = models.CharField(max_length=255)
+    
+    # Webhook configuration
     webhook_url = models.URLField(unique=True, blank=True)
+    webhook_message = models.JSONField(blank=True, null=True, help_text="Auto-generated JSON template for TradingView")
     secret_key = models.CharField(max_length=64, blank=True)
 
     exchange_name = models.CharField(max_length=20, choices=EXCHANGE_CHOICES)
@@ -109,6 +64,7 @@ class CustomBot(SoftDeleteModel):
 
     # Trading settings
     default_amount = models.DecimalField(max_digits=20, decimal_places=8, validators=[MinValueValidator(0)])
+    use_tradingView_position_size = models.BooleanField(default=False, help_text="Use position size from TradingView alert instead of default_amount")
     take_profit_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     stop_loss_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
 
@@ -127,6 +83,61 @@ class CustomBot(SoftDeleteModel):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def generate_bot_id(self):
+        """Generate a unique bot ID in format xxxxx-xxxxx-xxxxx"""
+        return f"{uuid.uuid4().hex[:5]}-{uuid.uuid4().hex[:5]}-{uuid.uuid4().hex[:5]}"
+
+    def create_message(self):
+        """Generate JSON webhook message template with TradingView placeholders"""
+        import json
+        from django.conf import settings
+        
+        if not self.bot_id:
+            self.save()  # Ensure bot_id is generated first
+        
+        # Get webhook URL from settings or generate it
+        site_url = getattr(settings, 'SITE_URL', 'https://yourdomain.com')
+        if not site_url.startswith('http'):
+            site_url = f"https://{site_url}"
+        
+        data = {
+            "bot_id": self.bot_id,
+            "secret": self.secret_key,
+            "Pair": "{{syminfo.basecurrency}}/{{syminfo.currency}}",
+            "position_size": "{{strategy.position_size}}",
+            "exchange": self.exchange_name,
+            "timestamp": "{{time}}",
+            "side": "{{strategy.order.action}}"
+        }
+        return data
+
+    def save(self, *args, **kwargs):
+        """Override save to auto-generate bot_id and webhook_message"""
+        # Generate bot_id if not exists
+        if not self.bot_id:
+            while True:
+                new_id = self.generate_bot_id()
+                if not CustomBot.objects.filter(bot_id=new_id).exists():
+                    self.bot_id = new_id
+                    break
+        
+        # Generate webhook URL and secret if not exists
+        if not self.webhook_url:
+            from django.conf import settings
+            site_url = getattr(settings, 'SITE_URL', 'https://yourdomain.com')
+            if not site_url.startswith('http'):
+                site_url = f"https://{site_url}"
+            self.webhook_url = f"{site_url}/api/webhooks/custombot/"
+        
+        if not self.secret_key:
+            self.secret_key = generate_secret_key(32)
+        
+        # Generate webhook message template if not exists
+        if not self.webhook_message:
+            self.webhook_message = self.create_message()
+        
+        super().save(*args, **kwargs)
 
     def generate_webhook_credentials(self):
         """Generate unique webhook URL and secret on creation"""
@@ -165,12 +176,14 @@ class GridBot(SoftDeleteModel):
     class Meta:
         db_table = 'bots_grid_bots'
         ordering = ['-created_at']
+        unique_together = ['subscription']  # 1 bot per subscription
         indexes = [
             models.Index(fields=['user', 'is_running']),
             models.Index(fields=['exchange_name', 'trading_pair']),
+            models.Index(fields=['subscription']),
         ]
 
-    EXCHANGE_CHOICES = ExchangeCredential.EXCHANGE_CHOICES
+    EXCHANGE_CHOICES = EXCHANGE_CHOICES
 
     AMOUNT_TYPE_CHOICES = [
         ('base', 'Base Currency (Coins)'),
@@ -201,12 +214,24 @@ class GridBot(SoftDeleteModel):
     favor_levels = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(50)])
     against_levels = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(50)])
     level_spacing_percent = models.DecimalField(max_digits=5, decimal_places=2, default=1.0)
-    favor_level_qty = models.DecimalField(max_digits=20, decimal_places=8)
-    against_level_qty = models.DecimalField(max_digits=20, decimal_places=8)
+    favor_level_qty = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'), null=True, blank=True)
+    against_level_qty = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'), null=True, blank=True)
 
     # NEW: Level difference fields
-    favor_level_difference = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
-    against_level_difference = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    favor_level_difference = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        null=True, 
+        blank=True,
+        help_text="Percentage difference between each favor level"
+    )
+    against_level_difference = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        null=True, 
+        blank=True,
+        help_text="Percentage difference between each against level"
+    )
 
     # NEW: Amount type selection
     amount_type = models.CharField(max_length=10, choices=AMOUNT_TYPE_CHOICES, default='quote')
@@ -252,12 +277,14 @@ class MartingaleBot(SoftDeleteModel):
     class Meta:
         db_table = 'bots_martingale_bots'
         ordering = ['-created_at']
+        unique_together = ['subscription']  # 1 bot per subscription
         indexes = [
             models.Index(fields=['user', 'is_running']),
             models.Index(fields=['exchange_name', 'trading_pair']),
+            models.Index(fields=['subscription']),
         ]
 
-    EXCHANGE_CHOICES = ExchangeCredential.EXCHANGE_CHOICES
+    EXCHANGE_CHOICES = EXCHANGE_CHOICES
     AMOUNT_TYPE_CHOICES = GridBot.AMOUNT_TYPE_CHOICES
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -284,8 +311,8 @@ class MartingaleBot(SoftDeleteModel):
     favor_levels = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(50)])
     against_levels = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(50)])
     level_spacing_percent = models.DecimalField(max_digits=5, decimal_places=2, default=2.0)
-    favor_level_qty = models.DecimalField(max_digits=20, decimal_places=8)
-    against_level_qty = models.DecimalField(max_digits=20, decimal_places=8)
+    favor_level_qty = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'), null=True, blank=True)
+    against_level_qty = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'), null=True, blank=True)
 
     # NEW: Level difference fields
     favor_level_difference = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
@@ -524,7 +551,7 @@ class QuantumWeeklyProfit(SoftDeleteModel):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='quantum_weekly_profits')
-    quantum_bot = models.ForeignKey('QuantumAIBot', on_delete=models.PROTECT, related_name='weekly_profits')
+    fund = models.ForeignKey(QuantumAIFund, on_delete=models.PROTECT, related_name='weekly_profits')
 
     week_start = models.DateField()
     week_end = models.DateField()

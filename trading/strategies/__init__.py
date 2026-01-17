@@ -1,14 +1,14 @@
 """
-Trading strategies for automated trading
+Trading Strategies Package
+Exchange-AGNOSTIC trading logic
 """
-from .base import BaseTradingStrategy
-from .grid_bot import GridTradingStrategy
-from .martingale_bot import MartingaleTradingStrategy
-from .quantum_ai_bot import QuantumAITradingStrategy
+from .quantum_ai import QuantumAIStrategy
+
+# Will add more strategies:
+# from .grid_bot import GridBotStrategy
+# from .martingale_bot import MartingaleBotStrategy
+# from .custom_bot import CustomBotStrategy
 
 __all__ = [
-    'BaseTradingStrategy',
-    'GridTradingStrategy',
-    'MartingaleTradingStrategy',
-    'QuantumAITradingStrategy',
+    'QuantumAIStrategy',
 ]

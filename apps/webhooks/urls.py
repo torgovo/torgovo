@@ -7,8 +7,8 @@ from . import views
 app_name = 'webhooks'
 
 urlpatterns = [
-    # TradingView webhook endpoint
-    path('tradingview/<uuid:webhook_id>/', views.TradingViewWebhookView.as_view(), name='tradingview_webhook'),
+    # Custom Bot webhook endpoint (global URL, secret in JSON)
+    path('', views.CustomBotWebhookView.as_view(), name='custombot_webhook'),
 
     # Technical indicator endpoints
     path('indicators/ema/', views.EMAIndicatorView.as_view(), name='ema_indicator'),

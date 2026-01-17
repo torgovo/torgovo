@@ -63,7 +63,8 @@ from .models import (
 from .serializers import (
     SubscriptionPlanSerializer, QuantumAIDepositSerializer,
     BlockchainAddressSerializer, WithdrawalRequestSerializer,
-    PaymentTransactionSerializer, ReferralPayoutSerializer
+    PaymentTransactionSerializer, ReferralPayoutSerializer,
+    BotSubscriptionSerializer
 )
 from apps.bots.models import QuantumAIFund, QuantumAIInvestment
 
@@ -146,6 +147,19 @@ class GridBotViewSet(viewsets.ModelViewSet):
         if not subscription:
             raise PermissionError("No active Grid Bot subscription")
 
+        # ENFORCE: 1 bot per subscription
+        existing_bot = GridBot.objects.filter(
+            subscription=subscription,
+            is_deleted=False
+        ).first()
+        
+        if existing_bot:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError(
+                "You already have a Grid Bot for this subscription. "
+                "You can update the existing bot's settings (pair, exchange, amount) instead."
+            )
+
         serializer.save(user=self.request.user, subscription=subscription)
 
     @action(detail=True, methods=['post'])
@@ -220,6 +234,19 @@ class MartingaleBotViewSet(viewsets.ModelViewSet):
 
         if not subscription:
             raise PermissionError("No active Martingale Bot subscription")
+
+        # ENFORCE: 1 bot per subscription
+        existing_bot = MartingaleBot.objects.filter(
+            subscription=subscription,
+            is_deleted=False
+        ).first()
+        
+        if existing_bot:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError(
+                "You already have a Martingale Bot for this subscription. "
+                "You can update the existing bot's settings (pair, exchange, amount) instead."
+            )
 
         serializer.save(user=self.request.user, subscription=subscription)
 
@@ -443,45 +470,12 @@ class BotSubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
     ViewSet for user's bot subscriptions (read-only)
     """
     permission_classes = [IsAuthenticated]
+    serializer_class = BotSubscriptionSerializer
 
     def get_queryset(self):
         if self.request.user.is_staff:
-            return BotSubscription.objects.all()
-        return BotSubscription.objects.filter(user=self.request.user)
-
-    serializer_class = None  # We'll create a simple serializer
-
-    def list(self, request):
-        """Get user's subscriptions with webhook config for custom bots"""
-        subscriptions = self.get_queryset().select_related('plan')
-
-        data = []
-        for sub in subscriptions:
-            sub_data = {
-                'id': str(sub.id),
-                'plan': {
-                    'name': sub.plan.name,
-                    'bot_type': sub.plan.bot_type,
-                    'price': sub.plan.price,
-                    'duration_days': sub.plan.duration_days,
-                },
-                'status': sub.status,
-                'exchange_name': sub.exchange_name,
-                'started_at': sub.started_at,
-                'expires_at': sub.expires_at,
-                'webhook_config': None,
-            }
-
-            # Add webhook config for custom bots
-            if sub.plan.bot_type == 'custom' and sub.webhook_secret:
-                sub_data['webhook_config'] = {
-                    'url': f"{settings.SITE_URL}/api/webhooks/custom/{sub.user.id}/",
-                    'json_template': sub.get_webhook_json_template(),
-                }
-
-            data.append(sub_data)
-
-        return Response(data)
+            return BotSubscription.objects.all().select_related('plan', 'user')
+        return BotSubscription.objects.filter(user=self.request.user).select_related('plan')
 
 
 class CreateBotSubscriptionView(APIView):
@@ -507,6 +501,11 @@ class CreateBotSubscriptionView(APIView):
 
             plan = BotSubscriptionPlan.objects.get(id=plan_id)
 
+            # Determine initial status based on payment proof availability
+            # If payment proof is provided, move directly to pending_approval
+            # Otherwise, set to pending_payment (user needs to upload proof)
+            initial_status = 'pending_approval' if (payment_screenshot or payment_transaction_hash) else 'pending_payment'
+
             # Create subscription
             subscription = BotSubscription.objects.create(
                 user=request.user,
@@ -515,6 +514,7 @@ class CreateBotSubscriptionView(APIView):
                 payment_screenshot=payment_screenshot,
                 payment_transaction_hash=payment_transaction_hash,
                 payment_blockchain=payment_blockchain,
+                status=initial_status,  # Set based on payment proof
             )
 
             return Response({
@@ -532,54 +532,8 @@ class CreateBotSubscriptionView(APIView):
 
 
 # ==================== WEBHOOK VIEWS ====================
-
-class TradingViewWebhookView(APIView):
-    """
-    Webhook endpoint for TradingView alerts (Custom Bot)
-    URL: /api/webhooks/custom/{user_id}/
-    """
-    permission_classes = []  # AllowAny - no authentication needed
-
-    def post(self, request, user_id):
-        """
-        Handle incoming webhook from TradingView
-        """
-        from apps.payments.models import BotSubscription
-
-        try:
-            # Get payload
-            payload = request.data
-            secret = payload.get('secret')
-
-            if not secret:
-                return Response({'error': 'Missing secret'}, status=status.HTTP_400_BAD_REQUEST)
-
-            # Find subscription by secret
-            try:
-                subscription = BotSubscription.objects.get(
-                    user_id=user_id,
-                    webhook_secret=secret,
-                    status='active'
-                )
-            except BotSubscription.DoesNotExist:
-                return Response({'error': 'Invalid secret or inactive subscription'}, status=status.HTTP_403_FORBIDDEN)
-
-            # Execute the order
-            result = BotExecutorService.execute_custom_bot_order(
-                subscription.user,
-                str(subscription.id),
-                payload
-            )
-
-            return Response({
-                'success': True,
-                'order_id': result.get('order_id'),
-                'executed_price': result.get('price'),
-            }, status=status.HTTP_200_OK)
-
-        except Exception as e:
-            logger.error(f"Error processing webhook for user {user_id}: {e}")
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+# Note: Custom Bot webhook has been moved to apps/webhooks/views.py
+# URL: /api/webhooks/custombot/
 
 
 # ==================== ADMIN APPROVAL VIEWS ====================

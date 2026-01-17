@@ -5,7 +5,8 @@ from rest_framework import serializers
 from decimal import Decimal
 from .models import (
     SubscriptionPlan, QuantumAIDeposit, BlockchainAddress,
-    WithdrawalRequest, PaymentTransaction, ReferralPayout
+    WithdrawalRequest, PaymentTransaction, ReferralPayout,
+    BotSubscriptionPlan, BotSubscription
 )
 
 
@@ -156,3 +157,54 @@ class ReferralPayoutSerializer(serializers.ModelSerializer):
             'id', 'referrer_email', 'referred_user_email',
             'paid_at', 'created_at', 'updated_at'
         ]
+
+
+# ==================== BOT SUBSCRIPTION SERIALIZERS ====================
+
+class BotSubscriptionPlanSerializer(serializers.ModelSerializer):
+    """
+    Serializer for BotSubscriptionPlan model.
+    """
+    
+    class Meta:
+        model = BotSubscriptionPlan
+        fields = [
+            'id', 'bot_type', 'name', 'price', 'duration_days',
+            'description', 'features', 'is_active', 'requires_approval',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class BotSubscriptionSerializer(serializers.ModelSerializer):
+    """
+    Serializer for BotSubscription model with webhook config support.
+    """
+    plan = BotSubscriptionPlanSerializer(read_only=True)
+    webhook_config = serializers.SerializerMethodField()
+    is_expired = serializers.BooleanField(read_only=True)
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    
+    class Meta:
+        model = BotSubscription
+        fields = [
+            'id', 'user', 'user_email', 'plan', 'status',
+            'payment_screenshot', 'payment_transaction_hash', 'payment_blockchain',
+            'exchange_name', 'webhook_config',
+            'approved_by', 'approved_at', 'rejected_by', 'rejected_at',
+            'rejection_reason', 'notes', 'started_at', 'expires_at',
+            'is_expired', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'user', 'user_email', 'plan', 'webhook_config', 'is_expired',
+            'approved_by', 'approved_at', 'rejected_by', 'rejected_at',
+            'started_at', 'expires_at', 'created_at', 'updated_at'
+        ]
+    
+    def get_webhook_config(self, obj):
+        """
+        Return webhook configuration for custom bots only.
+        """
+        if obj.plan.bot_type == 'custom' and obj.webhook_secret:
+            return obj.get_webhook_json_template()
+        return None

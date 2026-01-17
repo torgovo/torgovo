@@ -63,12 +63,14 @@ class QuantumAIDeposit(SoftDeleteModel):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name='quantum_deposits'
+        related_name='payments_quantum_deposits'
     )
-    quantum_bot = models.ForeignKey(
-        'bots.QuantumAIBot',
+    fund = models.ForeignKey(
+        'bots.QuantumAIFund',
         on_delete=models.CASCADE,
-        related_name='deposits'
+        null=True,
+        blank=True,
+        related_name='payment_deposits'
     )
     amount = models.DecimalField(
         max_digits=20,
@@ -130,7 +132,7 @@ class QuantumAIDeposit(SoftDeleteModel):
         db_table = 'payments_quantum_deposits'
         indexes = [
             models.Index(fields=['user', 'status']),
-            models.Index(fields=['quantum_bot', 'status']),
+            models.Index(fields=['fund', 'status']),
             models.Index(fields=['transaction_hash']),
             models.Index(fields=['status', 'created_at']),
             models.Index(fields=['flagged_for_review']),
@@ -499,16 +501,28 @@ class BotSubscription(SoftDeleteModel):
 
     def get_webhook_json_template(self):
         """Returns JSON template for TradingView (custom bots only)"""
-        if not self.webhook_secret:
+        if not self.webhook_secret or self.plan.bot_type != 'custom':
             return None
 
+        # Use request.build_absolute_uri if available, otherwise use settings
+        try:
+            from django.conf import settings
+            site_url = getattr(settings, 'SITE_URL', 'https://yourdomain.com')
+            if not site_url.startswith('http'):
+                site_url = f"https://{site_url}"
+        except:
+            site_url = "https://yourdomain.com"  # Fallback
+        
         return {
-            "secret": self.webhook_secret,
-            "exchange": self.exchange_name,
-            "action": "{{strategy.order.action}}",
-            "symbol": "{{ticker}}",
-            "amount": "{{order.amount}}",
-            "price": "{{order.price}}"
+            "webhook_url": f"{site_url}/api/webhooks/custombot/",
+            "json_template": {
+                "secret": self.webhook_secret,
+                "exchange": self.exchange_name or "{{exchange}}",
+                "action": "{{strategy.order.action}}",
+                "symbol": "{{ticker}}",
+                "amount": "{{order.amount}}",
+                "price": "{{order.price}}"  # Optional
+            }
         }
 
     def approve(self, admin_user, notes=""):

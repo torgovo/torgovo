@@ -25,11 +25,6 @@ urlpatterns = [
     # DRF Viewset routes
     path('', include(router.urls)),
 
-    # Webhook endpoint (TradingView)
-    path('webhook/<str:user_id>/',
-         views.TradingViewWebhookView.as_view(),
-         name='tradingview-webhook'),
-
     # Old indicator endpoints for manual admin bot
     path('indicators/binance/<str:username>/<str:pair>/',
          views.IndicatorView.as_view(),

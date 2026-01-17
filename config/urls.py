@@ -25,9 +25,8 @@ urlpatterns = [
     path('api/exchanges/', include('apps.exchanges.urls', namespace='exchanges')),
     path('api/subscriptions/', include('apps.subscriptions.urls', namespace='subscriptions')),
 
-    # TradingView Webhook (direct path, no auth required)
-    path('api/webhooks/custom/<str:user_id>/',
-         include('apps.bots.urls', namespace='bot_webhooks')),
+    # Custom Bot Webhook (global URL, secret in JSON payload)
+    path('api/webhooks/custombot/', include('apps.webhooks.urls', namespace='custombot_webhooks')),
 ]
 
 if settings.DEBUG:
@@ -40,4 +39,10 @@ if 'debug_toolbar' in settings.INSTALLED_APPS:
 
     urlpatterns = [
                       path('__debug__/', include(debug_toolbar.urls)),
+                  ] + urlpatterns
+
+# Django Silk profiler (optional)
+if 'silk' in settings.INSTALLED_APPS:
+    urlpatterns = [
+                      path('silk/', include('silk.urls', namespace='silk')),
                   ] + urlpatterns

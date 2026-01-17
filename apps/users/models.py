@@ -2,9 +2,13 @@
 Users App Models - Torgovo Crypto Trading Platform
 Production-ready CustomUser model with trading profile
 """
+from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.utils.translation import gettext_lazy as _
+from django_extensions.db.models import TimeStampedModel
+
+
 # from apps.bots.models import Order
 
 
@@ -93,7 +97,7 @@ class CustomUser(AbstractUser):
 
     # Exchange Integration
     default_exchange = models.ForeignKey(
-        'investments.Exchange',
+        'exchanges.Exchange',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -178,5 +182,22 @@ class CustomUser(AbstractUser):
             self.total_profit_loss = sum([o.profit_loss for o in orders])
             self.save()
         except Exception as e:
-            # If Order model doesn't exist yet (during migrations), skip
             print(f"Could not update trading stats: {e}")
+
+
+class UserBalance(TimeStampedModel):
+    """
+    User's available balance for each currency
+    """
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='balances')
+    currency = models.CharField(max_length=10)  # USDT, BTC, etc.
+    available = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    hold = models.DecimalField(max_digits=20, decimal_places=8, default=0)  # Locked in orders
+
+    class Meta:
+        db_table = 'users_balances'
+        unique_together = ['user', 'currency']
+        indexes = [models.Index(fields=['user', 'currency'])]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.available} {self.currency}"

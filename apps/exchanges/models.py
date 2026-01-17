@@ -50,7 +50,9 @@ class ExchangeCredentials(SoftDeleteModel):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name='exchange_credentials'
+        null=True,
+        blank=True,
+        related_name='exchanges_credentials'
     )
     exchange_name = models.CharField(max_length=20, choices=EXCHANGE_CHOICES)
     api_key = models.TextField(help_text="Encrypted API key")
