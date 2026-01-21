@@ -42,7 +42,8 @@ LOCAL_APPS = [
     'apps.authentication',
     'apps.webhooks',
     'apps.bots',
-    'apps.exchanges',
+    'apps.trading',  # New unified trading app
+    'apps.exchanges',  # Will be removed after migration
     'apps.payments',
     'apps.subscriptions',
     'apps.users',

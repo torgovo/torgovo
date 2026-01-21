@@ -9,18 +9,28 @@ ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']
 
 # ==================== DEBUG TOOLS ====================
 
-# Add debug apps to INSTALLED_APPS
-INSTALLED_APPS += [
-    'debug_toolbar',
-    'django_extensions',
-    'silk',
-]
+# Only add debug apps if they are installed
+try:
+    import debug_toolbar
+    INSTALLED_APPS += ['debug_toolbar']
+    # Debug Toolbar Middleware (must be at the top)
+    MIDDLEWARE.insert(0, 'debug_toolbar.middleware.DebugToolbarMiddleware')
+except ImportError:
+    pass
 
-# Debug Toolbar Middleware (must be at the top)
-MIDDLEWARE.insert(0, 'debug_toolbar.middleware.DebugToolbarMiddleware')
+try:
+    import django_extensions
+    INSTALLED_APPS += ['django_extensions']
+except ImportError:
+    pass
 
-# Silk Middleware (for API profiling)
-MIDDLEWARE += ['silk.middleware.SilkyMiddleware']
+try:
+    import silk
+    INSTALLED_APPS += ['silk']
+    # Silk Middleware (for API profiling)
+    MIDDLEWARE += ['silk.middleware.SilkyMiddleware']
+except ImportError:
+    pass
 
 # Debug Toolbar settings
 INTERNAL_IPS = ['127.0.0.1', 'localhost', '0.0.0.0']
