@@ -1,13 +1,17 @@
 """
 Quantum AI Trading Strategy
 
-This strategy uses technical indicators and AI-inspired logic
-to generate trading signals.
+Core logic extracted from oldbybit.py and apps/exchanges/handlers/bybitbot.py.
+This is a grid-based strategy that uses multiple technical indicators (EMA, RSI, BB)
+to generate entry signals and manages positions with grid orders.
 
 PURE PYTHON - NO DJANGO IMPORTS
 """
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
+from decimal import Decimal
+from datetime import datetime
+
 from .base import BaseStrategy, Signal
 
 logger = logging.getLogger('trading.strategies.quantum_ai')
@@ -17,18 +21,44 @@ class QuantumAIStrategy(BaseStrategy):
     """
     Quantum AI Trading Strategy.
 
-    Uses a combination of technical indicators (RSI, MACD, Moving Averages)
-    with dynamic position sizing based on market volatility.
+    Uses a combination of technical indicators:
+    - EMA (Exponential Moving Average) - trend direction
+    - RSI (Relative Strength Index) - overbought/oversold conditions
+    - Bollinger Bands (BB) - volatility and mean reversion signals
 
-    Parameters:
-        - rsi_period: RSI calculation period (default: 14)
-        - rsi_oversold: RSI oversold threshold (default: 30)
-        - rsi_overbought: RSI overbought threshold (default: 70)
-        - ema_fast: Fast EMA period (default: 12)
-        - ema_slow: Slow EMA period (default: 26)
-        - risk_percentage: Percentage of balance to risk (default: 5)
-        - stop_loss_percentage: Stop loss percentage (default: 2)
-        - take_profit_percentage: Take profit percentage (default: 5)
+    The strategy combines these indicators in 6 different cases for entry
+    and manages positions with a grid of limit orders for favor/against levels.
+
+    Parameters (from pair_config):
+        - symbol: Trading pair (e.g., 'BTC/USDT')
+        - quantity: Initial position size
+        - Amount_Type: 'dollar' or 'coin'
+        - Order_Type: 'market' or 'limit'
+        - RSI_Lower: RSI oversold threshold (default: 30)
+        - RSI_Upper: RSI overbought threshold (default: 70)
+        - favor_levels: Number of take-profit grid levels
+        - against_levels: Number of DCA/averaging grid levels
+        - favor_level_qty: Quantity per favor level
+        - against_level_qty: Quantity per against level
+        - favor_level_difference: Percentage spacing for favor levels
+        - against_level_difference: Percentage spacing for against levels
+        - Stop_Loss: Stop loss value
+        - Take_Profit: Take profit value
+        - SLTP_Type: 'percentage' or 'dollars'
+
+        Entry Config Parameters:
+        - EMA_RSI_Entry: 'buy', 'sell', 'both', or 'none'
+        - EMA_BB_Entry: 'buy', 'sell', 'both', or 'none'
+        - BB_RSI_Entry: 'buy', 'sell', 'both', or 'none'
+        - RSI_Entry: 'buy', 'sell', 'both', or 'none'
+        - BB_Entry: 'buy', 'sell', 'both', or 'none'
+        - EMA_BB_RSI_Entry: 'buy', 'sell', 'both', or 'none'
+
+        Exit Config Parameters:
+        - RSI_Exit: 'tp', 'sl', 'both', or 'none'
+        - BB_Exit: 'tp', 'sl', 'both', or 'none'
+        - BB_RSI_Exit: 'tp', 'sl', 'both', or 'none'
+        - EMA_BB_Exit: 'tp', 'sl', 'both', or 'none'
     """
 
     @property
@@ -40,19 +70,121 @@ class QuantumAIStrategy(BaseStrategy):
         return ['symbol']
 
     def __init__(self, parameters: Dict[str, Any] = None):
-        # Set defaults before calling super
+        """Initialize Quantum AI strategy with parameters."""
+        # Default parameters matching oldbybit.py
         defaults = {
-            'rsi_period': 14,
-            'rsi_oversold': 30,
-            'rsi_overbought': 70,
-            'ema_fast': 12,
-            'ema_slow': 26,
-            'risk_percentage': 5,
-            'stop_loss_percentage': 2,
-            'take_profit_percentage': 5,
+            'quantity': 10,  # Default $10 or 0.01 coins
+            'Amount_Type': 'dollar',  # 'dollar' or 'coin'
+            'Order_Type': 'market',
+            'RSI_Lower': 30,
+            'RSI_Upper': 70,
+            'favor_levels': 5,
+            'against_levels': 5,
+            'favor_level_qty': 5,
+            'against_level_qty': 5,
+            'favor_level_difference': 0.5,  # 0.5% per level
+            'against_level_difference': 0.5,
+            'Stop_Loss': -2,  # -2% default
+            'Take_Profit': 5,  # 5% default
+            'SLTP_Type': 'percentage',  # 'percentage' or 'dollars'
+            # Entry configurations
+            'EMA_RSI_Entry': 'both',
+            'EMA_BB_Entry': 'none',
+            'BB_RSI_Entry': 'none',
+            'RSI_Entry': 'none',
+            'BB_Entry': 'none',
+            'EMA_BB_RSI_Entry': 'none',
+            # Exit configurations
+            'RSI_Exit': 'none',
+            'BB_Exit': 'tp',
+            'BB_RSI_Exit': 'none',
+            'EMA_BB_Exit': 'none',
         }
         merged_params = {**defaults, **(parameters or {})}
         super().__init__(merged_params)
+
+        # Indicator state (will be updated from external source)
+        self.EMA: float = 0.0
+        self.RSI: float = 50.0
+        self.PrevRSI: float = 50.0
+        self.RSI_color: Optional[str] = None
+        self.RSI_prev_color: Optional[str] = None
+        self.BB: Optional[str] = None  # BB signal string
+
+        # Trading state
+        self.current_side: str = "None"  # "Buy", "Sell", or "None"
+        self.count: int = 0  # 0 = no trade, 1 = in trade
+        self.current_price: float = 0.0
+
+        # Grid state
+        self.favor_levels: List[float] = []
+        self.against_levels: List[float] = []
+
+        # Performance tracking
+        self.Percentage: float = 0.0
+        self.Unrealized_Pnl: float = 0.0
+        self.last_trade_pnl: float = 0.0
+
+    # =========================================================================
+    # INDICATOR CONDITIONS
+    # =========================================================================
+
+    def update_indicators(self, indicators: Dict[str, Any]):
+        """
+        Update indicator values from external source.
+
+        Args:
+            indicators: Dict with keys: EMA, RSI, PrevRSI, RSI_color, RSI_prev_color, BB
+        """
+        self.EMA = float(indicators.get('EMA', 0.0))
+        self.RSI = float(indicators.get('RSI', 50.0))
+        self.PrevRSI = float(indicators.get('PrevRSI', 50.0))
+        self.RSI_color = indicators.get('RSI_color')
+        self.RSI_prev_color = indicators.get('RSI_prev_color')
+        self.BB = indicators.get('BB')
+
+    def _evaluate_conditions(self, current_price: float) -> Dict[str, bool]:
+        """
+        Evaluate all indicator conditions for the current price.
+
+        Returns:
+            Dict with all condition flags
+        """
+        self.current_price = current_price
+        params = self.parameters
+
+        # EMA conditions
+        ema_buy = current_price >= self.EMA and self.EMA != 0
+        ema_sell = current_price <= self.EMA and self.EMA != 0
+
+        # RSI conditions
+        rsi_buy = self.PrevRSI <= params['RSI_Lower'] and self.RSI_color == 'white'
+        rsi_sell = self.PrevRSI >= params['RSI_Upper'] and self.RSI_color == 'white'
+
+        # Bollinger Bands conditions
+        bb_buy = self.BB in ["Crossing Down Band", "Closed Below Lower Band", "Up Arrow"]
+        bb_sell = self.BB in ["Crossing Up Band", "Closed Above Upper Band", "Down Arrow"]
+
+        # Trade state conditions
+        no_trade = self.count == 0 and self.current_side == "None"
+        buy_trade = self.count == 1 and self.current_side == "Buy"
+        sell_trade = self.count == 1 and self.current_side == "Sell"
+
+        return {
+            'EMA_Buy': ema_buy,
+            'EMA_Sell': ema_sell,
+            'RSI_Buy': rsi_buy,
+            'RSI_Sell': rsi_sell,
+            'BB_Buy': bb_buy,
+            'BB_Sell': bb_sell,
+            'NoTrade': no_trade,
+            'BuyTrade': buy_trade,
+            'SellTrade': sell_trade,
+        }
+
+    # =========================================================================
+    # MAIN EXECUTE METHOD
+    # =========================================================================
 
     def execute(
         self,
@@ -63,197 +195,510 @@ class QuantumAIStrategy(BaseStrategy):
         """
         Execute Quantum AI strategy logic.
 
-        Algorithm:
-        1. Calculate RSI from OHLCV data
-        2. Calculate EMA crossover
-        3. Generate signal based on combined indicators
-        """
-        symbol = self.parameters['symbol']
-        ohlcv = market_data.get('ohlcv', [])
-        ticker = market_data.get('ticker', {})
+        This method implements the entry and exit logic from oldbybit.py startBot().
 
-        if len(ohlcv) < self.parameters['ema_slow'] + 5:
-            logger.warning(f"Not enough OHLCV data for {symbol}")
+        Args:
+            market_data: Dict with ticker, indicators, etc.
+            account_info: Dict with balance info
+            current_position: Dict with current position if any
+
+        Returns:
+            Signal if action should be taken, None otherwise
+        """
+        ticker = market_data.get('ticker', {})
+        current_price = ticker.get('last', 0)
+        if not current_price:
             return None
 
-        # Extract close prices
-        closes = [candle['close'] for candle in ohlcv]
-        current_price = ticker.get('last', closes[-1])
+        # Update indicators if provided
+        if 'indicators' in market_data:
+            self.update_indicators(market_data['indicators'])
 
-        # Calculate indicators
-        rsi = self._calculate_rsi(closes, self.parameters['rsi_period'])
-        ema_fast = self._calculate_ema(closes, self.parameters['ema_fast'])
-        ema_slow = self._calculate_ema(closes, self.parameters['ema_slow'])
+        # Sync state with current position
+        self._sync_position_state(current_position)
 
-        # Determine trend
-        trend = 'bullish' if ema_fast[-1] > ema_slow[-1] else 'bearish'
-        ema_crossover = self._detect_crossover(ema_fast, ema_slow)
+        # Evaluate conditions
+        conditions = self._evaluate_conditions(current_price)
+        params = self.parameters
+        symbol = params['symbol']
 
-        # Check if we have a position
-        has_position = current_position and float(current_position.get('contracts', 0)) != 0
-        position_side = current_position.get('side', '').lower() if has_position else None
+        # Check entry conditions (when no trade active)
+        if conditions['NoTrade']:
+            signal = self._check_entry_conditions(conditions, current_price, symbol)
+            if signal:
+                return signal
 
-        # Generate signals
-        signal = None
+        # Check exit conditions (when in a trade)
+        elif conditions['BuyTrade']:
+            signal = self._check_buy_exit_conditions(conditions, current_price, symbol, current_position)
+            if signal:
+                return signal
 
-        if has_position:
-            # Check exit conditions
-            if position_side == 'long':
-                if self.should_exit_long(market_data, current_position, rsi, ema_crossover):
-                    signal = Signal(
-                        action='sell',
-                        symbol=symbol,
-                        amount=abs(float(current_position.get('contracts', 0))),
-                        reason=f"Exit long: RSI={rsi:.2f}, trend={trend}"
-                    )
-            elif position_side == 'short':
-                if self.should_exit_short(market_data, current_position, rsi, ema_crossover):
-                    signal = Signal(
-                        action='buy',
-                        symbol=symbol,
-                        amount=abs(float(current_position.get('contracts', 0))),
-                        reason=f"Exit short: RSI={rsi:.2f}, trend={trend}"
-                    )
+        elif conditions['SellTrade']:
+            signal = self._check_sell_exit_conditions(conditions, current_price, symbol, current_position)
+            if signal:
+                return signal
+
+        return None
+
+    def _sync_position_state(self, current_position: Optional[Dict[str, Any]]):
+        """Sync internal state with actual position."""
+        if current_position and float(current_position.get('contracts', 0)) != 0:
+            side = current_position.get('side', '').lower()
+            if side in ['long', 'buy']:
+                self.current_side = "Buy"
+                self.count = 1
+            elif side in ['short', 'sell']:
+                self.current_side = "Sell"
+                self.count = 1
         else:
-            # Check entry conditions
-            if self._should_enter_long(rsi, ema_crossover, trend):
-                position_size = self.calculate_position_size(account_info, current_price, symbol)
-                if position_size > 0:
-                    signal = Signal(
-                        action='buy',
-                        symbol=symbol,
-                        amount=position_size,
-                        stop_loss=self.calculate_stop_loss(current_price, 'long'),
-                        take_profit=self.calculate_take_profit(current_price, 'long'),
-                        reason=f"Enter long: RSI={rsi:.2f}, EMA crossover={ema_crossover}, trend={trend}",
-                        metadata={'rsi': rsi, 'ema_fast': ema_fast[-1], 'ema_slow': ema_slow[-1]}
-                    )
-            elif self._should_enter_short(rsi, ema_crossover, trend):
-                position_size = self.calculate_position_size(account_info, current_price, symbol)
-                if position_size > 0:
-                    signal = Signal(
-                        action='sell',
-                        symbol=symbol,
-                        amount=position_size,
-                        stop_loss=self.calculate_stop_loss(current_price, 'short'),
-                        take_profit=self.calculate_take_profit(current_price, 'short'),
-                        reason=f"Enter short: RSI={rsi:.2f}, EMA crossover={ema_crossover}, trend={trend}",
-                        metadata={'rsi': rsi, 'ema_fast': ema_fast[-1], 'ema_slow': ema_slow[-1]}
-                    )
+            self.current_side = "None"
+            self.count = 0
 
-        if signal:
-            self.signals_generated += 1
-            self.last_signal = signal
+    # =========================================================================
+    # ENTRY CONDITIONS (from startBot)
+    # =========================================================================
 
+    def _check_entry_conditions(
+        self,
+        conditions: Dict[str, bool],
+        current_price: float,
+        symbol: str
+    ) -> Optional[Signal]:
+        """
+        Check all 6 entry cases for buy and sell.
+        Logic extracted from oldbybit.py startBot().
+        """
+        params = self.parameters
+
+        # ===================== BUY CASES =====================
+
+        # CASE 1: EMA + RSI
+        if (conditions['EMA_Buy'] and conditions['RSI_Buy'] and
+                params['EMA_RSI_Entry'] in ['buy', 'both']):
+            return self._create_entry_signal('buy', symbol, current_price, 'EMA + RSI BUY LONG (CASE1)')
+
+        # CASE 2: BB + EMA
+        if (conditions['BB_Buy'] and conditions['EMA_Buy'] and
+                params['EMA_BB_Entry'] in ['buy', 'both']):
+            return self._create_entry_signal('buy', symbol, current_price, 'EMA + BOLLINGER BANDS BUY LONG (CASE2)')
+
+        # CASE 3: BB + RSI
+        if (conditions['RSI_Buy'] and conditions['BB_Buy'] and
+                params['BB_RSI_Entry'] in ['buy', 'both']):
+            return self._create_entry_signal('buy', symbol, current_price, 'BOLLINGER BANDS + RSI BUY LONG (CASE3)')
+
+        # CASE 4: RSI Only
+        if (conditions['RSI_Buy'] and
+                params['RSI_Entry'] in ['buy', 'both']):
+            return self._create_entry_signal('buy', symbol, current_price, 'RSI ONLY BUY LONG (CASE4)')
+
+        # CASE 5: BB Only
+        if (conditions['BB_Buy'] and
+                params['BB_Entry'] in ['buy', 'both']):
+            return self._create_entry_signal('buy', symbol, current_price, 'BOLLINGER BANDS ONLY BUY LONG (CASE5)')
+
+        # CASE 6: EMA + RSI + BB
+        if (conditions['EMA_Buy'] and conditions['RSI_Buy'] and conditions['BB_Buy'] and
+                params['EMA_BB_RSI_Entry'] in ['buy', 'both']):
+            return self._create_entry_signal('buy', symbol, current_price, 'EMA + RSI + BOLLINGER BANDS BUY LONG (CASE6)')
+
+        # ===================== SELL CASES =====================
+
+        # CASE 1: EMA + RSI
+        if (conditions['EMA_Sell'] and conditions['RSI_Sell'] and
+                params['EMA_RSI_Entry'] in ['sell', 'both']):
+            return self._create_entry_signal('sell', symbol, current_price, 'EMA + RSI SELL SHORT (CASE1)')
+
+        # CASE 2: BB + EMA
+        if (conditions['BB_Sell'] and conditions['EMA_Sell'] and
+                params['EMA_BB_Entry'] in ['sell', 'both']):
+            return self._create_entry_signal('sell', symbol, current_price, 'EMA + BOLLINGER BANDS SELL SHORT (CASE2)')
+
+        # CASE 3: BB + RSI
+        if (conditions['BB_Sell'] and conditions['RSI_Sell'] and
+                params['BB_RSI_Entry'] in ['sell', 'both']):
+            return self._create_entry_signal('sell', symbol, current_price, 'BOLLINGER BANDS + RSI SELL SHORT (CASE3)')
+
+        # CASE 4: RSI Only
+        if (conditions['RSI_Sell'] and
+                params['RSI_Entry'] in ['sell', 'both']):
+            return self._create_entry_signal('sell', symbol, current_price, 'RSI ONLY SELL SHORT (CASE4)')
+
+        # CASE 5: BB Only
+        if (conditions['BB_Sell'] and
+                params['BB_Entry'] in ['sell', 'both']):
+            return self._create_entry_signal('sell', symbol, current_price, 'BOLLINGER BANDS ONLY SELL SHORT (CASE5)')
+
+        # CASE 6: EMA + RSI + BB
+        if (conditions['EMA_Sell'] and conditions['RSI_Sell'] and conditions['BB_Sell'] and
+                params['EMA_BB_RSI_Entry'] in ['sell', 'both']):
+            return self._create_entry_signal('sell', symbol, current_price, 'EMA + RSI + BOLLINGER BANDS SELL SHORT (CASE6)')
+
+        return None
+
+    def _create_entry_signal(
+        self,
+        action: str,
+        symbol: str,
+        current_price: float,
+        reason: str
+    ) -> Signal:
+        """Create an entry signal with grid order data."""
+        params = self.parameters
+
+        # Calculate quantity
+        if params['Amount_Type'] == 'dollar':
+            quantity = params['quantity'] / current_price
+        else:
+            quantity = params['quantity']
+
+        # Calculate grid levels
+        favor_levels, against_levels = self.calculate_grids(action, current_price)
+        self.favor_levels = favor_levels
+        self.against_levels = against_levels
+
+        # Update state
+        self.current_side = "Buy" if action == 'buy' else "Sell"
+        self.count = 1
+        self.signals_generated += 1
+
+        signal = Signal(
+            action=action,
+            symbol=symbol,
+            amount=quantity,
+            price=current_price if params['Order_Type'] == 'limit' else None,
+            order_type=params['Order_Type'],
+            reason=reason,
+            metadata={
+                'strategy': 'quantum_ai',
+                'entry_case': reason,
+                'favor_levels': favor_levels,
+                'against_levels': against_levels,
+                'favor_level_qty': params['favor_level_qty'],
+                'against_level_qty': params['against_level_qty'],
+                'Amount_Type': params['Amount_Type'],
+                'indicators': {
+                    'EMA': self.EMA,
+                    'RSI': self.RSI,
+                    'BB': self.BB,
+                }
+            }
+        )
+        self.last_signal = signal
         return signal
 
-    def _should_enter_long(self, rsi: float, ema_crossover: str, trend: str) -> bool:
-        """Check conditions for long entry."""
-        rsi_oversold = rsi < self.parameters['rsi_oversold']
-        bullish_crossover = ema_crossover == 'bullish'
+    # =========================================================================
+    # EXIT CONDITIONS
+    # =========================================================================
 
-        # Enter long when RSI is oversold and we have bullish crossover or trend
-        return rsi_oversold and (bullish_crossover or trend == 'bullish')
-
-    def _should_enter_short(self, rsi: float, ema_crossover: str, trend: str) -> bool:
-        """Check conditions for short entry."""
-        rsi_overbought = rsi > self.parameters['rsi_overbought']
-        bearish_crossover = ema_crossover == 'bearish'
-
-        # Enter short when RSI is overbought and we have bearish crossover or trend
-        return rsi_overbought and (bearish_crossover or trend == 'bearish')
-
-    def should_exit_long(
+    def _check_buy_exit_conditions(
         self,
-        market_data: Dict[str, Any],
-        current_position: Dict[str, Any],
-        rsi: float,
-        ema_crossover: str
-    ) -> bool:
-        """Check conditions for exiting long position."""
-        # Exit when RSI is overbought or bearish crossover
-        rsi_overbought = rsi > self.parameters['rsi_overbought']
-        bearish_crossover = ema_crossover == 'bearish'
+        conditions: Dict[str, bool],
+        current_price: float,
+        symbol: str,
+        current_position: Optional[Dict[str, Any]]
+    ) -> Optional[Signal]:
+        """Check take-profit conditions for long positions."""
+        params = self.parameters
 
-        # Check if unrealized PnL hit take profit or stop loss
-        entry_price = float(current_position.get('entry_price', 0))
-        current_price = market_data.get('ticker', {}).get('last', entry_price)
+        # TP CASE 1: BB Only
+        if (conditions['BB_Sell'] and params['BB_Exit'] in ['tp', 'both']):
+            return self._create_exit_signal('sell', symbol, current_position, 'BOLLINGER BANDS TP (BUY CASE1)')
 
-        if entry_price > 0:
-            pnl_pct = ((current_price - entry_price) / entry_price) * 100
-            if pnl_pct >= self.parameters['take_profit_percentage']:
-                return True
-            if pnl_pct <= -self.parameters['stop_loss_percentage']:
-                return True
+        # TP CASE 2: RSI Only
+        if (conditions['RSI_Sell'] and params['RSI_Exit'] in ['tp', 'both']):
+            return self._create_exit_signal('sell', symbol, current_position, 'RSI TP (BUY CASE2)')
 
-        return rsi_overbought or bearish_crossover
+        # TP CASE 3: BB + RSI
+        if (conditions['RSI_Sell'] and conditions['BB_Sell'] and
+                params['BB_RSI_Exit'] in ['tp', 'both']):
+            return self._create_exit_signal('sell', symbol, current_position, 'BOLLINGER BANDS + RSI TP (BUY CASE3)')
 
-    def should_exit_short(
+        # TP CASE 4: EMA + BB
+        if (conditions['BB_Sell'] and (conditions['EMA_Sell'] or conditions['EMA_Buy']) and
+                params['EMA_BB_Exit'] in ['tp', 'both']):
+            return self._create_exit_signal('sell', symbol, current_position, 'EMA + BOLLINGER BANDS TP (BUY CASE4)')
+
+        # Check percentage-based stop loss / take profit
+        sltp_signal = self._check_sltp_exit(current_position, current_price, 'long', symbol)
+        if sltp_signal:
+            return sltp_signal
+
+        return None
+
+    def _check_sell_exit_conditions(
         self,
-        market_data: Dict[str, Any],
-        current_position: Dict[str, Any],
-        rsi: float,
-        ema_crossover: str
-    ) -> bool:
-        """Check conditions for exiting short position."""
-        rsi_oversold = rsi < self.parameters['rsi_oversold']
-        bullish_crossover = ema_crossover == 'bullish'
+        conditions: Dict[str, bool],
+        current_price: float,
+        symbol: str,
+        current_position: Optional[Dict[str, Any]]
+    ) -> Optional[Signal]:
+        """Check take-profit conditions for short positions."""
+        params = self.parameters
 
+        # TP CASE 1: RSI Only
+        if (conditions['RSI_Buy'] and params['RSI_Exit'] in ['tp', 'both']):
+            return self._create_exit_signal('buy', symbol, current_position, 'RSI TP (SELL CASE1)')
+
+        # TP CASE 2: BB + RSI
+        if (conditions['BB_Buy'] and conditions['RSI_Buy'] and
+                params['BB_RSI_Exit'] in ['tp', 'both']):
+            return self._create_exit_signal('buy', symbol, current_position, 'BOLLINGER BANDS + RSI TP (SELL CASE2)')
+
+        # TP CASE 3: BB Only
+        if (conditions['BB_Buy'] and params['BB_Exit'] in ['tp', 'both']):
+            return self._create_exit_signal('buy', symbol, current_position, 'BOLLINGER BANDS TP (SELL CASE3)')
+
+        # TP CASE 4: EMA + BB
+        if (conditions['EMA_Buy'] and conditions['BB_Buy'] and
+                params['EMA_BB_Exit'] in ['tp', 'both']):
+            return self._create_exit_signal('buy', symbol, current_position, 'EMA + BOLLINGER BANDS TP (SELL CASE4)')
+
+        # Check percentage-based stop loss / take profit
+        sltp_signal = self._check_sltp_exit(current_position, current_price, 'short', symbol)
+        if sltp_signal:
+            return sltp_signal
+
+        return None
+
+    def _check_sltp_exit(
+        self,
+        current_position: Optional[Dict[str, Any]],
+        current_price: float,
+        side: str,
+        symbol: str
+    ) -> Optional[Signal]:
+        """Check percentage-based SL/TP conditions."""
+        if not current_position:
+            return None
+
+        params = self.parameters
         entry_price = float(current_position.get('entry_price', 0))
-        current_price = market_data.get('ticker', {}).get('last', entry_price)
+        contracts = abs(float(current_position.get('contracts', 0)))
+        unrealized_pnl = float(current_position.get('unrealized_pnl', 0))
 
-        if entry_price > 0:
-            pnl_pct = ((entry_price - current_price) / entry_price) * 100
-            if pnl_pct >= self.parameters['take_profit_percentage']:
-                return True
-            if pnl_pct <= -self.parameters['stop_loss_percentage']:
-                return True
+        if entry_price <= 0 or contracts <= 0:
+            return None
 
-        return rsi_oversold or bullish_crossover
+        # Calculate percentage PnL
+        if params['SLTP_Type'] == 'percentage':
+            notional = contracts * current_price
+            if notional > 0:
+                pnl_pct = (unrealized_pnl / notional) * 100
+            else:
+                pnl_pct = 0
 
-    def _calculate_rsi(self, closes: List[float], period: int) -> float:
-        """Calculate RSI (Relative Strength Index)."""
-        if len(closes) < period + 1:
-            return 50.0  # Neutral
+            # Check stop loss
+            if pnl_pct <= params['Stop_Loss']:
+                close_side = 'sell' if side == 'long' else 'buy'
+                return self._create_exit_signal(
+                    close_side, symbol, current_position,
+                    f'STOP LOSS HIT ({pnl_pct:.2f}%)'
+                )
 
-        deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-        gains = [d if d > 0 else 0 for d in deltas]
-        losses = [-d if d < 0 else 0 for d in deltas]
+            # Check take profit
+            if pnl_pct >= params['Take_Profit']:
+                close_side = 'sell' if side == 'long' else 'buy'
+                return self._create_exit_signal(
+                    close_side, symbol, current_position,
+                    f'TAKE PROFIT HIT ({pnl_pct:.2f}%)'
+                )
 
-        avg_gain = sum(gains[-period:]) / period
-        avg_loss = sum(losses[-period:]) / period
+        elif params['SLTP_Type'] == 'dollars':
+            # Check dollar-based SL/TP
+            if unrealized_pnl <= params['Stop_Loss']:
+                close_side = 'sell' if side == 'long' else 'buy'
+                return self._create_exit_signal(
+                    close_side, symbol, current_position,
+                    f'STOP LOSS HIT (${unrealized_pnl:.2f})'
+                )
 
-        if avg_loss == 0:
-            return 100.0
+            if unrealized_pnl >= params['Take_Profit']:
+                close_side = 'sell' if side == 'long' else 'buy'
+                return self._create_exit_signal(
+                    close_side, symbol, current_position,
+                    f'TAKE PROFIT HIT (${unrealized_pnl:.2f})'
+                )
 
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+        return None
 
-    def _calculate_ema(self, data: List[float], period: int) -> List[float]:
-        """Calculate Exponential Moving Average."""
-        if len(data) < period:
-            return data
+    def _create_exit_signal(
+        self,
+        action: str,
+        symbol: str,
+        current_position: Optional[Dict[str, Any]],
+        reason: str
+    ) -> Signal:
+        """Create an exit signal to close position."""
+        contracts = abs(float(current_position.get('contracts', 0))) if current_position else 0
 
-        multiplier = 2 / (period + 1)
-        ema = [sum(data[:period]) / period]  # Start with SMA
+        # Reset state
+        self.current_side = "None"
+        self.count = 0
+        self.signals_generated += 1
 
-        for price in data[period:]:
-            ema.append((price - ema[-1]) * multiplier + ema[-1])
+        signal = Signal(
+            action=action,
+            symbol=symbol,
+            amount=contracts,
+            order_type='market',
+            reason=reason,
+            metadata={
+                'strategy': 'quantum_ai',
+                'exit_type': reason,
+                'close_position': True,
+                'reduce_only': True,
+            }
+        )
+        self.last_signal = signal
+        return signal
 
-        return ema
+    # =========================================================================
+    # GRID CALCULATIONS (from oldbybit.py calculate_grids)
+    # =========================================================================
 
-    def _detect_crossover(self, fast: List[float], slow: List[float]) -> str:
-        """Detect EMA crossover."""
-        if len(fast) < 2 or len(slow) < 2:
-            return 'none'
+    def calculate_grids(self, side: str, current_price: float) -> Tuple[List[float], List[float]]:
+        """
+        Calculate grid levels for favor and against orders.
 
-        # Bullish crossover: fast crosses above slow
-        if fast[-2] <= slow[-2] and fast[-1] > slow[-1]:
-            return 'bullish'
+        For BUY:
+          - Favor levels are ABOVE entry (sell to take profit)
+          - Against levels are BELOW entry (buy to average down)
 
-        # Bearish crossover: fast crosses below slow
-        if fast[-2] >= slow[-2] and fast[-1] < slow[-1]:
-            return 'bearish'
+        For SELL:
+          - Favor levels are BELOW entry (buy to take profit)
+          - Against levels are ABOVE entry (sell to average up)
 
-        return 'none'
+        Args:
+            side: 'buy' or 'sell'
+            current_price: Current market price
+
+        Returns:
+            Tuple of (favor_levels, against_levels) as lists of prices
+        """
+        params = self.parameters
+        favor_levels = []
+        against_levels = []
+
+        num_favor = params['favor_levels']
+        num_against = params['against_levels']
+        favor_diff = params['favor_level_difference']
+        against_diff = params['against_level_difference']
+
+        if side.lower() == 'buy':
+            # Favor levels: above entry (for taking profit by selling)
+            for i in range(num_favor):
+                price = current_price * (1 + (i + 1) * favor_diff / 100)
+                favor_levels.append(round(price, 6))
+
+            # Against levels: below entry (for averaging down by buying more)
+            for i in range(num_against):
+                price = current_price * (1 - (i + 1) * against_diff / 100)
+                against_levels.append(round(price, 6))
+
+        elif side.lower() == 'sell':
+            # Favor levels: below entry (for taking profit by buying back)
+            for i in range(num_favor):
+                price = current_price * (1 - (i + 1) * favor_diff / 100)
+                favor_levels.append(round(price, 6))
+
+            # Against levels: above entry (for averaging up by selling more)
+            for i in range(num_against):
+                price = current_price * (1 + (i + 1) * against_diff / 100)
+                against_levels.append(round(price, 6))
+
+        return favor_levels, against_levels
+
+    def prepare_order_data(self, side: str, current_price: float) -> Dict[str, Any]:
+        """
+        Prepare order data for grid execution (matching oldbybit.py format).
+
+        Args:
+            side: 'Buy' or 'Sell'
+            current_price: Current market price
+
+        Returns:
+            Dict with all order parameters
+        """
+        params = self.parameters
+        symbol = params['symbol']
+
+        if params['Amount_Type'] == 'dollar':
+            quantity_dollar = params['quantity']
+            favor_qty_dollar = params['favor_level_qty']
+            against_qty_dollar = params['against_level_qty']
+
+            quantity = round(params['quantity'] / current_price, 4)
+            favor_level_qty = round(params['favor_level_qty'] / current_price, 4)
+            against_level_qty = round(params['against_level_qty'] / current_price, 4)
+        else:
+            quantity = params['quantity']
+            favor_level_qty = params['favor_level_qty']
+            against_level_qty = params['against_level_qty']
+            quantity_dollar = None
+            favor_qty_dollar = None
+            against_qty_dollar = None
+
+        return {
+            "category": 'futures',
+            "symbol": symbol,
+            "Order_Type": params['Order_Type'],
+            "side": side,
+            "qty": quantity,
+            "qty_dollar": quantity_dollar,
+            "price": current_price,
+            "favor_levels": params['favor_levels'],
+            "against_levels": params['against_levels'],
+            "favor_level_qty": favor_level_qty,
+            "against_level_qty": against_level_qty,
+            "favor_level_qty_dollar": favor_qty_dollar,
+            "against_level_qty_dollar": against_qty_dollar,
+            "favor_level_difference": params['favor_level_difference'],
+            "against_level_difference": params['against_level_difference'],
+        }
+
+    # =========================================================================
+    # STATUS AND UTILITIES
+    # =========================================================================
+
+    def reset_state(self):
+        """Reset trading state (called after closing positions)."""
+        self.current_side = "None"
+        self.count = 0
+        self.favor_levels = []
+        self.against_levels = []
+        self.Percentage = 0.0
+        self.Unrealized_Pnl = 0.0
+
+    def get_indicator_data(self) -> str:
+        """Get indicator data string for logging."""
+        return (
+            f"Symbol: {self.parameters.get('symbol')} - "
+            f"CurrentPrice: {self.current_price} - "
+            f"EMA: {self.EMA} - "
+            f"RSI: {self.RSI} - "
+            f"PrevRSI: {self.PrevRSI} - "
+            f"RSI_Color: {self.RSI_color} - "
+            f"BB: {self.BB}"
+        )
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get strategy status."""
+        status = super().get_status()
+        status.update({
+            'current_side': self.current_side,
+            'count': self.count,
+            'current_price': self.current_price,
+            'favor_levels': self.favor_levels,
+            'against_levels': self.against_levels,
+            'percentage_pnl': self.Percentage,
+            'unrealized_pnl': self.Unrealized_Pnl,
+            'indicators': {
+                'EMA': self.EMA,
+                'RSI': self.RSI,
+                'PrevRSI': self.PrevRSI,
+                'BB': self.BB,
+            }
+        })
+        return status
