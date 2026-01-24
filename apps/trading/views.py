@@ -251,3 +251,62 @@ def get_exchange_rates(request):
             'success': False,
             'error': 'Failed to retrieve exchange rates'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+from apps.trading.managers.bot_bridge import BotBridge
+from apps.trading.models import TradingBot, ExchangeCredentials, StrategyConfig
+
+async def get_or_create_bot(user, pair_symbol: str, exchange: str):
+    """
+    Get bot and wrap it in BotBridge (new architecture, same old flow)
+    """
+    # Get exchange credentials
+    creds = await sync_to_async(ExchangeCredentials.objects.get)(
+        user=user,
+        exchange_name=exchange
+    )
+    
+    # Get strategy
+    strategy = await sync_to_async(StrategyConfig.objects.get)(
+        strategy='quantum_ai'
+    )
+    
+    # Get or create bot
+    bot_name = f"{user.username}_{pair_symbol}_{exchange}"
+    bot, created = await sync_to_async(TradingBot.objects.get_or_create)(
+        user=user,
+        name=bot_name,
+        defaults={
+            'strategy': strategy,
+            'exchange_credentials': creds,
+            'symbol': pair_symbol,
+            'custom_parameters': {
+                'favor_levels': 3,
+                'against_levels': 3,
+            }
+        }
+    )
+    
+    # Create bridge
+    bridge = BotBridge(bot)
+    
+    if created:
+        print(f"🤖 Created new bot: {bot_name}")
+    
+    return bridge
+
+# In your EMA/RSI/BB update views:
+async def post(self, request):
+    # ... parse data ...
+    bridge = await get_or_create_bot(user, symbol, exchange)
+    
+    # Update indicators (mimics old bot.EMA = value)
+    bridge.update_indicator('EMA', ema_value)
+    bridge.update_indicator('RSI', rsi_value)
+    # ... etc ...
+    
+    # Execute once (like old bot.update_conditions())
+    result = bridge.execute_once()
+    
+    # Return response
+    return JsonResponse({'success': True, 'result': result})

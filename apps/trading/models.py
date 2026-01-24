@@ -65,6 +65,7 @@ class ExchangeCredentials(SoftDeleteModel):
         blank=True,
         related_name='trading_credentials'
     )
+    nickname = models.CharField(max_length=100, default="Default Account")
     exchange_name = models.CharField(max_length=20, choices=EXCHANGE_CHOICES)
     api_key = models.TextField(help_text="Encrypted API key")
     secret_key = models.TextField(help_text="Encrypted secret key")
@@ -314,3 +315,64 @@ class BotConfiguration(SoftDeleteModel):
 
     def __str__(self):
         return f"{self.name} ({self.strategy}) - {self.user.email}"
+
+
+class StrategyConfig(SoftDeleteModel):
+    """Strategy configuration templates"""
+    STRATEGY_CHOICES = [
+        ('quantum_ai', 'Quantum AI'),
+        ('grid_trading', 'Grid Trading'),
+        ('martingale', 'Martingale'),
+        ('webhook_alerts', 'Webhook Alerts'),
+    ]
+    
+    name = models.CharField(max_length=100, help_text="e.g., 'Quantum AI Aggressive'")
+    strategy = models.CharField(max_length=20, choices=STRATEGY_CHOICES)
+    default_parameters = models.JSONField(default=dict, help_text="Default strategy parameters")
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.name} - {self.get_strategy_display()}"
+
+
+# Rename BotConfiguration to TradingBot (or keep both for now)
+# Add this new model:
+class TradingBot(SoftDeleteModel):
+    """Actual bot instances that run strategies"""
+    STATUS_CHOICES = [
+        ('stopped', 'Stopped'),
+        ('running', 'Running'),
+        ('paused', 'Paused'),
+        ('error', 'Error'),
+    ]
+    
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    name = models.CharField(max_length=100, unique=True, help_text="Unique bot name")
+    
+    # Key relationships
+    strategy = models.ForeignKey(StrategyConfig, on_delete=models.CASCADE)
+    exchange_credentials = models.ForeignKey(ExchangeCredentials, on_delete=models.CASCADE)
+    
+    # Trading config
+    symbol = models.CharField(max_length=20)  # Trading pair
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='stopped')
+    is_active = models.BooleanField(default=True)
+    
+    # Risk parameters
+    max_positions = models.IntegerField(default=5)
+    position_size = models.DecimalField(max_digits=20, decimal_places=8)
+    take_profit_percent = models.DecimalField(max_digits=5, decimal_places=2, default=2.0)
+    stop_loss_percent = models.DecimalField(max_digits=5, decimal_places=2, default=1.0)
+    
+    # Custom parameters (override strategy defaults)
+    custom_parameters = models.JSONField(default=dict)
+    
+    # Performance tracking
+    total_trades = models.PositiveIntegerField(default=0)
+    total_profit_loss = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    win_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    last_trade_at = models.DateTimeField(null=True, blank=True)
+    
+    def __str__(self):
+        return f"{self.name} ({self.strategy}) - {self.symbol}"

@@ -61,6 +61,8 @@ class QuantumAIStrategy(BaseStrategy):
         - EMA_BB_Exit: 'tp', 'sl', 'both', or 'none'
     """
 
+    
+
     @property
     def name(self) -> str:
         return 'Quantum AI'

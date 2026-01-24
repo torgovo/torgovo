@@ -150,3 +150,63 @@ def bots_overview(request):
 @permission_classes([IsAuthenticated])
 def bot_performance(request, bot_id):
     return Response({'message': 'Not implemented yet'}, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+from apps.trading.engines.bot_engine import BotEngine
+from apps.trading.models import TradingBot, ExchangeCredentials, StrategyConfig
+
+async def get_or_create_bot(user, pair_config_dict, exchange):
+    """
+    Get existing TradingBot or create new one, return BotEngine.
+    """
+    symbol = pair_config_dict['pair_symbol']
+    
+    # Get exchange credentials
+    creds = await sync_to_async(ExchangeCredentials.objects.get)(
+        user=user,
+        exchange_name=exchange
+    )
+    
+    # Get strategy config
+    strategy = await sync_to_async(StrategyConfig.objects.get)(
+        strategy='quantum_ai'
+    )
+    
+    # Get or create TradingBot
+    bot_name = f"{user.username}_{symbol}_{exchange}"
+    bot, created = await sync_to_async(TradingBot.objects.get_or_create)(
+        user=user,
+        name=bot_name,
+        defaults={
+            'strategy': strategy,
+            'exchange_credentials': creds,
+            'symbol': symbol,
+            'status': 'stopped',
+            'max_positions': 3,
+            'position_size': float(pair_config_dict.get('quantity', 10)),
+            'custom_parameters': {
+                'favor_levels': pair_config_dict.get('favor_levels', 3),
+                'against_levels': pair_config_dict.get('against_levels', 3),
+                'favor_level_qty': pair_config_dict.get('favor_level_qty', 5),
+                'against_level_qty': pair_config_dict.get('against_level_qty', 5),
+            }
+        }
+    )
+    
+    # Create engine
+    engine = BotEngine(bot)
+    
+    if created:
+        logger.info(f"🤖 Created new bot: {bot_name}")
+    else:
+        logger.debug(f"✅ Found existing bot: {bot_name}")
+    
+    return engine
+
+# In your BinanceEMA view:
+async def post(self, request):
+    # ... parse data ...
+    engine = await get_or_create_bot(user, pair_config_dict, exchange)
+    engine.EMA = ema_value  # Same as old bot.EMA = value
+    result = engine.update_conditions()  # Same as old bot.update_conditions()
+    return JsonResponse({'success': True, 'result': result})
