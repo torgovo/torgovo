@@ -59,6 +59,43 @@ class BotExecutor:
         self.errors: list = []
 
     @classmethod
+    def from_bot_instance(cls, bot_instance):
+        """
+        Create BotExecutor from TradingBot model instance.
+
+        Args:
+            bot_instance: TradingBot model instance
+
+        Returns:
+            BotExecutor instance
+        """
+        from ..strategies import get_strategy
+        from ..exchanges import get_adapter
+
+        # Get strategy class and instantiate
+        strategy_class = get_strategy(bot_instance.strategy.strategy)
+        strategy = strategy_class(parameters={
+            'symbol': bot_instance.symbol,
+            **bot_instance.strategy.default_parameters,
+            **bot_instance.custom_parameters
+        })
+
+        # Get credentials and create adapter
+        credentials = bot_instance.exchange_credentials.get_decrypted_credentials()
+        adapter = get_adapter(
+            exchange_name=bot_instance.exchange_credentials.exchange_name,
+            credentials=credentials,
+            demo_mode=bot_instance.exchange_credentials.is_testnet
+        )
+
+        return cls(
+            strategy=strategy,
+            adapter=adapter,
+            bot_config=bot_instance,
+            symbol=bot_instance.symbol
+        )
+
+    @classmethod
     def from_config(cls, bot_config):
         """
         Create a BotExecutor from a Django BotConfiguration model.

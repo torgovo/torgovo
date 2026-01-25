@@ -836,3 +836,98 @@ class TelegramSignalSubscription(SoftDeleteModel):
 
     def __str__(self):
         return f"{self.user.email} - {self.telegram_handle}"
+
+
+class CustomBot(SoftDeleteModel, TimeStampedModel):
+    """
+    Consumer-created webhook alert bots for custom strategies.
+    Each bot gets a unique webhook URL with bot_id and secret_key for TradingView integration.
+    """
+
+    # Unique identifiers (auto-generated)
+    bot_id = models.CharField(max_length=100,unique=True,blank=True,null=False,editable=False,help_text="Unique identifier for webhook URL")
+    secret_key = models.CharField(max_length=100,unique=True,blank=True,null=False,editable=False,help_text="Secret key for webhook authentication")
+
+    # User and naming
+    user = models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.CASCADE,related_name='custom_bots')
+    name = models.CharField(max_length=100,blank=True,help_text="User-defined bot name")
+
+    # Trading configuration
+    exchange = models.CharField(max_length=50,choices=[
+            ('binance', 'Binance'),
+            ('bybit', 'Bybit'),
+            ('okx', 'OKX'),
+            ('mexc', 'MEXC'),
+            ('kucoin', 'KuCoin')
+        ],
+        help_text="Exchange to trade on")
+    symbol = models.CharField(max_length=20,blank=True,null=True,help_text="Trading pair format: BTC/USDT")
+    # Strategy parameters
+    position_size = models.DecimalField(max_digits=20,decimal_places=8,null=True,blank=True,help_text="Fixed position size in quote currency")
+    use_tradingview_position_size = models.BooleanField(default=False,help_text="Use position_size from TradingView signal instead of fixed size")
+    # Webhook template (auto-generated)
+    webhook_payload_template = models.JSONField(blank=True,null=True,editable=False,help_text="Template for TradingView alert message")
+    # Bot statistics
+    is_active = models.BooleanField(default=True)
+    total_trades = models.IntegerField(default=0)
+    last_trade_time = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'bots_custom_bot'
+        indexes = [
+            models.Index(fields=['bot_id', 'secret_key']),
+            models.Index(fields=['user', 'is_active']),
+        ]
+        verbose_name = "Custom Bot"
+        verbose_name_plural = "Custom Bots"
+
+    def __str__(self):
+        return f"{self.user.username} - {self.name or self.bot_id}"
+
+    def generate_identifier(self):
+        """Generate unique 5-5-5 format UUID"""
+        return f"{uuid.uuid4().hex[:5]}-{uuid.uuid4().hex[:5]}-{uuid.uuid4().hex[:5]}"
+
+    def generate_webhook_url(self):
+        """Generate full webhook URL for TradingView"""
+        from django.urls import reverse
+        return f"https://torgovo.app{reverse('bots:webhook_signal', kwargs={'bot_id': self.bot_id, 'secret_key': self.secret_key})}"
+
+    def create_payload_template(self):
+        """Create TradingView alert message template"""
+        return {
+            "bot_id": self.bot_id,
+            "secret": self.secret_key,
+            "Pair": "{{ticker}}",
+            "side": "{{strategy.order.action}}",
+            "position_size": "{{strategy.position_size}}",
+            "exchange": self.exchange,
+            "timestamp": "{{timenow}}"
+        }
+
+    def save(self, *args, **kwargs):
+        # Generate bot_id if not exists
+        if not self.bot_id:
+            while True:
+                bot_id = self.generate_identifier()
+                if not CustomBot.objects.filter(bot_id=bot_id).exists():
+                    self.bot_id = bot_id
+                    break
+
+        # Generate secret_key if not exists
+        if not self.secret_key:
+            while True:
+                secret_key = self.generate_identifier()
+                if not CustomBot.objects.filter(secret_key=secret_key).exists():
+                    self.secret_key = secret_key
+                    break
+
+        # Generate payload template if not exists
+        if not self.webhook_payload_template:
+            self.webhook_payload_template = self.create_payload_template()
+
+        super().save(*args, **kwargs)
+
+    def get_webhook_url_for_user(self):
+        """Return webhook URL to display to user"""
+        return self.generate_webhook_url()
