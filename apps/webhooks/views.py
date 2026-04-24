@@ -13,10 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
-class CustomBotWebhookView(APIView):
+class SignalBotWebhookView(APIView):
     """
-    Global webhook endpoint for Custom Bot (TradingView)
-    URL: /api/webhooks/custombot/
+    Global webhook endpoint for Signal Bot (TradingView)
+    URL: /api/webhooks/signalbot/
     Accepts bot_id and secret in JSON payload to identify bot and execute trades
     """
     permission_classes = [AllowAny]
@@ -30,7 +30,7 @@ class CustomBotWebhookView(APIView):
         import ccxt
         import math
         from decimal import Decimal
-        from apps.bots.models import CustomBot
+        from apps.bots.models import SignalBot
         from apps.exchanges.models import ExchangeCredentials
         from django.utils import timezone
 
@@ -59,12 +59,12 @@ class CustomBotWebhookView(APIView):
 
             # Find bot by bot_id and validate secret
             try:
-                bot = CustomBot.objects.select_related('user', 'subscription').get(
+                bot = SignalBot.objects.select_related('user', 'subscription').get(
                     bot_id=bot_id,
                     secret_key=secret,
                     is_deleted=False
                 )
-            except CustomBot.DoesNotExist:
+            except SignalBot.DoesNotExist:
                 logger.warning(f"Invalid bot_id or secret: {bot_id}")
                 return Response({'error': 'Invalid bot_id or secret'}, status=status.HTTP_403_FORBIDDEN)
 

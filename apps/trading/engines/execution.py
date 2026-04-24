@@ -59,39 +59,55 @@ class BotExecutor:
         self.errors: list = []
 
     @classmethod
-    def from_config(cls, bot_config):
+    def from_config(cls, config: dict):
         """
-        Create a BotExecutor from a Django BotConfiguration model.
-
+        Create a BotExecutor from a plain config dict.
+        
         Args:
-            bot_config: BotConfiguration model instance
-
+            config: Dict with keys:
+                - strategy: str (e.g. 'quantum_ai', 'grid')
+                - symbol: str (e.g. 'BTC/USDT')
+                - exchange_name: str (e.g. 'bybit')
+                - api_key: str (decrypted)
+                - secret_key: str (decrypted)
+                - passphrase: str (optional)
+                - is_testnet: bool
+                - parameters: dict (strategy-specific params)
+        
         Returns:
             BotExecutor instance
         """
         from ..strategies import get_strategy
         from ..exchanges import get_adapter
 
-        # Get strategy class and instantiate
-        strategy_class = get_strategy(bot_config.strategy)
+        strategy_name = config.get('strategy', 'quantum_ai')
+        symbol = config.get('symbol', '')
+        parameters = config.get('parameters', {})
+
+        # Instantiate strategy
+        strategy_class = get_strategy(strategy_name)
         strategy = strategy_class(parameters={
-            'symbol': bot_config.symbol,
-            **bot_config.parameters
+            'symbol': symbol,
+            **parameters
         })
 
-        # Get credentials and create adapter
-        credentials = bot_config.exchange_credentials.get_decrypted_credentials()
+        # Create exchange adapter
+        credentials = {
+            'api_key': config.get('api_key', ''),
+            'secret_key': config.get('secret_key', ''),
+            'passphrase': config.get('passphrase', ''),
+        }
         adapter = get_adapter(
-            exchange_name=bot_config.exchange_credentials.exchange_name,
+            exchange_name=config.get('exchange_name', 'bybit'),
             credentials=credentials,
-            demo_mode=bot_config.exchange_credentials.is_testnet
+            demo_mode=config.get('is_testnet', False)
         )
 
         return cls(
             strategy=strategy,
             adapter=adapter,
-            bot_config=bot_config,
-            symbol=bot_config.symbol
+            bot_config=config,
+            symbol=symbol
         )
 
     def run_once(self) -> Dict[str, Any]:
@@ -211,29 +227,30 @@ class BotExecutor:
     def _log_trade(self, signal, order):
         """Log trade to database."""
         try:
-            from ..models import BotConfiguration
             from apps.bots.models import Order
 
-            Order.objects.create(
-                user=self.bot_config.user,
-                pair=signal.symbol,
-                exchange=self.adapter.exchange_name,
-                side=signal.action,
-                category=self.strategy.name.lower().replace(' ', '_'),
-                order_type=signal.order_type,
-                quantity=signal.amount,
-                price=signal.price or order.get('price', 0),
-                executed_price=order.get('price', 0),
-                exchange_order_id=order.get('id', ''),
-                status=order.get('status', 'created'),
-                description=signal.reason,
-                details=signal.metadata,
-            )
+            # bot_config is now a dict, extract user_id if present
+            user_id = self.bot_config.get('user_id') if isinstance(self.bot_config, dict) else None
+            if not user_id:
+                logger.warning("No user_id in config, skipping trade log")
+                return
 
-            # Update bot stats
-            self.bot_config.total_trades += 1
-            self.bot_config.last_trade_at = datetime.utcnow()
-            self.bot_config.save(update_fields=['total_trades', 'last_trade_at'])
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            user = User.objects.get(id=user_id)
+
+            Order.objects.create(
+                user=user,
+                Pair=signal.symbol,
+                Exchange=self.adapter.exchange_name,
+                Side=signal.action,
+                Category=self.strategy.name.lower().replace(' ', '_'),
+                Order_type=signal.order_type,
+                Quantity=signal.amount,
+                Price=signal.price or order.get('price', 0),
+                Description=signal.reason,
+                Details=signal.metadata,
+            )
 
         except Exception as e:
             logger.error(f"Failed to log trade: {e}")
@@ -243,10 +260,30 @@ class BotExecutor:
         try:
             # Update bot status to error if too many consecutive errors
             if len(self.errors) >= 5:
-                self.bot_config.status = 'error'
-                self.bot_config.save(update_fields=['status'])
+                bot_id = self.bot_config.get('bot_id') if isinstance(self.bot_config, dict) else None
+                bot_type = self.bot_config.get('bot_type') if isinstance(self.bot_config, dict) else None
+                if bot_id and bot_type:
+                    self._update_bot_status(bot_id, bot_type, 'error')
+                logger.error(f"Bot {bot_id} exceeded error threshold (5+ consecutive errors)")
         except Exception as e:
-            logger.error(f"Failed to update bot status: {e}")
+            logger.error(f"Failed to handle bot error: {e}")
+
+    @staticmethod
+    def _update_bot_status(bot_id: str, bot_type: str, new_status: str):
+        """Update bot model status in database."""
+        try:
+            if bot_type == 'grid':
+                from apps.bots.models import GridBot
+                GridBot.objects.filter(id=bot_id).update(is_running=False)
+            elif bot_type == 'martingale':
+                from apps.bots.models import MartingaleBot
+                MartingaleBot.objects.filter(id=bot_id).update(is_running=False)
+            elif bot_type == 'signal':
+                from apps.bots.models import SignalBot
+                SignalBot.objects.filter(id=bot_id).update(is_active=False)
+            logger.info(f"Updated bot {bot_id} status to {new_status}")
+        except Exception as e:
+            logger.error(f"Failed to update bot {bot_id} status: {e}")
 
     def get_status(self) -> Dict[str, Any]:
         """Get executor status."""
@@ -262,33 +299,75 @@ class BotExecutor:
         }
 
 
-def run_bot(bot_id: str) -> Dict[str, Any]:
+def run_bot(bot_id: str, bot_type: str = 'grid') -> Dict[str, Any]:
     """
     Run a single iteration of a bot by its ID.
-
     This is the main entry point for Celery tasks.
-
+    
+    Builds a config dict from the actual bot model in apps/bots/,
+    then runs BotExecutor.
+    
     Args:
-        bot_id: UUID of the BotConfiguration
-
+        bot_id: UUID of the bot
+        bot_type: 'grid', 'martingale', 'signal', or 'quantum_ai'
+    
     Returns:
         Execution result dict
     """
-    from ..models import BotConfiguration
-
     try:
-        bot_config = BotConfiguration.objects.select_related(
-            'exchange_credentials', 'user'
-        ).get(id=bot_id, is_active=True)
+        # Import the right bot model based on type
+        if bot_type == 'grid':
+            from apps.bots.models import GridBot
+            bot = GridBot.objects.select_related('user', 'subscription').get(id=bot_id)
+        elif bot_type == 'martingale':
+            from apps.bots.models import MartingaleBot
+            bot = MartingaleBot.objects.select_related('user', 'subscription').get(id=bot_id)
+        elif bot_type == 'signal':
+            from apps.bots.models import SignalBot
+            bot = SignalBot.objects.select_related('user', 'subscription').get(id=bot_id)
+        else:
+            return {'success': False, 'error': f'Unknown bot_type: {bot_type}'}
 
-        if bot_config.status != 'active':
-            return {'success': False, 'error': f'Bot is not active: {bot_config.status}'}
+        # Get exchange credentials
+        from apps.exchanges.models import ExchangeCredentials
+        credentials = ExchangeCredentials.objects.get(
+            user=bot.user,
+            exchange_name=bot.exchange_name,
+            is_active=True
+        )
+        creds = credentials.get_decrypted_credentials()
 
-        executor = BotExecutor.from_config(bot_config)
+        # Build config dict
+        config = {
+            'bot_id': str(bot.id),
+            'bot_name': bot.bot_name,
+            'bot_type': bot_type,
+            'user_id': str(bot.user.id),
+            'strategy': bot_type,
+            'symbol': bot.trading_pair,
+            'exchange_name': bot.exchange_name,
+            'api_key': creds.get('api_key', ''),
+            'secret_key': creds.get('secret_key', ''),
+            'passphrase': creds.get('passphrase', ''),
+            'is_testnet': credentials.is_testnet,
+            'parameters': {},
+        }
+
+        # Add bot-type-specific parameters
+        if bot_type in ('grid', 'martingale'):
+            config['parameters'] = {
+                'favor_levels': bot.favor_levels,
+                'against_levels': bot.against_levels,
+                'level_spacing_percent': float(bot.level_spacing_percent),
+                'initial_amount': float(bot.initial_amount),
+                'base_amount': float(bot.base_amount),
+                'take_profit_percent': float(bot.take_profit_percent),
+                'stop_loss_percent': float(bot.stop_loss_percent),
+            }
+
+        executor = BotExecutor.from_config(config)
         return executor.run_once()
 
-    except BotConfiguration.DoesNotExist:
-        return {'success': False, 'error': f'Bot not found: {bot_id}'}
     except Exception as e:
         logger.error(f"Error running bot {bot_id}: {e}", exc_info=True)
         return {'success': False, 'error': str(e)}

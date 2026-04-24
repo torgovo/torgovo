@@ -12,6 +12,10 @@ from django.conf import settings
 from core.models import TimeStampedModel, SoftDeleteModel
 from core.utils import encrypt_api_key, decrypt_api_key
 
+# Canonical ExchangeCredentials lives in apps.exchanges — import here for
+# backward-compat so apps/trading/ views/serializers/admin still resolve it.
+from apps.exchanges.models import ExchangeCredentials  # noqa: F401
+
 
 # =============================================================================
 # EXCHANGE MODELS
@@ -45,88 +49,8 @@ class Exchange(TimeStampedModel):
         return self.display_name
 
 
-class ExchangeCredentials(SoftDeleteModel):
-    """
-    Encrypted storage for exchange API credentials.
-    """
-    EXCHANGE_CHOICES = [
-        ('binance', 'Binance'),
-        ('bybit', 'Bybit'),
-        ('okx', 'OKX'),
-        ('mexc', 'MEXC'),
-        ('alpaca', 'Alpaca'),
-        ('coinbase', 'Coinbase'),
-    ]
-
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name='trading_credentials'
-    )
-    nickname = models.CharField(max_length=100, default="Default Account")
-    exchange_name = models.CharField(max_length=20, choices=EXCHANGE_CHOICES)
-    api_key = models.TextField(help_text="Encrypted API key")
-    secret_key = models.TextField(help_text="Encrypted secret key")
-    passphrase = models.TextField(
-        blank=True,
-        null=True,
-        help_text="Encrypted passphrase (required for some exchanges)"
-    )
-    is_active = models.BooleanField(default=True)
-    is_testnet = models.BooleanField(default=True, help_text="Use testnet/sandbox mode")
-    permissions = models.JSONField(
-        default=dict,
-        help_text="Trading permissions (spot, futures, margin, etc.)"
-    )
-    last_verified = models.DateTimeField(null=True, blank=True)
-    verification_status = models.CharField(
-        max_length=20,
-        choices=[
-            ('pending', 'Pending'),
-            ('verified', 'Verified'),
-            ('failed', 'Failed'),
-        ],
-        default='pending'
-    )
-    trading_enabled = models.BooleanField(default=True)
-    withdrawal_enabled = models.BooleanField(default=False)
-    notes = models.TextField(blank=True)
-
-    class Meta:
-        db_table = 'trading_credentials'
-        unique_together = ['user', 'exchange_name']
-        indexes = [
-            models.Index(fields=['user', 'exchange_name']),
-            models.Index(fields=['is_active']),
-            models.Index(fields=['verification_status']),
-        ]
-
-    def __str__(self):
-        return f"{self.user.email} - {self.exchange_name}"
-
-    def save(self, *args, **kwargs):
-        """Encrypt credentials before saving."""
-        if not self.pk:  # Only encrypt on creation
-            self.api_key = encrypt_api_key(self.api_key)
-            self.secret_key = encrypt_api_key(self.secret_key)
-            if self.passphrase:
-                self.passphrase = encrypt_api_key(self.passphrase)
-        super().save(*args, **kwargs)
-
-    def get_decrypted_credentials(self):
-        """Get decrypted credentials for exchange API usage."""
-        return {
-            'api_key': decrypt_api_key(self.api_key),
-            'secret_key': decrypt_api_key(self.secret_key),
-            'passphrase': decrypt_api_key(self.passphrase) if self.passphrase else None,
-            'is_testnet': self.is_testnet,
-        }
-
-    def has_permission(self, permission):
-        """Check if credentials have specific trading permission."""
-        return self.permissions.get(permission, False)
+# ExchangeCredentials removed from this module — use apps.exchanges.models.ExchangeCredentials
+# (imported above for backward compatibility)
 
 
 class ExchangeStatus(TimeStampedModel):
@@ -260,70 +184,27 @@ class ExchangeRate(TimeStampedModel):
         return f"1 {self.from_currency} = {self.rate} {self.to_currency}"
 
 
+
 # =============================================================================
-# BOT CONFIGURATION MODELS
+# STRATEGY CONFIG (Default Presets)
 # =============================================================================
 
-class BotConfiguration(SoftDeleteModel):
+class StrategyConfig(SoftDeleteModel):
     """
-    Configuration for trading bots.
-    Note: SoftDeleteModel already inherits from TimeStampedModel which provides id, created_at, updated_at
+    Strategy configuration templates / default presets.
+    
+    Each bot type (SignalBot, GridBot, MartingaleBot) has its own per-user params.
+    StrategyConfig provides reusable defaults so if a user doesn't set custom
+    values, these are used. Admin can create presets like:
+    - "Quantum AI Aggressive"
+    - "Grid Conservative"
+    - "Martingale High Risk"
     """
     STRATEGY_CHOICES = [
         ('quantum_ai', 'Quantum AI'),
         ('grid', 'Grid Trading'),
         ('martingale', 'Martingale'),
-        ('webhook', 'Webhook Alerts'),
-    ]
-
-    STATUS_CHOICES = [
-        ('active', 'Active'),
-        ('paused', 'Paused'),
-        ('stopped', 'Stopped'),
-        ('error', 'Error'),
-    ]
-
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='bot_configurations'
-    )
-    name = models.CharField(max_length=100)
-    strategy = models.CharField(max_length=20, choices=STRATEGY_CHOICES)
-    exchange_credentials = models.ForeignKey(
-        ExchangeCredentials,
-        on_delete=models.CASCADE,
-        related_name='bot_configurations'
-    )
-    symbol = models.CharField(max_length=20)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='stopped')
-    parameters = models.JSONField(default=dict, help_text="Strategy-specific parameters")
-    is_active = models.BooleanField(default=True)
-
-    # Performance tracking
-    total_trades = models.PositiveIntegerField(default=0)
-    total_profit_loss = models.DecimalField(max_digits=20, decimal_places=8, default=0)
-    last_trade_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = 'trading_bot_configurations'
-        indexes = [
-            models.Index(fields=['user', 'status']),
-            models.Index(fields=['strategy']),
-            models.Index(fields=['is_active']),
-        ]
-
-    def __str__(self):
-        return f"{self.name} ({self.strategy}) - {self.user.email}"
-
-
-class StrategyConfig(SoftDeleteModel):
-    """Strategy configuration templates"""
-    STRATEGY_CHOICES = [
-        ('quantum_ai', 'Quantum AI'),
-        ('grid_trading', 'Grid Trading'),
-        ('martingale', 'Martingale'),
-        ('webhook_alerts', 'Webhook Alerts'),
+        ('signal', 'Signal Bot'),
     ]
     
     name = models.CharField(max_length=100, help_text="e.g., 'Quantum AI Aggressive'")
@@ -332,47 +213,11 @@ class StrategyConfig(SoftDeleteModel):
     description = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
 
+    class Meta:
+        db_table = 'trading_strategy_configs'
+        indexes = [
+            models.Index(fields=['strategy', 'is_active']),
+        ]
+
     def __str__(self):
         return f"{self.name} - {self.get_strategy_display()}"
-
-
-# Rename BotConfiguration to TradingBot (or keep both for now)
-# Add this new model:
-class TradingBot(SoftDeleteModel):
-    """Actual bot instances that run strategies"""
-    STATUS_CHOICES = [
-        ('stopped', 'Stopped'),
-        ('running', 'Running'),
-        ('paused', 'Paused'),
-        ('error', 'Error'),
-    ]
-    
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    name = models.CharField(max_length=100, unique=True, help_text="Unique bot name")
-    
-    # Key relationships
-    strategy = models.ForeignKey(StrategyConfig, on_delete=models.CASCADE)
-    exchange_credentials = models.ForeignKey(ExchangeCredentials, on_delete=models.CASCADE)
-    
-    # Trading config
-    symbol = models.CharField(max_length=20)  # Trading pair
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='stopped')
-    is_active = models.BooleanField(default=True)
-    
-    # Risk parameters
-    max_positions = models.IntegerField(default=5)
-    position_size = models.DecimalField(max_digits=20, decimal_places=8)
-    take_profit_percent = models.DecimalField(max_digits=5, decimal_places=2, default=2.0)
-    stop_loss_percent = models.DecimalField(max_digits=5, decimal_places=2, default=1.0)
-    
-    # Custom parameters (override strategy defaults)
-    custom_parameters = models.JSONField(default=dict)
-    
-    # Performance tracking
-    total_trades = models.PositiveIntegerField(default=0)
-    total_profit_loss = models.DecimalField(max_digits=20, decimal_places=8, default=0)
-    win_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
-    last_trade_at = models.DateTimeField(null=True, blank=True)
-    
-    def __str__(self):
-        return f"{self.name} ({self.strategy}) - {self.symbol}"

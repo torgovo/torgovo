@@ -14,14 +14,13 @@ from drf_yasg import openapi
 
 from .models import (
     Exchange, ExchangeCredentials, TradingPair, ExchangeStatus,
-    SupportedBlockchain, ExchangeRate, BotConfiguration
+    SupportedBlockchain, ExchangeRate, StrategyConfig
 )
 from .serializers import (
     ExchangeSerializer, ExchangeCredentialsSerializer,
     ExchangeCredentialsCreateSerializer, TradingPairSerializer,
     ExchangeStatusSerializer, SupportedBlockchainSerializer,
-    ExchangeRateSerializer, BotConfigurationSerializer,
-    BotConfigurationCreateSerializer
+    ExchangeRateSerializer, StrategyConfigSerializer
 )
 
 logger = logging.getLogger('apps.trading')
@@ -92,52 +91,11 @@ class ExchangeStatusViewSet(viewsets.ReadOnlyModelViewSet):
 # BOT CONFIGURATION VIEWSETS
 # =============================================================================
 
-class BotConfigurationViewSet(viewsets.ModelViewSet):
-    """ViewSet for managing bot configurations."""
+class StrategyConfigViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet for browsing strategy presets (read-only for users)."""
+    serializer_class = StrategyConfigSerializer
     permission_classes = [IsAuthenticated]
-
-    def get_serializer_class(self):
-        if self.action == 'create':
-            return BotConfigurationCreateSerializer
-        return BotConfigurationSerializer
-
-    def get_queryset(self):
-        return BotConfiguration.objects.filter(user=self.request.user)
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
-
-    @action(detail=True, methods=['post'])
-    def start(self, request, pk=None):
-        """Start a bot."""
-        bot = self.get_object()
-        if bot.status == 'active':
-            return Response({'error': 'Bot is already running'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # TODO: Trigger Celery task to start the bot
-        bot.status = 'active'
-        bot.save()
-        return Response({'status': 'Bot started'})
-
-    @action(detail=True, methods=['post'])
-    def stop(self, request, pk=None):
-        """Stop a bot."""
-        bot = self.get_object()
-        if bot.status == 'stopped':
-            return Response({'error': 'Bot is already stopped'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # TODO: Trigger Celery task to stop the bot
-        bot.status = 'stopped'
-        bot.save()
-        return Response({'status': 'Bot stopped'})
-
-    @action(detail=True, methods=['post'])
-    def pause(self, request, pk=None):
-        """Pause a bot."""
-        bot = self.get_object()
-        bot.status = 'paused'
-        bot.save()
-        return Response({'status': 'Bot paused'})
+    queryset = StrategyConfig.objects.filter(is_active=True)
 
 
 # =============================================================================
@@ -251,62 +209,4 @@ def get_exchange_rates(request):
             'success': False,
             'error': 'Failed to retrieve exchange rates'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-from apps.trading.managers.bot_bridge import BotBridge
-from apps.trading.models import TradingBot, ExchangeCredentials, StrategyConfig
-
-async def get_or_create_bot(user, pair_symbol: str, exchange: str):
-    """
-    Get bot and wrap it in BotBridge (new architecture, same old flow)
-    """
-    # Get exchange credentials
-    creds = await sync_to_async(ExchangeCredentials.objects.get)(
-        user=user,
-        exchange_name=exchange
-    )
-    
-    # Get strategy
-    strategy = await sync_to_async(StrategyConfig.objects.get)(
-        strategy='quantum_ai'
-    )
-    
-    # Get or create bot
-    bot_name = f"{user.username}_{pair_symbol}_{exchange}"
-    bot, created = await sync_to_async(TradingBot.objects.get_or_create)(
-        user=user,
-        name=bot_name,
-        defaults={
-            'strategy': strategy,
-            'exchange_credentials': creds,
-            'symbol': pair_symbol,
-            'custom_parameters': {
-                'favor_levels': 3,
-                'against_levels': 3,
-            }
-        }
-    )
-    
-    # Create bridge
-    bridge = BotBridge(bot)
-    
-    if created:
-        print(f"🤖 Created new bot: {bot_name}")
-    
-    return bridge
-
-# In your EMA/RSI/BB update views:
-async def post(self, request):
-    # ... parse data ...
-    bridge = await get_or_create_bot(user, symbol, exchange)
-    
-    # Update indicators (mimics old bot.EMA = value)
-    bridge.update_indicator('EMA', ema_value)
-    bridge.update_indicator('RSI', rsi_value)
-    # ... etc ...
-    
-    # Execute once (like old bot.update_conditions())
-    result = bridge.execute_once()
-    
-    # Return response
-    return JsonResponse({'success': True, 'result': result})
+

@@ -4,11 +4,11 @@ URL patterns for trading bot endpoints
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from apps.payments import views
+from apps.bots import views
 
 # DRF Router for bot viewsets
 router = DefaultRouter()
-router.register(r'custom-bots', views.CustomBotViewSet, basename='custombot')
+router.register(r'signal-bots', views.SignalBotViewSet, basename='signalbot')
 router.register(r'grid-bots', views.GridBotViewSet, basename='gridbot')
 router.register(r'martingale-bots', views.MartingaleBotViewSet, basename='martingalebot')
 router.register(r'quantum-funds', views.QuantumAIFundViewSet, basename='quantumfund')

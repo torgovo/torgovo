@@ -18,10 +18,9 @@ app.autodiscover_tasks()
 
 # Configure task routes
 app.conf.task_routes = {
-    'apps.bots.tasks.*': {'queue': 'bots'},
+    'apps.trading.tasks.*': {'queue': 'trading'},
     'apps.payments.tasks.*': {'queue': 'payments'},
     'apps.webhooks.tasks.*': {'queue': 'webhooks'},
-    'apps.notifications.tasks.*': {'queue': 'notifications'},
 }
 
 # Configure task priorities
@@ -37,26 +36,16 @@ app.conf.worker_prefetch_multiplier = 1
 app.conf.task_acks_late = True
 
 # Schedule periodic tasks
+# NOTE: Only reference tasks that actually exist in apps/trading/tasks.py
 app.conf.beat_schedule = {
-    'update-cryptocurrency-prices': {
-        'task': 'apps.bots.tasks.update_cryptocurrency_prices',
-        'schedule': 60.0,  # Every minute
+    # Run all active grid/martingale bots every 60 seconds
+    'run-active-bots': {
+        'task': 'apps.trading.tasks.check_all_active_bots',
+        'schedule': 60.0,
     },
-    'process-expired-webhooks': {
-        'task': 'apps.webhooks.tasks.process_expired_webhooks',
-        'schedule': 300.0,  # Every 5 minutes
+    # Distribute Quantum AI profits every 2 weeks (fortnightly)
+    'distribute-quantum-ai-profits': {
+        'task': 'apps.trading.tasks.distribute_quantum_ai_profits',
+        'schedule': 60 * 60 * 24 * 14,  # 14 days in seconds
     },
-    'update-bot-performance-stats': {
-        'task': 'apps.bots.tasks.update_bot_performance_stats',
-        'schedule': 3600.0,  # Every hour
-    },
-    'check-pending-deposits': {
-        'task': 'apps.payments.tasks.check_pending_deposits',
-        'schedule': 600.0,  # Every 10 minutes
-    },
-    'send-daily-reports': {
-        'task': 'apps.notifications.tasks.send_daily_reports',
-        'schedule': 86400.0,  # Every day at midnight
-        'options': {'queue': 'notifications'},
-    },
-}
+}

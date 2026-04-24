@@ -11,7 +11,7 @@ router.register(r'exchanges', views.ExchangeViewSet, basename='exchanges')
 router.register(r'credentials', views.ExchangeCredentialsViewSet, basename='credentials')
 router.register(r'pairs', views.TradingPairViewSet, basename='pairs')
 router.register(r'status', views.ExchangeStatusViewSet, basename='status')
-router.register(r'bots', views.BotConfigurationViewSet, basename='bots')
+router.register(r'strategy-configs', views.StrategyConfigViewSet, basename='strategy-configs')
 
 app_name = 'trading'
 

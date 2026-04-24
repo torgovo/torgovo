@@ -17,13 +17,13 @@ User = get_user_model()
 EXCHANGE_CHOICES = ExchangeCredentials.EXCHANGE_CHOICES
 
 
-# ==================== CUSTOM BOT (TradingView Webhook) ====================
+# ==================== SIGNAL BOT (TradingView Webhook) ====================
 
-class CustomBot(SoftDeleteModel):
-    """Custom Trading Bot (renamed from WebhookAlert)"""
+class SignalBot(SoftDeleteModel):
+    """Signal Bot - receives trading signals from TradingView webhooks and executes trades"""
 
     class Meta:
-        db_table = 'bots_custom_bots'
+        db_table = 'bots_signal_bots'
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['user', 'is_active']),
@@ -38,13 +38,13 @@ class CustomBot(SoftDeleteModel):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='custom_bots')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='signal_bots')
 
     # NEW: Link to subscription
     subscription = models.ForeignKey(
         'payments.BotSubscription',
         on_delete=models.CASCADE,
-        related_name='custom_bots',
+        related_name='signal_bots',
         null=True,
         blank=True
     )
@@ -118,7 +118,7 @@ class CustomBot(SoftDeleteModel):
         if not self.bot_id:
             while True:
                 new_id = self.generate_bot_id()
-                if not CustomBot.objects.filter(bot_id=new_id).exists():
+                if not SignalBot.objects.filter(bot_id=new_id).exists():
                     self.bot_id = new_id
                     break
         
@@ -376,6 +376,13 @@ class QuantumAIFund(SoftDeleteModel):
     total_deposits = models.DecimalField(max_digits=20, decimal_places=8, default=0)
     last_trade_at = models.DateTimeField(null=True, blank=True)
 
+    # Profit distribution config (admin configurable: 5-20%)
+    shown_percentage = models.DecimalField(
+        max_digits=5, decimal_places=2, default=20.0,
+        validators=[MinValueValidator(5), MaxValueValidator(20)],
+        help_text="Percentage of actual profit/loss shown to users (5-20%)"
+    )
+
     # Admin Controls
     is_active = models.BooleanField(default=True)
     admin_notes = models.TextField(blank=True)
@@ -387,10 +394,61 @@ class QuantumAIFund(SoftDeleteModel):
         return f"{self.name} - ${self.total_fund_value:,.2f}"
 
     def calculate_profit_to_distribute(self):
-        """Calculate 20% of profit for distribution"""
+        """Calculate shown_percentage of profit for distribution to users"""
         if self.total_profit <= 0:
             return Decimal('0')
-        return self.total_profit * Decimal('0.20')
+        return self.total_profit * (self.shown_percentage / Decimal('100'))
+
+
+# ==================== QUANTUM AI BOT (Admin-Managed Trading Bot) ====================
+
+class QuantumAIBot(SoftDeleteModel):
+    """Admin-managed trading bot that trades using the QuantumAI strategy against the fund.
+    
+    Admin sees and configures this bot. Users only see their investment balance.
+    """
+
+    class Meta:
+        db_table = 'bots_quantum_ai_bots'
+        verbose_name = "Quantum AI Bot"
+        verbose_name_plural = "Quantum AI Bots"
+        indexes = [
+            models.Index(fields=['fund', 'is_running']),
+            models.Index(fields=['exchange_name', 'trading_pair']),
+        ]
+
+    EXCHANGE_CHOICES = EXCHANGE_CHOICES
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    fund = models.ForeignKey(QuantumAIFund, on_delete=models.CASCADE, related_name='bots')
+
+    bot_name = models.CharField(max_length=255)
+    exchange_name = models.CharField(max_length=20, choices=EXCHANGE_CHOICES)
+    trading_pair = models.CharField(max_length=20)
+
+    # Strategy parameters
+    strategy_parameters = models.JSONField(
+        default=dict,
+        help_text="Strategy-specific config: timeframes, indicators, thresholds, etc."
+    )
+
+    # Bot state
+    is_running = models.BooleanField(default=False)
+    started_at = models.DateTimeField(null=True, blank=True)
+    stopped_at = models.DateTimeField(null=True, blank=True)
+
+    # Performance tracking
+    total_trades = models.PositiveIntegerField(default=0)
+    total_profit_loss = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    last_trade_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        status = 'Running' if self.is_running else 'Stopped'
+        return f"{self.bot_name} [{status}] - {self.trading_pair}"
 
 
 # ==================== QUANTUM AI INVESTMENT (User-Facing) ====================
@@ -710,8 +768,8 @@ class Order(TimeStampedModel):
     PairConfig = models.ForeignKey(PairConfig, on_delete=models.CASCADE, blank=True, null=True)
     Indicators = models.ForeignKey(Indicator, on_delete=models.CASCADE, blank=True, null=True)
 
-    # NEW: Bot references (polymorphic)
-    custom_bot = models.ForeignKey(CustomBot, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
+    # Bot references (polymorphic)
+    signal_bot = models.ForeignKey(SignalBot, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
     grid_bot = models.ForeignKey(GridBot, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
     martingale_bot = models.ForeignKey(MartingaleBot, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
     quantum_ai_investment = models.ForeignKey(QuantumAIInvestment, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')

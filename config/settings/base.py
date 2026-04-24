@@ -34,6 +34,7 @@ THIRD_PARTY_APPS = [
     'corsheaders',
     'daphne',
     'channels',
+    'drf_yasg',
     # 'allauth',  # Temporarily disabled
     # 'allauth.account',
     # 'allauth.socialaccount',

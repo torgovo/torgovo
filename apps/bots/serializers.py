@@ -4,7 +4,7 @@ Serializers for trading bots - Updated for subscription system
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import (
-    CustomBot, GridBot, MartingaleBot, Order,
+    SignalBot, GridBot, MartingaleBot, Order,
     Indicator, PairConfig, QuantumAIFund, QuantumAIInvestment,
     TelegramSignalSubscription, TelegramSignalPlan,
     QuantumDepositWallet, QuantumDeposit, QuantumWeeklyProfit
@@ -13,15 +13,15 @@ from .models import (
 User = get_user_model()
 
 
-# ==================== CUSTOM BOT (TradingView Webhook) ====================
+# ==================== SIGNAL BOT (TradingView Webhook) ====================
 
-class CustomBotSerializer(serializers.ModelSerializer):
-    """Serializer for CustomBot model (renamed from WebhookAlert)."""
+class SignalBotSerializer(serializers.ModelSerializer):
+    """Serializer for SignalBot model."""
     user = serializers.HiddenField(default=serializers.CurrentUserDefault())
     success_rate = serializers.ReadOnlyField()
 
     class Meta:
-        model = CustomBot
+        model = SignalBot
         fields = [
             'id', 'user', 'bot_name', 'webhook_url', 'secret_key', 'exchange_name',
             'market_type', 'trading_pair', 'default_amount', 'take_profit_percent',
@@ -36,12 +36,12 @@ class CustomBotSerializer(serializers.ModelSerializer):
         ]
 
 
-class CustomBotCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating CustomBot."""
+class SignalBotCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating SignalBot."""
     user = serializers.HiddenField(default=serializers.CurrentUserDefault())
 
     class Meta:
-        model = CustomBot
+        model = SignalBot
         fields = [
             'bot_name', 'exchange_name', 'market_type', 'trading_pair',
             'default_amount', 'take_profit_percent', 'stop_loss_percent'
@@ -212,7 +212,7 @@ class OrderSerializer(serializers.ModelSerializer):
     """Serializer for Order model."""
     user = serializers.HiddenField(default=serializers.CurrentUserDefault())
     user_info = serializers.SerializerMethodField()
-    custom_bot_info = serializers.SerializerMethodField()
+    signal_bot_info = serializers.SerializerMethodField()
     grid_bot_info = serializers.SerializerMethodField()
     martingale_bot_info = serializers.SerializerMethodField()
     quantum_ai_info = serializers.SerializerMethodField()
@@ -223,8 +223,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'id', 'Time', 'user', 'user_info', 'Pair', 'PairConfig', 'Indicators',
             'Side', 'Category', 'Order_type', 'Quantity', 'Price', 'Exchange',
             'Take_Profit', 'Stop_Loss', 'Description', 'Details',
-            'custom_bot', 'grid_bot', 'martingale_bot', 'quantum_ai_investment',
-            'custom_bot_info', 'grid_bot_info', 'martingale_bot_info', 'quantum_ai_info'
+            'signal_bot', 'grid_bot', 'martingale_bot', 'quantum_ai_investment',
+            'signal_bot_info', 'grid_bot_info', 'martingale_bot_info', 'quantum_ai_info'
         ]
 
     def get_user_info(self, obj):
@@ -232,9 +232,9 @@ class OrderSerializer(serializers.ModelSerializer):
             return {'id': str(obj.user.id), 'email': obj.user.email}
         return None
 
-    def get_custom_bot_info(self, obj):
-        if obj.custom_bot:
-            return {'id': str(obj.custom_bot.id), 'bot_name': obj.custom_bot.bot_name}
+    def get_signal_bot_info(self, obj):
+        if obj.signal_bot:
+            return {'id': str(obj.signal_bot.id), 'bot_name': obj.signal_bot.bot_name}
         return None
 
     def get_grid_bot_info(self, obj):

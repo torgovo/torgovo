@@ -1,19 +1,20 @@
+from django.conf import settings
 from django.contrib import admin
 from django.utils.html import format_html
 from django.contrib import messages
 from django.utils import timezone
 from .models import (
-    CustomBot, GridBot, MartingaleBot,
-    QuantumAIFund, QuantumAIInvestment,
+    SignalBot, GridBot, MartingaleBot,
+    QuantumAIFund, QuantumAIBot, QuantumAIInvestment,
     Indicator, PairConfig, Order,
     TelegramSignalPlan, TelegramSignalSubscription
 )
 
 
-# ==================== CUSTOM BOT ADMIN ====================
+# ==================== SIGNAL BOT ADMIN ====================
 
-@admin.register(CustomBot)
-class CustomBotAdmin(admin.ModelAdmin):
+@admin.register(SignalBot)
+class SignalBotAdmin(admin.ModelAdmin):
     list_display = [
         'bot_name', 'user', 'exchange_name', 'market_type',
         'trading_pair', 'is_active', 'total_trades', 'success_rate'

@@ -1,8 +1,15 @@
 from django.contrib import admin
 from .models import (
-    ExchangeCredentials, ExchangeStatus, TradingPair,
+    Exchange, ExchangeCredentials, ExchangeStatus, TradingPair,
     SupportedBlockchain, ExchangeRate
 )
+
+@admin.register(Exchange)
+class ExchangeAdmin(admin.ModelAdmin):
+    list_display = ('name', 'display_name', 'is_active', 'supports_testnet')
+    list_filter = ('is_active', 'supports_testnet')
+    search_fields = ('name', 'display_name')
+
 
 @admin.register(ExchangeCredentials)
 class ExchangeCredentialsAdmin(admin.ModelAdmin):

@@ -8,7 +8,7 @@ app_name = 'webhooks'
 
 urlpatterns = [
     # Custom Bot webhook endpoint (global URL, secret in JSON)
-    path('', views.CustomBotWebhookView.as_view(), name='custombot_webhook'),
+    path('', views.SignalBotWebhookView.as_view(), name='signalbot_webhook'),
 
     # Technical indicator endpoints
     path('indicators/ema/', views.EMAIndicatorView.as_view(), name='ema_indicator'),

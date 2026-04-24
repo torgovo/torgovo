@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 from .models import (
     Exchange, ExchangeCredentials, TradingPair,
     ExchangeStatus, SupportedBlockchain, ExchangeRate,
-    BotConfiguration
+    StrategyConfig
 )
 
 User = get_user_model()
@@ -117,31 +117,15 @@ class ExchangeRateSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'timestamp', 'created_at', 'updated_at']
 
 
-class BotConfigurationSerializer(serializers.ModelSerializer):
-    """Serializer for BotConfiguration model."""
-    exchange_name = serializers.CharField(
-        source='exchange_credentials.exchange_name',
-        read_only=True
-    )
+class StrategyConfigSerializer(serializers.ModelSerializer):
+    """Serializer for StrategyConfig (default presets per strategy type)."""
+    strategy_display = serializers.CharField(source='get_strategy_display', read_only=True)
 
     class Meta:
-        model = BotConfiguration
+        model = StrategyConfig
         fields = [
-            'id', 'name', 'strategy', 'exchange_credentials', 'exchange_name',
-            'symbol', 'status', 'parameters', 'is_active',
-            'total_trades', 'total_profit_loss', 'last_trade_at',
+            'id', 'name', 'strategy', 'strategy_display',
+            'default_parameters', 'description', 'is_active',
             'created_at', 'updated_at'
         ]
-        read_only_fields = [
-            'id', 'total_trades', 'total_profit_loss', 'last_trade_at',
-            'created_at', 'updated_at'
-        ]
-
-
-class BotConfigurationCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating BotConfiguration."""
-    class Meta:
-        model = BotConfiguration
-        fields = [
-            'name', 'strategy', 'exchange_credentials', 'symbol', 'parameters'
-        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
