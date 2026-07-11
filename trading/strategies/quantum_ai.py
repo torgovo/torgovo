@@ -413,7 +413,7 @@ class QuantumAIStrategy:
                     try:
                         o = self.exchange.fetch_order(order_id, self.symbol)
                         return self.exchange.is_order_filled(o)
-                    except:
+                    except Exception:
                         for o2 in open_orders:
                             if self.exchange.get_order_id(o2) == order_id:
                                 return False

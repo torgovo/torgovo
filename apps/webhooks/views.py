@@ -7,9 +7,57 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
+from django.core.cache import cache
+from django.utils import timezone as _tz
+from datetime import datetime, timedelta
 import logging
+import hmac as _hmac
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_tv_timestamp(raw: str) -> datetime | None:
+    """Parse TradingView timestamp — ISO 8601 ({{timenow}}) or Unix ms ({{time}}).
+
+    Returns timezone-aware datetime in UTC, or None if unparseable.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    raw = raw.strip().strip('"').strip("'")
+    # ISO 8601:  2026-06-21T12:34:56Z  or  2026-06-21T12:34:56.123Z
+    try:
+        if raw.endswith('Z'):
+            raw_clean = raw[:-1]
+            if '.' in raw_clean:
+                dt = datetime.strptime(raw_clean, '%Y-%m-%dT%H:%M:%S.%f')
+            else:
+                dt = datetime.strptime(raw_clean, '%Y-%m-%dT%H:%M:%S')
+            return dt.replace(tzinfo=_tz.UTC)
+    except ValueError:
+        pass
+    # Unix epoch milliseconds
+    try:
+        ms = int(raw)
+        if 1_000_000_000_000 < ms < 2_000_000_000_000:  # sanity: 2001-2033
+            return datetime.fromtimestamp(ms / 1000, tz=_tz.UTC)
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _webhook_fail_key(bot_id: str) -> str:
+    return f"webhook:fail:{bot_id}"
+
+
+def _webhook_dedupe_key(bot_id: str, ts: str, side: str, pair: str, pos_size: str) -> str:
+    import hashlib
+    raw = f"{bot_id}|{ts}|{side}|{pair}|{pos_size}"
+    return f"webhook:dedupe:{hashlib.sha256(raw.encode()).hexdigest()[:24]}"
+
+
+RATE_LIMIT_FAILURES = 5
+RATE_LIMIT_WINDOW = 300  # 5 minutes
+TIMESTAMP_MAX_AGE = 120  # seconds
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -20,6 +68,7 @@ class SignalBotWebhookView(APIView):
     Accepts bot_id and secret in JSON payload to identify bot and execute trades
     """
     permission_classes = [AllowAny]
+    throttle_scope = 'webhook'
 
     def post(self, request):
         """
@@ -43,7 +92,8 @@ class SignalBotWebhookView(APIView):
             else:
                 payload = request.data
             
-            logger.info(f"Received webhook payload: {payload}")
+            safe_payload = {k: v for k, v in payload.items() if k != 'secret'}
+            logger.info(f"Received webhook payload: {safe_payload}")
 
             # Validate required fields
             bot_id = payload.get('bot_id')
@@ -57,16 +107,71 @@ class SignalBotWebhookView(APIView):
             if not secret:
                 return Response({'error': 'Missing secret in payload'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Find bot by bot_id and validate secret
+            # Rate limit check: too many recent validation failures for this bot_id
+            fail_count = cache.get(_webhook_fail_key(bot_id), 0)
+            if fail_count >= RATE_LIMIT_FAILURES:
+                logger.warning(f"Bot {bot_id} rate-limited ({fail_count} failures in {RATE_LIMIT_WINDOW}s)")
+                return Response({'error': 'Too many failed attempts'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+            # Timestamp validation (replay window)
+            ts_raw = payload.get('timestamp')
+            if not ts_raw:
+                _fails = cache.add(_webhook_fail_key(bot_id), 1, RATE_LIMIT_WINDOW)
+                if not _fails:
+                    cache.incr(_webhook_fail_key(bot_id), 1)
+                logger.warning(f"Missing timestamp for bot {bot_id}")
+                return Response({'error': 'Missing timestamp'}, status=status.HTTP_400_BAD_REQUEST)
+
+            ts_dt = _parse_tv_timestamp(str(ts_raw))
+            if ts_dt is None:
+                _fails = cache.add(_webhook_fail_key(bot_id), 1, RATE_LIMIT_WINDOW)
+                if not _fails:
+                    cache.incr(_webhook_fail_key(bot_id), 1)
+                    cache.touch(_webhook_fail_key(bot_id), RATE_LIMIT_WINDOW)
+                logger.warning(f"Unparseable timestamp for bot {bot_id}: {ts_raw}")
+                return Response({'error': 'Invalid timestamp'}, status=status.HTTP_400_BAD_REQUEST)
+
+            now = timezone.now()
+            age = (now - ts_dt).total_seconds()
+            if abs(age) > TIMESTAMP_MAX_AGE:
+                _fails = cache.add(_webhook_fail_key(bot_id), 1, RATE_LIMIT_WINDOW)
+                if not _fails:
+                    cache.incr(_webhook_fail_key(bot_id), 1)
+                    cache.touch(_webhook_fail_key(bot_id), RATE_LIMIT_WINDOW)
+                logger.warning(f"Timestamp too old for bot {bot_id}: {age:.0f}s")
+                return Response({'error': 'Timestamp expired'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Find bot by bot_id and validate secret in constant time
             try:
                 bot = SignalBot.objects.select_related('user', 'subscription').get(
                     bot_id=bot_id,
-                    secret_key=secret,
-                    is_deleted=False
+                    is_deleted=False,
                 )
             except SignalBot.DoesNotExist:
-                logger.warning(f"Invalid bot_id or secret: {bot_id}")
+                _fails = cache.add(_webhook_fail_key(bot_id), 1, RATE_LIMIT_WINDOW)
+                if not _fails:
+                    cache.incr(_webhook_fail_key(bot_id), 1)
+                    cache.touch(_webhook_fail_key(bot_id), RATE_LIMIT_WINDOW)
+                logger.warning(f"Invalid bot_id: {bot_id}")
                 return Response({'error': 'Invalid bot_id or secret'}, status=status.HTTP_403_FORBIDDEN)
+
+            import hmac as _hmac
+            if not _hmac.compare_digest(str(secret), str(bot.secret_key or '')):
+                _fails = cache.add(_webhook_fail_key(bot_id), 1, RATE_LIMIT_WINDOW)
+                if not _fails:
+                    cache.incr(_webhook_fail_key(bot_id), 1)
+                    cache.touch(_webhook_fail_key(bot_id), RATE_LIMIT_WINDOW)
+                logger.warning(f"Invalid secret for bot {bot_id}")
+                return Response({'error': 'Invalid bot_id or secret'}, status=status.HTTP_403_FORBIDDEN)
+
+            # Redis dedupe — reject exact replay within 120 s window
+            dedupe_key = _webhook_dedupe_key(
+                bot_id, ts_raw, side, trading_pair,
+                str(payload.get('position_size', ''))
+            )
+            if not cache.add(dedupe_key, '1', TIMESTAMP_MAX_AGE):
+                logger.info(f"Dedupe hit for {dedupe_key[:40]}… — ignoring replay")
+                return Response({'success': True, 'message': 'Duplicate ignored'}, status=status.HTTP_200_OK)
 
             user = bot.user
 
@@ -134,8 +239,13 @@ class SignalBotWebhookView(APIView):
             }, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Webhook processing error: {str(e)}", exc_info=True)
-            return Response({'error': f'Server error: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            # SECURITY: never echo internal exception strings to clients —
+            # they can include CCXT API error messages, credential fragments,
+            # or DB schema details. ``exc_info`` removed here because local
+            # frames carry decrypted ``api_key``/``secret_key`` variables
+            # (see execute_trade above).
+            logger.error(f"Webhook processing error: {type(e).__name__}")
+            return Response({'error': 'Server error'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def execute_trade(self, user, bot, exchange_name, side, trading_pair, position_size):
         """
@@ -215,8 +325,12 @@ class SignalBotWebhookView(APIView):
             }
 
         except Exception as e:
-            logger.error(f"Trade execution error: {str(e)}", exc_info=True)
-            return {'status': 'error', 'message': str(e)}
+            # See note on the outer handler — do not include exc_info here:
+            # ``api_key`` / ``secret_key`` / ``passphrase`` are local
+            # variables of ``execute_trade`` and would be captured by the
+            # traceback machinery.
+            logger.error(f"Trade execution error: {type(e).__name__}")
+            return {'status': 'error', 'message': 'Trade execution failed'}
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -225,6 +339,7 @@ class TradingViewWebhookView(APIView):
     Webhook endpoint for TradingView alerts
     """
     permission_classes = [AllowAny]
+    throttle_scope = 'webhook'
 
     def post(self, request, webhook_id):
         """
@@ -233,12 +348,13 @@ class TradingViewWebhookView(APIView):
         try:
             # Log the incoming webhook
             logger.info(f"Received TradingView webhook: {webhook_id}")
-            logger.debug(f"Webhook payload: {request.data}")
+            logger.debug(f"Webhook payload keys: {list(request.data.keys()) if request.data else 'empty'}")
 
-            # TODO: Implement webhook processing logic
-            # 1. Validate webhook_id
-            # 2. Process the trading signal
-            # 3. Execute trades based on alert
+            # TODO (CRIT-3): Implement webhook processing logic
+            # 1. Validate webhook_id against WebhookAlertBot model
+            # 2. Validate secret using hmac.compare_digest()
+            # 3. Process the trading signal
+            # 4. Execute trades based on alert
 
             return Response({
                 'status': 'success',
@@ -247,10 +363,13 @@ class TradingViewWebhookView(APIView):
             }, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Error processing webhook {webhook_id}: {str(e)}")
+            # SECURITY (CRIT-3): NEVER echo str(e) to clients — it can
+            # contain DB table names, field names, CCXT API error details,
+            # and partial credential info.
+            logger.error(f"Error processing webhook {webhook_id}: {type(e).__name__}")
             return Response({
                 'status': 'error',
-                'message': str(e)
+                'message': 'Webhook processing failed'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 

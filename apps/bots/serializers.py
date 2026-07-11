@@ -32,7 +32,7 @@ class SignalBotSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'user', 'webhook_url', 'secret_key', 'created_at', 'updated_at',
             'last_triggered', 'total_trades', 'successful_trades', 'total_profit_loss',
-            'success_rate', 'last_error'
+            'success_rate', 'last_error', 'subscription'
         ]
 
 
@@ -43,9 +43,11 @@ class SignalBotCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = SignalBot
         fields = [
-            'bot_name', 'exchange_name', 'market_type', 'trading_pair',
-            'default_amount', 'take_profit_percent', 'stop_loss_percent'
+            'user', 'bot_name', 'exchange_name', 'market_type', 'trading_pair',
+            'default_amount', 'take_profit_percent', 'stop_loss_percent',
+            'webhook_url', 'bot_id'
         ]
+        read_only_fields = ['webhook_url', 'bot_id']
 
     def validate_exchange_name(self, value):
         """Validate that exchange is supported."""
@@ -90,7 +92,7 @@ class GridBotSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'user', 'is_running', 'started_at', 'stopped_at',
             'current_profit_loss', 'total_invested', 'total_trades_executed',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at', 'subscription'
         ]
 
 
@@ -101,7 +103,7 @@ class GridBotCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = GridBot
         fields = [
-            'bot_name', 'exchange_name', 'trading_pair', 'initial_amount',
+            'user', 'bot_name', 'exchange_name', 'trading_pair', 'initial_amount',
             'base_amount', 'favor_levels', 'against_levels', 'favor_level_qty',
             'against_level_qty', 'favor_level_difference', 'against_level_difference',
             'amount_type', 'take_profit_percent', 'stop_loss_percent'
@@ -133,7 +135,8 @@ class MartingaleBotSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'user', 'is_running', 'started_at', 'stopped_at', 'current_level',
             'max_level_reached', 'last_execution_price', 'current_profit_loss',
-            'total_invested', 'total_trades_executed', 'created_at', 'updated_at'
+            'total_invested', 'total_trades_executed', 'created_at', 'updated_at',
+            'subscription'
         ]
 
 
@@ -144,7 +147,7 @@ class MartingaleBotCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = MartingaleBot
         fields = [
-            'bot_name', 'exchange_name', 'trading_pair', 'initial_amount',
+            'user', 'bot_name', 'exchange_name', 'trading_pair', 'initial_amount',
             'base_amount', 'favor_levels', 'against_levels', 'favor_level_qty',
             'against_level_qty', 'favor_level_difference', 'against_level_difference',
             'amount_type', 'multiplier_factor', 'take_profit_percent', 'stop_loss_percent'
@@ -160,7 +163,6 @@ class QuantumAIFundSerializer(serializers.ModelSerializer):
         model = QuantumAIFund
         fields = [
             'id', 'name', 'trading_strategy', 'risk_parameters',
-            'master_api_key', 'master_secret_key', 'master_passphrase',
             'total_fund_value', 'total_profit', 'total_deposits', 'last_trade_at',
             'is_active', 'admin_notes', 'created_at', 'updated_at'
         ]
@@ -182,7 +184,7 @@ class QuantumAIInvestmentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'user', 'share_percentage', 'accrued_profit', 'total_payouts',
-            'user_share_amount', 'created_at', 'updated_at'
+            'user_share_amount', 'created_at', 'updated_at', 'subscription'
         ]
 
 
@@ -203,7 +205,7 @@ class PairConfigSerializer(serializers.ModelSerializer):
             'EMA_BB_Entry', 'BB_RSI_Entry', 'EMA_BB_RSI_Entry', 'BB_Exit',
             'RSI_Exit', 'EMA_RSI_Exit', 'EMA_BB_Exit', 'BB_RSI_Exit', 'EMA_BB_RSI_Exit', 'SL_Exit'
         ]
-        read_only_fields = ['slug']
+        read_only_fields = ['slug', 'subscription']
 
 
 # ==================== ORDER ====================

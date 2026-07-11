@@ -88,12 +88,18 @@ class UserProfile(TimeStampedModel):
         super().save(*args, **kwargs)
 
     def generate_referral_code(self):
-        """Generate unique referral code."""
-        import random
+        """Generate unique referral code.
+
+        SECURITY (HIGH-5): Use secrets module (CSPRNG) instead of random.choices()
+        (Mersenne Twister). Referral codes have financial value (unlock bonuses,
+        commissions) and must not be predictable.
+        """
+        import secrets
         import string
 
+        alphabet = string.ascii_uppercase + string.digits
         while True:
-            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+            code = ''.join(secrets.choice(alphabet) for _ in range(8))
             if not UserProfile.objects.filter(referral_code=code).exists():
                 return code
 
@@ -124,7 +130,7 @@ class UserProfile(TimeStampedModel):
         """Check if user can create more bots."""
         from django.apps import apps
 
-        WebhookAlert = apps.get_model('bots', 'WebhookAlert')
+        WebhookAlert = apps.get_model('bots', 'SignalBot')
         GridBot = apps.get_model('bots', 'GridBot')
         MartingaleBot = apps.get_model('bots', 'MartingaleBot')
         QuantumAIBot = apps.get_model('bots', 'QuantumAIBot')

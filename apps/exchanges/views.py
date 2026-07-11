@@ -8,13 +8,13 @@ from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 
 from .models import (
     ExchangeCredentials, TradingPair, ExchangeStatus,
-    Exchange
+    Exchange, ExchangeRate
 )
 from apps.payments.models import BlockchainAddress
 from .serializers import (
@@ -57,7 +57,7 @@ class TradingPairViewSet(viewsets.ReadOnlyModelViewSet):
         queryset = TradingPair.objects.filter(is_active=True)
         exchange_name = self.request.query_params.get('exchange', None)
         if exchange_name:
-            queryset = queryset.filter(exchange__name=exchange_name)
+            queryset = queryset.filter(exchange_name=exchange_name)
         return queryset
 
     @action(detail=False, methods=['get'])
@@ -73,13 +73,14 @@ class ExchangeStatusViewSet(viewsets.ReadOnlyModelViewSet):
     ViewSet for exchange status information.
     """
     serializer_class = ExchangeStatusSerializer
+    permission_classes = [IsAuthenticated]
     queryset = ExchangeStatus.objects.all()
 
     @action(detail=True, methods=['get'])
     def trading_pairs(self, request, pk=None):
         """Get trading pairs for a specific exchange."""
         exchange_status = self.get_object()
-        pairs = TradingPair.objects.filter(exchange=exchange_status.exchange, is_active=True)
+        pairs = TradingPair.objects.filter(exchange_name=exchange_status.exchange_name, is_active=True)
         serializer = TradingPairSerializer(pairs, many=True)
         return Response(serializer.data)
 
@@ -87,22 +88,27 @@ class ExchangeStatusViewSet(viewsets.ReadOnlyModelViewSet):
 class BlockchainAddressViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing blockchain addresses.
+
+    Read: any authenticated user
+    Write (create/update/delete): staff only
     """
     serializer_class = BlockchainAddressSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return BlockchainAddress.objects.filter(user=self.request.user)
+        return BlockchainAddress.objects.filter(is_active=True)
 
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsAuthenticated(), IsAdminUser()]
+        return [IsAuthenticated()]
 
     @action(detail=False, methods=['get'])
     def cryptocurrency(self, request):
         """Get addresses for specific cryptocurrency."""
         crypto = request.query_params.get('crypto', None)
         if crypto:
-            addresses = self.get_queryset().filter(cryptocurrency=crypto.upper())
+            addresses = self.get_queryset().filter(coin_type=crypto.upper())
             serializer = self.get_serializer(addresses, many=True)
             return Response(serializer.data)
         return Response({'error': 'Cryptocurrency parameter required'},
@@ -236,34 +242,69 @@ def get_exchange_symbols(request, exchange_name):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_exchange_rates(request):
-    """Get current exchange rates for trading pairs."""
+    """Get current exchange rates for trading pairs via CCXT."""
     try:
+        import ccxt
+        
         pairs_param = request.GET.get('pairs', None)
+        exchange_param = request.GET.get('exchange', 'bybit')
         rates = {}
 
         if pairs_param:
-            # Get specific pairs
             symbols = [s.strip().upper() for s in pairs_param.split(',')]
             trading_pairs = TradingPair.objects.filter(
                 symbol__in=symbols,
                 is_active=True
-            ).select_related('exchange')
+            )
         else:
-            # Get all active pairs (limited to avoid huge response)
             trading_pairs = TradingPair.objects.filter(
                 is_active=True
-            ).select_related('exchange')[:50]
+            )[:50]
 
-        # This would typically integrate with exchange APIs
-        # For now, return sample data
-        for pair in trading_pairs:
-            # In production, this would call actual exchange APIs
-            rates[pair.symbol] = {
-                'price': Decimal('45000.00'),  # Sample price
-                'exchange': pair.exchange.name,
-                'volume_24h': Decimal('1234567.89'),
-                'change_24h': Decimal('2.5')
-            }
+        # Try live prices via CCXT (no auth needed for public tickers)
+        try:
+            exchange_class = getattr(ccxt, exchange_param.lower(), None)
+            if exchange_class:
+                exchange = exchange_class({'enableRateLimit': True})
+                exchange.load_markets()
+
+                for pair in trading_pairs:
+                    try:
+                        ticker = exchange.fetch_ticker(pair.symbol)
+                        rates[pair.symbol] = {
+                            'price': str(ticker.get('last', 0)),
+                            'exchange': pair.exchange.name,
+                            'volume_24h': str(ticker.get('quoteVolume', 0)),
+                            'change_24h': str(ticker.get('percentage', 0)),
+                            'high_24h': str(ticker.get('high', 0)),
+                            'low_24h': str(ticker.get('low', 0)),
+                        }
+                    except Exception:
+                        # Pair not available on this exchange
+                        rates[pair.symbol] = {
+                            'price': None,
+                            'exchange': pair.exchange.name,
+                            'error': f'{pair.symbol} not available on {exchange_param}',
+                        }
+            else:
+                raise ValueError(f"Exchange {exchange_param} not supported")
+
+        except Exception as e:
+            logger.warning(f"CCXT fetch failed, falling back to DB: {e}")
+            # Fallback: use ExchangeRate model
+            for pair in trading_pairs:
+                try:
+                    rate_obj = ExchangeRate.objects.filter(
+                        from_currency=pair.base_asset,
+                        to_currency=pair.quote_asset
+                    ).latest('timestamp')
+                    rates[pair.symbol] = {
+                        'price': str(rate_obj.rate),
+                        'exchange': rate_obj.exchange_name,
+                        'source': 'cached',
+                    }
+                except ExchangeRate.DoesNotExist:
+                    rates[pair.symbol] = {'price': None, 'exchange': pair.exchange.name}
 
         return Response({
             'success': True,

@@ -65,8 +65,8 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             **validated_data
         )
 
-        # Create user profile
-        UserProfile.objects.create(user=user)
+        # Create user profile (signal may already have created one)
+        UserProfile.objects.get_or_create(user=user)
 
         return user
 
@@ -111,7 +111,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'user_email', 'user_full_name', 'subscription_plan',
             'subscription_plan_display', 'max_bots_allowed', 'timezone',
-            'demo_trading_enabled', 'email_notifications',
+            'trading_preferences', 'demo_trading_enabled', 'email_notifications',
             'sms_notifications', 'push_notifications',
             'subscription_start_date', 'subscription_end_date',
             'is_subscription_active', 'referral_code',
@@ -119,10 +119,11 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         )
         read_only_fields = (
-            'id', 'max_bots_allowed', 'subscription_start_date',
-            'subscription_end_date', 'is_subscription_active',
-            'referral_code', 'total_trades_executed',
-            'total_volume_traded', 'created_at', 'updated_at'
+            'id', 'max_bots_allowed', 'subscription_plan',
+            'subscription_start_date', 'subscription_end_date',
+            'is_subscription_active', 'referral_code',
+            'total_trades_executed', 'total_volume_traded',
+            'created_at', 'updated_at'
         )
 
 
@@ -220,7 +221,7 @@ class PhoneVerificationConfirmSerializer(serializers.Serializer):
                 user=user,
                 phone_number=phone_number,
                 is_verified=False,
-                is_expired=False
+                expires_at__gt=timezone.now()
             )
 
             if verification.attempts >= verification.max_attempts:
@@ -241,19 +242,26 @@ class PhoneVerificationConfirmSerializer(serializers.Serializer):
 
 
 class PasswordResetRequestSerializer(serializers.Serializer):
-    """Serializer for password reset request."""
+    """Serializer for password reset request.
+
+    SECURITY: Do NOT reveal whether the email exists. We only validate the
+    email format here; the view performs the (best-effort) token creation
+    and always returns the same generic response.
+    """
     email = serializers.EmailField()
 
-    def validate_email(self, value):
-        """Validate email exists."""
-        if not CustomUser.objects.filter(email=value).exists():
-            raise serializers.ValidationError("No account found with this email.")
-        return value
+    class _NoOp:
+        """Sentinel returned from ``save()`` to satisfy DRF's expectation
+        that the serializer instance is non-None."""
+        user = None
+        expires_at = None
 
     def create(self, validated_data):
-        """Create password reset token."""
         email = validated_data['email']
-        user = CustomUser.objects.get(email=email)
+        try:
+            user = CustomUser.objects.get(email=email)
+        except CustomUser.DoesNotExist:
+            return self._NoOp()
         token = generate_secret_key(64)
         expires_at = timezone.now() + timedelta(hours=2)
 
@@ -276,15 +284,20 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
     new_password_confirm = serializers.CharField(write_only=True)
 
     def validate_token(self, value):
-        """Validate reset token."""
+        """Validate reset token exists and is not expired.
+
+        SECURITY (CRIT-4): We only check existence here. The actual is_used
+        check + claim is done atomically in save() with select_for_update()
+        to prevent race-condition double-use.
+        """
         try:
-            token = PasswordResetToken.objects.get(
-                token=value,
-                is_used=False
-            )
+            token = PasswordResetToken.objects.get(token=value)
+            if token.is_used:
+                raise serializers.ValidationError("Reset token has already been used.")
             if token.is_expired():
                 raise serializers.ValidationError("Reset token has expired.")
-            return token
+            # Store raw token string for atomic claim in save()
+            return value
         except PasswordResetToken.DoesNotExist:
             raise serializers.ValidationError("Invalid reset token.")
 
@@ -295,16 +308,39 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         return attrs
 
     def save(self):
-        """Reset user password."""
-        token = self.validated_data['token']
+        """Reset user password with atomic token claim.
+
+        SECURITY (CRIT-4): select_for_update() acquires a row-level lock,
+        preventing a concurrent request from reading is_used=False at the
+        same time. Only one request can claim the token.
+        """
+        from django.db import transaction
+
+        token_value = self.validated_data['token']
         new_password = self.validated_data['new_password']
-        user = token.user
 
-        user.set_password(new_password)
-        user.save()
+        with transaction.atomic():
+            try:
+                token = PasswordResetToken.objects.select_for_update().get(
+                    token=token_value,
+                    is_used=False,
+                )
+            except PasswordResetToken.DoesNotExist:
+                raise serializers.ValidationError(
+                    {"token": "Token has already been used or is invalid."}
+                )
 
-        # Mark token as used
-        token.use()
+            if token.is_expired():
+                raise serializers.ValidationError(
+                    {"token": "Reset token has expired."}
+                )
+
+            user = token.user
+            user.set_password(new_password)
+            user.save(update_fields=['password'])
+
+            # Atomically mark as used inside the same transaction
+            token.use()
 
         return user
 
@@ -314,20 +350,49 @@ class GoogleAuthSerializer(serializers.Serializer):
     access_token = serializers.CharField()
 
     def validate_access_token(self, value):
-        """Validate Google access token."""
+        """Validate Google access token with audience check.
+
+        SECURITY: We MUST verify the token was issued for *our* application
+        (client_id). Without this, any Google access token from any app could
+        be used to impersonate a user on Torgovo (CRIT-1 in security audit v2).
+        """
         import requests
+        from django.conf import settings
+
+        google_client_id = getattr(settings, 'GOOGLE_CLIENT_ID', '') or \
+            settings.SOCIALACCOUNT_PROVIDERS.get('google', {}).get('APP', {}).get('client_id', '')
 
         try:
-            # Verify token with Google
-            response = requests.get(
-                'https://www.googleapis.com/oauth2/v2/userinfo',
-                params={'access_token': value}
+            # Step 1: Verify token audience with Google tokeninfo
+            tokeninfo_resp = requests.get(
+                'https://oauth2.googleapis.com/tokeninfo',
+                params={'access_token': value},
+                timeout=10,
             )
-
-            if response.status_code != 200:
+            if tokeninfo_resp.status_code != 200:
                 raise serializers.ValidationError("Invalid Google access token.")
 
-            user_data = response.json()
+            tokeninfo = tokeninfo_resp.json()
+
+            # Audience check — reject tokens issued for other applications
+            if google_client_id and tokeninfo.get('aud') != google_client_id:
+                raise serializers.ValidationError(
+                    "Token audience mismatch — token was not issued for this application."
+                )
+
+            # Step 2: Fetch user profile info
+            userinfo_resp = requests.get(
+                'https://www.googleapis.com/oauth2/v2/userinfo',
+                params={'access_token': value},
+                timeout=10,
+            )
+            if userinfo_resp.status_code != 200:
+                raise serializers.ValidationError("Failed to fetch user info from Google.")
+
+            user_data = userinfo_resp.json()
+            if not user_data.get('email'):
+                raise serializers.ValidationError("Google account has no email.")
+
             return user_data
 
         except requests.RequestException:

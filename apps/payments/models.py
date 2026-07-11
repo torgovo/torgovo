@@ -1,6 +1,7 @@
 """
 Payment and deposit models for Quantum AI system
 """
+import logging
 import uuid
 import pytz
 from decimal import Decimal
@@ -12,6 +13,8 @@ from core.models import TimeStampedModel, SoftDeleteModel
 from apps.exchanges.models import ExchangeCredentials
 
 User = settings.AUTH_USER_MODEL
+
+logger = logging.getLogger(__name__)
 
 
 class SubscriptionPlan(TimeStampedModel):
@@ -47,6 +50,20 @@ class SubscriptionPlan(TimeStampedModel):
     def __str__(self):
         return f"{self.name} (${self.price_monthly}/month)"
 
+    @property
+    def feature_dict(self):
+        """Return features as dict with defaults"""
+        if isinstance(self.features, dict):
+            return self.features
+        return {
+            'max_bots': self.max_bots_allowed,
+            'webhook_alerts': self.max_webhooks_allowed,
+            'include_quantum_ai': False,
+            'priority_support': False,
+            'advanced_analytics': False,
+            'max_positions': 50,
+        }
+
 
 class QuantumAIDeposit(SoftDeleteModel):
     """
@@ -64,6 +81,13 @@ class QuantumAIDeposit(SoftDeleteModel):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='payments_quantum_deposits'
+    )
+    quantum_bot = models.ForeignKey(
+        'bots.QuantumAIBot',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='quantum_deposits'
     )
     fund = models.ForeignKey(
         'bots.QuantumAIFund',
@@ -159,8 +183,14 @@ class QuantumAIDeposit(SoftDeleteModel):
         self.save()
 
         # Update quantum bot total deposited
-        self.quantum_bot.total_deposited += self.usdt_amount or self.amount
-        self.quantum_bot.save()
+        try:
+            if hasattr(self, 'quantum_bot'):
+                self.quantum_bot.total_deposited += self.usdt_amount or self.amount
+                self.quantum_bot.save()
+        except Exception as e:
+            # Don't swallow signals (KeyboardInterrupt etc.); narrow to
+            # Exception only.
+            logger.warning(f"Quantum bot total_deposited update failed: {e!r}")
 
         # Log the approval
         from core.models import AuditLog
@@ -343,7 +373,7 @@ class PaymentTransaction(TimeStampedModel):
 
 
 class ReferralPayout(SoftDeleteModel):
-    """
+    """"
     Referral commission payouts.
     """
     referrer = models.ForeignKey(
@@ -390,7 +420,7 @@ class ReferralPayout(SoftDeleteModel):
 # ==================== NEW BOT SUBSCRIPTION MODELS ====================
 
 class BotSubscriptionPlan(SoftDeleteModel):
-    """
+    """"
     Subscription plans for bot types (custom, grid, martingale, quantum_ai).
     Separate from general SubscriptionPlan.
     """
@@ -434,7 +464,7 @@ class BotSubscriptionPlan(SoftDeleteModel):
 
 
 class BotSubscription(SoftDeleteModel):
-    """
+    """"
     User's subscription to a bot service.
     Two-step flow: 1) Subscribe 2) Create bot after approval
     """
@@ -492,83 +522,17 @@ class BotSubscription(SoftDeleteModel):
     def __str__(self):
         return f"{self.user.email} - {self.plan.name} ({self.status})"
 
+    def approve(self, approved_by, notes=""):
+        """Approve the subscription (manual admin approval)."""
+        self.status = 'active'
+        self.approved_by = approved_by
+        self.approved_at = timezone.now()
+        self.notes = notes
+        self.save()
+
     @property
     def is_expired(self):
         """Check if subscription has expired"""
         if not self.expires_at:
             return False
         return timezone.now() > self.expires_at
-
-    def get_webhook_json_template(self):
-        """Returns JSON template for TradingView (custom bots only)"""
-        if not self.webhook_secret or self.plan.bot_type != 'custom':
-            return None
-
-        # Use request.build_absolute_uri if available, otherwise use settings
-        try:
-            from django.conf import settings
-            site_url = getattr(settings, 'SITE_URL', 'https://yourdomain.com')
-            if not site_url.startswith('http'):
-                site_url = f"https://{site_url}"
-        except:
-            site_url = "https://yourdomain.com"  # Fallback
-        
-        return {
-            "webhook_url": f"{site_url}/api/webhooks/custombot/",
-            "json_template": {
-                "secret": self.webhook_secret,
-                "exchange": self.exchange_name or "{{exchange}}",
-                "action": "{{strategy.order.action}}",
-                "symbol": "{{ticker}}",
-                "amount": "{{order.amount}}",
-                "price": "{{order.price}}"  # Optional
-            }
-        }
-
-    def approve(self, admin_user, notes=""):
-        """
-        Approve subscription and activate it.
-        Creates default PairConfig for grid/martingale bots.
-        """
-        from apps.bots.models import PairConfig
-
-        self.status = 'active'
-        self.approved_by = admin_user
-        self.approved_at = timezone.now()
-        self.started_at = timezone.now()
-        self.expires_at = timezone.now() + timezone.timedelta(days=self.plan.duration_days)
-
-        # Generate webhook secret for custom bots
-        if self.plan.bot_type == 'custom':
-            self.webhook_secret = uuid.uuid4().hex
-
-        self.notes = notes
-        self.save()
-
-        # Create default PairConfig for grid/martingale bots
-        if self.plan.bot_type in ['grid', 'martingale']:
-            PairConfig.objects.get_or_create(
-                user=self.user,
-                subscription=self,
-                pair_symbol=f"{self.exchange_name.upper()}/USDT" if self.exchange_name else "BTC/USDT",
-                bot_type=self.plan.bot_type,
-                defaults={
-                    'slug': f"{self.user.username}-{self.plan.bot_type}",
-                    'favor_levels': 3,
-                    'against_levels': 3,
-                    'favor_level_qty': 0.1,
-                    'against_level_qty': 0.1,
-                    'favor_level_difference': 1.0,
-                    'against_level_difference': 1.0,
-                    'Order_Type': 'market',
-                    'Amount_Type': 'dollar',
-                }
-            )
-
-    def reject(self, admin_user, reason=""):
-        """Reject subscription"""
-        self.status = 'rejected'
-        self.rejected_by = admin_user
-        self.rejected_at = timezone.now()
-        self.rejection_reason = reason
-        self.save()

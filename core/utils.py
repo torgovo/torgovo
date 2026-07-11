@@ -53,6 +53,31 @@ def decrypt_api_key(encrypted_key):
         raise
 
 
+def looks_encrypted(value):
+    """
+    Check if a value is already Fernet-encrypted.
+
+    Returns True if the value is empty/None (skip), or if it decrypts
+    successfully under the current FERNET_KEY. Returns False for values
+    that appear to be plaintext and need encryption.
+
+    WARNING — key rotation hazard: This function attempts decryption
+    under the *current* FERNET_KEY.  If the key is ever rotated, values
+    encrypted under the old key will fail decryption here, and
+    looks_encrypted() will return False.  The caller will then
+    double-encrypt the old ciphertext under the new key, producing
+    garbage on the next read.  Never rotate FERNET_KEY without writing
+    a dedicated re-encryption migration first.
+    """
+    if not value:
+        return True
+    try:
+        Fernet(settings.FERNET_KEY.encode()).decrypt(value.encode())
+        return True
+    except Exception:
+        return False
+
+
 def validate_webhook_signature(payload, signature, secret):
     """
     Validate webhook signature for security.

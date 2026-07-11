@@ -1,114 +1,160 @@
 """
-Quantum AI fund profit distribution service.
-"""
+Quantum AI fund — smoothed returns + reserve-backed profit distribution.
 
+Smoothing model:
+  If actual return < min  → show min  (reserve covers the gap)
+  If min ≤ actual ≤ max  → show actual
+  If actual > max         → show max  (excess goes to reserve)
+
+Users ALWAYS see non-negative returns. Admin absorbs all loss.
+"""
 import logging
 from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
-from apps.bots.models import QuantumAIFund, QuantumAIInvestment
+from apps.bots.models import QuantumAIFund, QuantumAIInvestment, ReserveFund
 from apps.payments.models import PaymentTransaction
-from apps.users.models import UserBalance  # Assuming you have this model
+from apps.users.models import UserBalance
 
 logger = logging.getLogger(__name__)
 
 
 class QuantumAIFundService:
-    """
-    Service for managing Quantum AI fund and profit distributions.
-    """
 
     @staticmethod
-    @transaction.atomic
     def update_fund_performance(fund_id: str, new_total_value: Decimal):
         """
-        Update fund performance (called manually by admin or via automation).
+        Update fund with new total value, then apply smoothing + reserve.
 
         Args:
             fund_id: UUID of QuantumAIFund
-            new_total_value: Current total value of fund in USDT
+            new_total_value: Current total value in USDT
         """
-        fund = QuantumAIFund.objects.select_for_update().get(id=fund_id)
-
+        with transaction.atomic():
+            fund = QuantumAIFund.objects.select_for_update().get(id=fund_id)
         old_total_value = fund.total_fund_value
         fund.total_fund_value = new_total_value
-
-        # Calculate profit since inception
         fund.total_profit = new_total_value - fund.total_deposits
-
         fund.last_trade_at = timezone.now()
         fund.save()
 
-        logger.info(f"Updated Quantum AI fund: {fund.name} to ${new_total_value:,.2f}")
+        logger.info(f"Updated {fund.name}: ${old_total_value:,.2f} → ${new_total_value:,.2f}")
 
-        # Optionally trigger profit distribution if profit increased
-        if fund.total_profit > 0:
-            QuantumAIFundService.calculate_profit_distribution(fund_id)
+        # Calculate real return since last update
+        if old_total_value > 0:
+            actual_return_pct = ((new_total_value - old_total_value) / old_total_value) * Decimal('100')
+            shown_pct = fund.calculate_smoothed_return(actual_return_pct)
+            excess_pct = fund.calculate_excess_return(actual_return_pct)
+
+            logger.info(
+                f"Actual: {actual_return_pct:.2f}% → "
+                f"Shown: {shown_pct:.2f}% | "
+                f"Excess to reserve: {excess_pct:.2f}%"
+            )
+
+            # Hit reserve if we showed more than actual (i.e. actual < min)
+            if excess_pct < 0:
+                reserve_cover = abs(excess_pct / Decimal('100')) * old_total_value
+                QuantumAIFundService._apply_reserve_cover(fund_id, reserve_cover)
+
+            # Deposit excess into reserve if actual > max
+            if excess_pct > 0:
+                reserve_excess = (excess_pct / Decimal('100')) * old_total_value
+                QuantumAIFundService._deposit_excess_to_reserve(fund_id, reserve_excess)
+
+            # Accrue smoothed profit to each investor
+            QuantumAIFundService._accrue_smoothed_profit(fund_id, shown_pct)
 
         return fund
 
     @staticmethod
-    def calculate_profit_distribution(fund_id: str):
-        """
-        Calculate profit share for each investor (does not pay out yet).
-        Creates accrual records that admin can later approve for payout.
-        """
+    def _accrue_smoothed_profit(fund_id: str, shown_pct: Decimal):
+        """Accrue smoothed profit to each active investor."""
         fund = QuantumAIFund.objects.get(id=fund_id)
+        investments = QuantumAIInvestment.objects.filter(fund=fund, status='active').select_related('user')
 
-        if fund.total_profit <= 0:
-            logger.info("No profit to distribute")
+        if not investments.exists():
             return
 
-        profit_to_distribute = fund.calculate_profit_to_distribute()
+        total_shown_value = fund.total_deposits * (shown_pct / Decimal('100'))
 
-        # Get all active investments
-        active_investments = QuantumAIInvestment.objects.filter(
-            fund=fund,
-            status='active'
-        ).select_related('user')
-
-        if not active_investments.exists():
-            logger.warning("No active investments found")
+        if fund.total_deposits == 0:
             return
 
-        # Calculate each investor's share
-        distribution_records = []
-        for investment in active_investments:
-            user_share = investment.calculate_profit_share()
+        for investment in investments:
+            user_share = (investment.amount / fund.total_deposits) * total_shown_value
+            investment.accrued_profit += user_share
+            investment.save()
 
-            if user_share > 0:
-                # Update accrued profit (not paid yet)
-                investment.accrued_profit += user_share
-                investment.save()
+        logger.info(
+            f"Accrued ${total_shown_value:,.2f} (shown {shown_pct:.2f}%) "
+            f"across {investments.count()} investors"
+        )
 
-                distribution_records.append({
-                    'user': investment.user.email,
-                    'amount': user_share,
-                    'investment': investment.amount,
-                    'share_percentage': investment.share_percentage,
-                })
+    @staticmethod
+    def _apply_reserve_cover(fund_id: str, amount: Decimal):
+        """Withdraw from reserve to cover the smoothed floor."""
+        try:
+            reserve = ReserveFund.objects.select_for_update().get(fund_id=fund_id)
+            balance_before = reserve.balance
+            if reserve.can_cover(amount):
+                reserve.balance -= amount
+                reserve.last_withdrawal = timezone.now()
+                reserve.save()
+                reserve.record_transaction(
+                    balance_before, -amount, 'shortfall_cover',
+                    f"Covered ${amount:,.2f} shortfall (floor smoothing)"
+                )
+                logger.info(f"Reserve covered ${amount:,.2f} — balance: ${reserve.balance:,.2f}")
+            else:
+                actual_shortfall = reserve.balance
+                reserve.balance = Decimal('0')
+                reserve.low_balance_alert_sent = True
+                reserve.last_withdrawal = timezone.now()
+                reserve.save()
+                reserve.record_transaction(
+                    balance_before, -actual_shortfall, 'shortfall_cover',
+                    f"Partial cover — only ${actual_shortfall:,.2f} available of ${amount:,.2f} needed. RESERVE DEPLETED."
+                )
+                logger.warning(
+                    f"Reserve INSUFFICIENT! Need ${amount:,.2f} "
+                    f"but only ${balance_before:,.2f} available. "
+                    f"Admin must top up reserve for {fund_id}"
+                )
+        except ReserveFund.DoesNotExist:
+            logger.error(f"No reserve fund found for {fund_id}! Cannot smooth returns.")
 
-        logger.info(f"Calculated profit distribution: ${profit_to_distribute:,.2f}")
-        logger.info(f"Distribution records: {distribution_records}")
-
-        return distribution_records
+    @staticmethod
+    def _deposit_excess_to_reserve(fund_id: str, amount: Decimal):
+        """Deposit excess profit into reserve."""
+        reserve, created = ReserveFund.objects.select_for_update().get_or_create(
+            fund_id=fund_id,
+            defaults={'balance': Decimal('0')}
+        )
+        balance_before = reserve.balance
+        reserve.balance += amount
+        reserve.last_top_up = timezone.now()
+        reserve.low_balance_alert_sent = False
+        reserve.save()
+        reserve.record_transaction(
+            balance_before, amount, 'excess_deposit',
+            f"Excess return deposit: ${amount:,.2f}"
+        )
+        logger.info(f"Reserve received ${amount:,.2f} excess — balance: ${reserve.balance:,.2f}")
 
     @staticmethod
     @transaction.atomic
     def process_payouts(fund_id: str, payout_date=None):
         """
-        Process actual payouts to users (admin-triggered).
-        Moves accrued_profit to total_payouts and credits user balance.
+        Process actual payouts to users.
+        Moves accrued_profit → total_payouts + credits user balance.
         """
         if payout_date is None:
             payout_date = timezone.now()
 
         fund = QuantumAIFund.objects.select_for_update().get(id=fund_id)
-
-        # Get all investments with accrued profit
         investments = QuantumAIInvestment.objects.filter(
-            fund=fund,
-            accrued_profit__gt=0
+            fund=fund, accrued_profit__gt=0
         ).select_for_update()
 
         total_paid = Decimal('0')
@@ -116,15 +162,12 @@ class QuantumAIFundService:
 
         for investment in investments:
             payout_amount = investment.accrued_profit
-
-            # Update investment
             investment.total_payouts += payout_amount
             investment.accrued_profit = Decimal('0')
             investment.save()
 
-            # Credit user balance
             try:
-                balance, created = UserBalance.objects.get_or_create(
+                balance, _ = UserBalance.objects.get_or_create(
                     user=investment.user,
                     currency='USDT',
                     defaults={'available': Decimal('0'), 'hold': Decimal('0')}
@@ -132,13 +175,12 @@ class QuantumAIFundService:
                 balance.available += payout_amount
                 balance.save()
 
-                # Log the transaction
                 PaymentTransaction.objects.create(
                     user=investment.user,
                     transaction_type='quantum_ai_payout',
                     amount=payout_amount,
                     currency='USDT',
-                    description=f"Quantum AI profit distribution for {payout_date.date()}",
+                    description=f"Quantum AI distribution — {payout_date.date()}",
                     status='completed'
                 )
 
@@ -146,28 +188,18 @@ class QuantumAIFundService:
                 payout_count += 1
 
             except Exception as e:
-                logger.error(f"Error processing payout for {investment.user.email}: {e}")
-                # Rollback this investment but continue others
+                logger.error(f"Payout failed for {investment.user.email}: {e}")
                 investment.total_payouts -= payout_amount
                 investment.accrued_profit = payout_amount
                 investment.save()
 
-        logger.info(f"Processed {payout_count} payouts totaling ${total_paid:,.2f}")
-        return {
-            'payout_count': payout_count,
-            'total_paid': total_paid,
-        }
+        logger.info(f"Paid {payout_count} investors ${total_paid:,.2f}")
+        return {'payout_count': payout_count, 'total_paid': total_paid}
 
     @staticmethod
     def get_user_dashboard(user):
-        """
-        Get user's Quantum AI investment dashboard.
-        """
-        from django.db.models import Sum
-
-        investments = QuantumAIInvestment.objects.filter(
-            user=user
-        ).select_related('fund')
+        """Get user's Quantum AI investment dashboard (smoothed view)."""
+        investments = QuantumAIInvestment.objects.filter(user=user).select_related('fund')
 
         total_invested = sum(i.amount for i in investments)
         total_profit_paid = sum(i.total_payouts for i in investments)
@@ -178,7 +210,7 @@ class QuantumAIFundService:
             'total_profit_paid': total_profit_paid,
             'current_accrued_profit': current_accrued,
             'total_value': total_invested + total_profit_paid + current_accrued,
-            'roi_percentage': (total_profit_paid / total_invested * 100) if total_invested > 0 else 0,
+            'roi_percentage': (total_profit_paid / total_invested * Decimal('100')) if total_invested > 0 else Decimal('0'),
             'investments': [
                 {
                     'fund_name': i.fund.name,

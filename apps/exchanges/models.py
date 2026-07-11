@@ -6,7 +6,7 @@ from django.db import models
 from django.conf import settings
 from django.core.validators import RegexValidator
 from core.models import TimeStampedModel, SoftDeleteModel
-from core.utils import encrypt_api_key, decrypt_api_key
+from core.utils import encrypt_api_key, decrypt_api_key, looks_encrypted
 
 
 
@@ -95,12 +95,20 @@ class ExchangeCredentials(SoftDeleteModel):
         return f"{self.user.email} - {self.exchange_name}"
 
     def save(self, *args, **kwargs):
-        """Encrypt credentials before saving."""
-        if not self.pk:  # Only encrypt on creation
+        """
+        Encrypt credentials on first save AND when they have been replaced.
+
+        Previous behaviour only encrypted on creation, which meant that any
+        later ``credentials.api_key = new_value; credentials.save()`` flow
+        would leave the new key in plaintext in the DB. We now encrypt any
+        field whose current value doesn't look already encrypted.
+        """
+        if not looks_encrypted(self.api_key):
             self.api_key = encrypt_api_key(self.api_key)
+        if not looks_encrypted(self.secret_key):
             self.secret_key = encrypt_api_key(self.secret_key)
-            if self.passphrase:
-                self.passphrase = encrypt_api_key(self.passphrase)
+        if self.passphrase and not looks_encrypted(self.passphrase):
+            self.passphrase = encrypt_api_key(self.passphrase)
         super().save(*args, **kwargs)
 
     def get_decrypted_credentials(self):

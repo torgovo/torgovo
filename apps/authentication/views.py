@@ -46,8 +46,12 @@ def get_tokens_for_user(user):
 
 def create_login_attempt(request, success=True, failure_reason=None):
     """Create login attempt record."""
+    # SECURITY (HIGH-2): normalize email the same way UserLoginView does,
+    # so lockout counts are consistent regardless of case/whitespace.
+    raw_email = request.data.get('email', '')
+    normalized_email = raw_email.strip().lower() if raw_email else ''
     LoginAttempt.objects.create(
-        username=request.data.get('email', ''),
+        username=normalized_email,
         ip_address=get_client_ip(request),
         user_agent=request.META.get('HTTP_USER_AGENT', ''),
         was_successful=success,
@@ -59,6 +63,7 @@ class UserRegistrationView(generics.CreateAPIView):
     """User registration endpoint."""
     serializer_class = UserRegistrationSerializer
     permission_classes = [permissions.AllowAny]
+    throttle_scope = 'register'
 
     def create(self, request, *args, **kwargs):
         """Register new user and send verification email."""
@@ -123,27 +128,49 @@ class UserRegistrationView(generics.CreateAPIView):
 
 
 class UserLoginView(APIView):
-    """User login endpoint."""
+    """User login endpoint with brute-force lockout."""
     permission_classes = [permissions.AllowAny]
+    throttle_scope = 'login'
+
+    # Lockout policy: 5 failed attempts in 15 minutes => 15-min lockout per
+    # IP+email pair. Tunable via settings.AUTH_LOCKOUT_THRESHOLD / WINDOW.
+    LOCKOUT_THRESHOLD = 5
+    LOCKOUT_WINDOW_MINUTES = 15
+
+    def _is_locked_out(self, email, ip):
+        from datetime import timedelta
+        cutoff = timezone.now() - timedelta(minutes=self.LOCKOUT_WINDOW_MINUTES)
+        failures = LoginAttempt.objects.filter(
+            username=email,
+            ip_address=ip,
+            was_successful=False,
+            created_at__gte=cutoff,
+        ).count()
+        return failures >= self.LOCKOUT_THRESHOLD
 
     def post(self, request):
         """Authenticate user and return tokens."""
+        email = (request.data.get('email') or '').strip().lower()
+        ip = get_client_ip(request)
+
+        if email and self._is_locked_out(email, ip):
+            logger.warning(f"Account locked: {email} from {ip}")
+            return Response(
+                {'error': {'code': 'LOCKED_OUT',
+                           'message': 'Too many failed attempts. Try again later.'}},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
         try:
             serializer = UserLoginSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
             user = serializer.validated_data['user']
 
-            # Create successful login attempt
             create_login_attempt(request, success=True)
-
-            # Update last login IP
-            user.last_login_ip = get_client_ip(request)
+            user.last_login_ip = ip
             user.save(update_fields=['last_login_ip'])
 
-            # Generate tokens
             tokens = get_tokens_for_user(user)
-
-            # Send login signal
             user_logged_in.send(sender=user.__class__, request=request, user=user)
 
             return Response({
@@ -153,12 +180,12 @@ class UserLoginView(APIView):
             }, status=status.HTTP_200_OK)
 
         except Exception as e:
-            # Create failed login attempt
-            create_login_attempt(request, success=False, failure_reason=str(e))
-            logger.error(f"Login error: {e}")
-            raise TradingBotException(
-                message='Invalid credentials.',
-                error_code='LOGIN_FAILED'
+            create_login_attempt(request, success=False, failure_reason=type(e).__name__)
+            # Generic message to defeat user enumeration
+            return Response(
+                {'error': {'code': 'LOGIN_FAILED',
+                           'message': 'Invalid credentials.'}},
+                status=status.HTTP_401_UNAUTHORIZED,
             )
 
 
@@ -281,7 +308,7 @@ class EmailVerificationView(generics.CreateAPIView):
         )
 
 
-@api_view(['POST'])
+@api_view(['GET', 'POST'])
 @permission_classes([permissions.AllowAny])
 def verify_email(request, token):
     """Verify email with token."""
@@ -357,8 +384,10 @@ class PhoneVerificationRequestView(generics.CreateAPIView):
     def send_verification_sms(self, phone_verification):
         """Send SMS with verification code."""
         # In production, integrate with SMS service like Twilio
-        message = f"Your Torgovo verification code is: {phone_verification.code}"
-        logger.info(f"SMS to {phone_verification.phone_number}: {message}")
+        # SECURITY (CRIT-6): NEVER log the OTP code — only log that SMS was sent.
+        # The code is stored hashed in DB; logging it defeats the purpose.
+        masked_phone = phone_verification.phone_number[:5] + '***'
+        logger.info(f"Verification SMS dispatched to {masked_phone}")
 
 
 class PhoneVerificationConfirmView(APIView):
@@ -393,31 +422,32 @@ class PasswordResetRequestView(generics.CreateAPIView):
     """Password reset request endpoint."""
     serializer_class = PasswordResetRequestSerializer
     permission_classes = [permissions.AllowAny]
+    throttle_scope = 'password_reset'
 
     def create(self, request, *args, **kwargs):
-        """Request password reset."""
+        """Request password reset.
+
+        Always returns the same generic response, even for unknown emails,
+        to prevent account enumeration.
+        """
+        generic_response = Response(
+            {'message': 'If an account exists, a password reset link has been sent.'},
+            status=status.HTTP_200_OK,
+        )
         try:
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
             password_reset = serializer.save()
-
-            # Send password reset email
-            try:
-                self.send_password_reset_email(password_reset)
-            except Exception as e:
-                logger.error(f"Failed to send password reset email: {e}")
-
-            return Response({
-                'message': 'Password reset link sent to your email.',
-                'expires_at': password_reset.expires_at
-            }, status=status.HTTP_201_CREATED)
-
+            # Only send the email when an actual token was created.
+            if getattr(password_reset, 'user', None) is not None:
+                try:
+                    self.send_password_reset_email(password_reset)
+                except Exception as e:
+                    logger.error(f"Failed to send password reset email: {e}")
+            return generic_response
         except Exception as e:
-            logger.error(f"Password reset request error: {e}")
-            raise TradingBotException(
-                message=str(e),
-                error_code='PASSWORD_RESET_REQUEST_ERROR'
-            )
+            logger.error(f"Password reset request error: {type(e).__name__}")
+            return generic_response
 
     def send_password_reset_email(self, password_reset):
         """Send password reset email."""
@@ -459,7 +489,9 @@ class PasswordResetConfirmView(APIView):
 
             return Response({
                 'message': 'Password reset successful.',
-                'user': UserSerializer(user).data
+                # SECURITY (MED-4): Do NOT return user data here — this is
+                # an unauthenticated endpoint. Returning profile info to
+                # anyone with a reset link is a data leak.
             }, status=status.HTTP_200_OK)
 
         except Exception as e:

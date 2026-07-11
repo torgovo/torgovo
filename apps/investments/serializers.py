@@ -202,12 +202,12 @@ class BaseBotSerializer(serializers.ModelSerializer):
     def validate(self, data):
         """Validate bot configuration"""
         # Validate risk parameters
-        if data.get('take_profit_percent', 0) <= 0:
+        if data.get('take_profit_percent', 2.0) <= 0:
             raise serializers.ValidationError({
                 'take_profit_percent': 'Take profit must be positive'
             })
 
-        if data.get('stop_loss_percent', 0) <= 0:
+        if data.get('stop_loss_percent', 1.0) <= 0:
             raise serializers.ValidationError({
                 'stop_loss_percent': 'Stop loss must be positive'
             })
@@ -280,6 +280,10 @@ class GridBotSerializer(BaseBotSerializer):
             raise serializers.ValidationError('Against levels must be between 1 and 100')
         return value
 
+    def create(self, validated_data):
+        validated_data['category'] = 'grid'
+        return super().create(validated_data)
+
 
 class MartingaleBotSerializer(BaseBotSerializer):
     """Martingale Trading Bot serializer"""
@@ -307,6 +311,10 @@ class MartingaleBotSerializer(BaseBotSerializer):
             raise serializers.ValidationError('Multiplier factor must be >= 1.0')
         return value
 
+    def create(self, validated_data):
+        validated_data['category'] = 'martingale'
+        return super().create(validated_data)
+
 
 class QuantumAIBotSerializer(BaseBotSerializer):
     """Quantum AI Bot serializer"""
@@ -330,6 +338,10 @@ class QuantumAIBotSerializer(BaseBotSerializer):
         read_only_fields = BaseBotSerializer.Meta.read_only_fields + [
             'blockchain_addresses', 'last_compound'
         ]
+
+    def create(self, validated_data):
+        validated_data['category'] = 'quantum_ai'
+        return super().create(validated_data)
 
 
 # ========== ORDER & TRADE SERIALIZERS ==========
@@ -375,6 +387,10 @@ class OrderSerializer(serializers.ModelSerializer):
         read_only=True,
         allow_null=True
     )
+
+    # Capitalised aliases for API docs compatibility
+    Side = serializers.SerializerMethodField()
+    Description = serializers.SerializerMethodField()
 
     # P&L field
     profit_loss = serializers.DecimalField(max_digits=20, decimal_places=8, read_only=True)
@@ -448,6 +464,9 @@ class PositionSerializer(serializers.ModelSerializer):
     exchange = ExchangeNestedSerializer(read_only=True)
     trading_pair = TradingPairNestedSerializer(read_only=True)
 
+    exchange_id = serializers.UUIDField(write_only=True)
+    trading_pair_id = serializers.UUIDField(write_only=True)
+
     exchange_name = serializers.CharField(source='exchange.name', read_only=True)
     pair = serializers.CharField(source='trading_pair.symbol', read_only=True)
 
@@ -468,10 +487,6 @@ class PositionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Position
         fields = '__all__'
-        read_only_fields = [
-            'id', 'user', 'opened_at', 'updated_at',
-            'unrealized_pnl', 'unrealized_pnl_percent', 'liquidation_price'
-        ]
 
     def validate_leverage(self, value):
         """Leverage bounds check"""

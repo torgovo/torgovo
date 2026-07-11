@@ -1,0 +1,75 @@
+@startuml TradingLifecycle
+!theme plain
+title Grid/Martingale Bot Trading Lifecycle
+
+start
+:Bot Start;
+:Load Bot from DB;
+:Check is_running flag;
+
+if (Already running?) then (yes)
+  :Reject: Already Running;
+  stop
+else (no)
+  :Mark is_running = True;
+  :Load ExchangeCredentials;
+  :Decrypt API Keys;
+  :Create BotEngine;
+  :Fetch current price;
+  :Evaluate 6 Entry Conditions;
+endif
+
+if (Buy Signal?) then (yes)
+  :Place Initial Market Buy;
+  :Calculate Grid Orders;
+  :Place Limit Sell at favor levels;
+  :Place Limit Buy at against levels;
+  :Spawn monitor_grid_orders thread;
+  :Spawn monitor_lossProfit thread;
+elseif (Sell Signal?) then (yes)
+  :Place Initial Market Sell;
+  :Calculate Grid Orders;
+  :Place Limit Buy at favor levels;
+  :Place Limit Sell at against levels;
+  :Spawn monitor_grid_orders thread;
+  :Spawn monitor_lossProfit thread;
+else (No Signal)
+  :Wait for next cycle;
+  note right
+    Polling interval
+    (configurable seconds)
+  end note
+  :Evaluate conditions again;
+  stop
+endif
+
+fork
+  :monitor_grid_orders;
+  while (Order filled?) is (no)
+    :Poll exchange;
+  endwhile
+  :Place counter-order at opposite grid level;
+  :Continue monitoring;
+  end fork
+
+fork
+  :monitor_lossProfit;
+  while (Within SL/TP bounds?) is (yes)
+    :Fetch position;
+    :Calculate PnL %;
+  endwhile
+  if (Take Profit hit?) then (yes)
+    :Close position;
+    :Cancel all orders;
+  elseif (Stop Loss hit?) then (yes)
+    :Close position;
+    :Cancel all orders;
+  endif
+  end fork
+
+:Reset trading state;
+:Save Order to DB;
+:Update Bot stats;
+:Evaluate entry conditions again;
+
+@enduml

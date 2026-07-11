@@ -159,6 +159,57 @@ class BybitAdapter(BaseAdapter):
         )
         return self._normalize_order(order)
 
+    def set_position_tpsl(
+        self,
+        symbol: str,
+        side: str,
+        stop_loss_price: Optional[float] = None,
+        take_profit_price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Set stop-loss and/or take-profit on an existing position.
+
+        Uses Bybit v5 POST /v5/position/trading-stop endpoint.
+        `side` is the position side ('long' or 'short').
+        Pass None for a price to leave it unchanged.
+        """
+        market_id = self.exchange.market(symbol)['id']
+
+        if not hasattr(self, '_position_idx'):
+            try:
+                mode = self.exchange.fetch_position_mode()
+                self._position_idx = 0 if mode == 'OneWay' else None
+            except Exception:
+                self._position_idx = 0
+        position_idx = self._position_idx if self._position_idx is not None else (
+            1 if side.lower() == 'long' else 2
+        )
+
+        payload = {
+            'symbol': market_id,
+            'category': 'linear',
+            'tpTriggerBy': 'MarkPrice',
+            'slTriggerBy': 'MarkPrice',
+            'positionIdx': position_idx,
+        }
+        if take_profit_price is not None:
+            payload['takeProfit'] = str(self.price_to_precision(symbol, take_profit_price))
+        if stop_loss_price is not None:
+            payload['stopLoss'] = str(self.price_to_precision(symbol, stop_loss_price))
+
+        resp = self._make_request('privatePostV5PositionTradingStop', payload)
+
+        return {'retCode': resp.get('retCode', -1), 'retMsg': resp.get('retMsg', '')}
+
+    def _get_position_side(self, symbol: str) -> str:
+        """Get the current position side for a symbol."""
+        try:
+            pos = self.fetch_position(symbol)
+            if pos and float(pos.get('contracts', 0)) > 0:
+                return pos.get('side', 'long')
+        except Exception:
+            pass
+        return 'long'
+
     def create_stop_loss_order(
         self,
         symbol: str,
@@ -167,29 +218,18 @@ class BybitAdapter(BaseAdapter):
         stop_price: float,
         params: Optional[Dict] = None
     ) -> Dict[str, Any]:
-        """Create a stop-loss order."""
-        formatted_symbol = self.format_symbol(symbol)
-        amount = self.amount_to_precision(symbol, amount)
-        stop_price = self.price_to_precision(symbol, stop_price)
+        """Create a stop-loss order on an existing position.
 
-        order_params = {
-            'stopLoss': {
-                'triggerPrice': stop_price,
-            }
-        }
-        if params:
-            order_params.update(params)
-
-        order = self._make_request(
-            'create_order',
-            formatted_symbol,
-            'market',
-            side.lower(),
-            amount,
-            None,
-            order_params
+        Uses the v5 trading-stop endpoint to set SL on the position.
+        `side` is the order side (buy/sell); position side is auto-detected.
+        `amount` is accepted for API compatibility but not sent to Bybit.
+        """
+        pos_side = self._get_position_side(symbol)
+        return self.set_position_tpsl(
+            symbol=symbol, side=pos_side,
+            stop_loss_price=stop_price,
+            take_profit_price=None,
         )
-        return self._normalize_order(order)
 
     def create_take_profit_order(
         self,
@@ -199,29 +239,18 @@ class BybitAdapter(BaseAdapter):
         take_profit_price: float,
         params: Optional[Dict] = None
     ) -> Dict[str, Any]:
-        """Create a take-profit order."""
-        formatted_symbol = self.format_symbol(symbol)
-        amount = self.amount_to_precision(symbol, amount)
-        take_profit_price = self.price_to_precision(symbol, take_profit_price)
+        """Create a take-profit order on an existing position.
 
-        order_params = {
-            'takeProfit': {
-                'triggerPrice': take_profit_price,
-            }
-        }
-        if params:
-            order_params.update(params)
-
-        order = self._make_request(
-            'create_order',
-            formatted_symbol,
-            'market',
-            side.lower(),
-            amount,
-            None,
-            order_params
+        Uses the v5 trading-stop endpoint to set TP on the position.
+        `side` is the order side (buy/sell); position side is auto-detected.
+        `amount` is accepted for API compatibility but not sent to Bybit.
+        """
+        pos_side = self._get_position_side(symbol)
+        return self.set_position_tpsl(
+            symbol=symbol, side=pos_side,
+            stop_loss_price=None,
+            take_profit_price=take_profit_price,
         )
-        return self._normalize_order(order)
 
     def get_wallet_balance(self, account_type: str = 'UNIFIED') -> Dict[str, Any]:
         """

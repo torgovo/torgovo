@@ -1,3 +1,4 @@
+from django import forms
 from django.conf import settings
 from django.contrib import admin
 from django.utils.html import format_html
@@ -5,7 +6,7 @@ from django.contrib import messages
 from django.utils import timezone
 from .models import (
     SignalBot, GridBot, MartingaleBot,
-    QuantumAIFund, QuantumAIBot, QuantumAIInvestment,
+    QuantumAIFund, QuantumAIBot, QuantumAIInvestment, ReserveFund,
     Indicator, PairConfig, Order,
     TelegramSignalPlan, TelegramSignalSubscription
 )
@@ -99,7 +100,7 @@ class GridBotAdmin(admin.ModelAdmin):
     subscription_status.short_description = 'Subscription Status'
 
     def start_bot(self, request, queryset):
-        from services.bot_executor_service import BotExecutorService
+        from services.bot_executor import BotExecutorService
 
         for bot in queryset:
             try:
@@ -116,6 +117,8 @@ class GridBotAdmin(admin.ModelAdmin):
     start_bot.short_description = "Start Selected Bots"
 
     def stop_bot(self, request, queryset):
+        from services.bot_executor import BotExecutorService
+
         for bot in queryset:
             try:
                 success = BotExecutorService.stop_grid_bot(request.user, str(bot.id))
@@ -175,7 +178,7 @@ class MartingaleBotAdmin(admin.ModelAdmin):
     subscription_status.short_description = 'Subscription Status'
 
     def start_bot(self, request, queryset):
-        from services.bot_executor_service import BotExecutorService
+        from services.bot_executor import BotExecutorService
 
         for bot in queryset:
             try:
@@ -183,7 +186,7 @@ class MartingaleBotAdmin(admin.ModelAdmin):
                     self.message_user(request, f"Bot {bot.bot_name} has no active subscription", level='warning')
                     continue
 
-                success = BotExecutorService.start_grid_bot(request.user, str(bot.id))
+                success = BotExecutorService.start_martingale_bot(request.user, str(bot.id))
                 if success:
                     self.message_user(request, f"Started {bot.bot_name}", level='success')
             except Exception as e:
@@ -192,9 +195,11 @@ class MartingaleBotAdmin(admin.ModelAdmin):
     start_bot.short_description = "Start Selected Bots"
 
     def stop_bot(self, request, queryset):
+        from services.bot_executor import BotExecutorService
+
         for bot in queryset:
             try:
-                success = BotExecutorService.stop_grid_bot(request.user, str(bot.id))
+                success = BotExecutorService.stop_martingale_bot(request.user, str(bot.id))
                 if success:
                     self.message_user(request, f"Stopped {bot.bot_name}", level='success')
             except Exception as e:
@@ -205,22 +210,83 @@ class MartingaleBotAdmin(admin.ModelAdmin):
 
 # ==================== QUANTUM AI ADMIN ====================
 
+
+class QuantumAIFundForm(forms.ModelForm):
+    """Custom form that masks key fields. Model-level save() auto-encrypts.
+
+    render_value=False prevents the ciphertext from rendering in the HTML.
+    required=False on the key fields lets a blank submission reach cleaned_data,
+    where save_model() restores the pre-existing encrypted value.
+    """
+
+    def __init__(self, *args, **kwargs):
+        """Make key fields not required so blank submissions reach cleaned_data.
+
+        The model TextFields have blank=False by default, so Django would
+        reject an empty submission before save_model() ever runs.  Making
+        them not-required here lets a staff member save a fund record without
+        retyping the three master secrets every time.  The save_model() guard
+        on QuantumAIFundAdmin restores the existing encrypted value when the
+        submitted value is blank.
+        """
+        super().__init__(*args, **kwargs)
+        self.fields['master_api_key'].required = False
+        self.fields['master_secret_key'].required = False
+        self.fields['master_passphrase'].required = False
+
+    class Meta:
+        model = QuantumAIFund
+        fields = '__all__'
+        widgets = {
+            'master_api_key': forms.PasswordInput(render_value=False),
+            'master_secret_key': forms.PasswordInput(render_value=False),
+            'master_passphrase': forms.PasswordInput(render_value=False),
+        }
+        help_texts = {
+            'master_api_key': 'Leave blank to keep current value.',
+            'master_secret_key': 'Leave blank to keep current value.',
+            'master_passphrase': 'Leave blank to keep current value.',
+        }
+
+
 @admin.register(QuantumAIFund)
 class QuantumAIFundAdmin(admin.ModelAdmin):
+    form = QuantumAIFundForm
     list_display = [
         'name', 'total_fund_value', 'total_profit',
         'total_deposits', 'is_active', 'last_trade_at'
     ]
     readonly_fields = ['total_profit']
     actions = ['calculate_profit_distribution', 'process_payouts']
+    list_display_links = ['name']
+
+    def save_model(self, request, obj, form, change):
+        """Guard against blank submission wiping an existing encrypted key.
+
+        When a key field is submitted blank (allowed by the form's
+        required=False), restore the pre-existing value from the DB so
+        the encrypted credential isn't silently overwritten with empty
+        text.  Only applies on edits (change=True) — on creation there
+        is no existing value to restore.
+        """
+        KEY_FIELDS = ['master_api_key', 'master_secret_key', 'master_passphrase']
+        if change:
+            for field in KEY_FIELDS:
+                if field in form.changed_data and not form.cleaned_data.get(field):
+                    setattr(obj, field, QuantumAIFund.objects.get(pk=obj.pk).__dict__[field])
+        super().save_model(request, obj, form, change)
 
     fieldsets = (
         ('Fund Configuration', {
             'fields': ('name', 'trading_strategy', 'risk_parameters', 'is_active')
         }),
+        ('Smoothed Returns (User-Facing)', {
+            'fields': ('monthly_min_return', 'monthly_max_return', 'reserve_buffer_pct'),
+            'description': 'Users see returns smoothed to this range. Admin absorbs loss/keeps excess.'
+        }),
         ('Master API Keys', {
             'fields': ('master_api_key', 'master_secret_key', 'master_passphrase'),
-            'description': 'WARNING: These are encrypted at rest but visible to admins'
+            'description': 'Leave blank to keep current encrypted value. Model auto-encrypts on save.'
         }),
         ('Fund Performance', {
             'fields': (
@@ -231,7 +297,7 @@ class QuantumAIFundAdmin(admin.ModelAdmin):
     )
 
     def calculate_profit_distribution(self, request, queryset):
-        from services.quantum_ai_fund import QuantumAIFundService
+        from services.quantum_ai_fund import QuantumAIFundService  # noqa
 
         for fund in queryset:
             try:
@@ -247,7 +313,7 @@ class QuantumAIFundAdmin(admin.ModelAdmin):
     calculate_profit_distribution.short_description = "Calculate Profit Distribution"
 
     def process_payouts(self, request, queryset):
-        from services.quantum_ai_fund import QuantumAIFundService
+        from services.quantum_ai_fund import QuantumAIFundService  # noqa
 
         for fund in queryset:
             try:
@@ -261,6 +327,88 @@ class QuantumAIFundAdmin(admin.ModelAdmin):
                 self.message_user(request, f"Error processing payouts: {str(e)}", level='error')
 
     process_payouts.short_description = "Process Payouts to Users"
+
+
+@admin.register(QuantumAIBot)
+class QuantumAIBotAdmin(admin.ModelAdmin):
+    list_display = [
+        'bot_name', 'fund', 'exchange_name', 'trading_pair',
+        'is_running', 'total_trades', 'total_profit_loss', 'last_trade_at'
+    ]
+    list_filter = ['exchange_name', 'is_running', 'fund']
+    search_fields = ['bot_name', 'fund__name']
+    readonly_fields = ['total_trades', 'total_profit_loss', 'last_error']
+    actions = ['start_bot', 'stop_bot']
+
+    fieldsets = (
+        ('Bot Configuration', {
+            'fields': ('bot_name', 'fund', 'exchange_name', 'trading_pair')
+        }),
+        ('Strategy Parameters', {
+            'fields': ('strategy_parameters',),
+            'description': 'Entry/Exit configs, indicator thresholds, grid levels (JSON)'
+        }),
+        ('Bot State', {
+            'fields': ('is_running', 'started_at', 'stopped_at')
+        }),
+        ('Performance', {
+            'fields': ('total_trades', 'total_profit_loss', 'last_trade_at', 'last_error')
+        }),
+    )
+
+    def start_bot(self, request, queryset):
+        from apps.trading.engines.execution import run_bot
+
+        for bot in queryset:
+            try:
+                result = run_bot(str(bot.id), bot_type='quantum_ai')
+                if result.get('success'):
+                    self.message_user(request, f"Started {bot.bot_name} — {result.get('signal', 'ok')}", level='success')
+                else:
+                    self.message_user(request, f"Error starting {bot.bot_name}: {result.get('error', 'unknown')}", level='error')
+            except Exception as e:
+                self.message_user(request, f"Error starting {bot.bot_name}: {str(e)}", level='error')
+
+    start_bot.short_description = "Start Selected Quantum AI Bots"
+
+    def stop_bot(self, request, queryset):
+        from apps.trading.engines.execution import stop_bot as _stop_bot
+
+        for bot in queryset:
+            try:
+                result = _stop_bot(str(bot.id), bot_type='quantum_ai')
+                if result.get('success'):
+                    self.message_user(request, f"Stopped {bot.bot_name}", level='success')
+                else:
+                    self.message_user(request, f"Error stopping {bot.bot_name}: {result.get('error', 'unknown')}", level='error')
+            except Exception as e:
+                self.message_user(request, f"Error stopping {bot.bot_name}: {str(e)}", level='error')
+
+    stop_bot.short_description = "Stop Selected Quantum AI Bots"
+
+
+@admin.register(ReserveFund)
+class ReserveFundAdmin(admin.ModelAdmin):
+    list_display = ['fund', 'balance', 'is_below_target', 'last_top_up', 'last_withdrawal']
+    list_filter = ['fund']
+    search_fields = ['fund__name']
+    readonly_fields = ['balance', 'last_top_up', 'last_withdrawal', 'low_balance_alert_sent']
+
+    fieldsets = (
+        ('Reserve Info', {
+            'fields': ('fund', 'balance', 'low_balance_alert_sent')
+        }),
+        ('Activity', {
+            'fields': ('last_top_up', 'last_withdrawal')
+        }),
+    )
+
+    def is_below_target(self, obj):
+        below = obj.is_below_target()
+        from django.utils.html import format_html
+        color = 'red' if below else 'green'
+        return format_html('<span style="color: {};">{}</span>', color, '⚠ Below Target' if below else '✅ Adequate')
+    is_below_target.short_description = 'Reserve Status'
 
 
 @admin.register(QuantumAIInvestment)

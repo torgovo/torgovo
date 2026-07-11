@@ -8,7 +8,8 @@ from django.utils import timezone
 
 from config import settings
 from core.models import TimeStampedModel, SoftDeleteModel
-from core.utils import encrypt_api_key, decrypt_api_key, generate_secret_key
+from core.utils import encrypt_api_key, decrypt_api_key, generate_secret_key, looks_encrypted
+from django.conf import settings
 from apps.exchanges.models import ExchangeCredentials
 
 User = get_user_model()
@@ -107,7 +108,7 @@ class SignalBot(SoftDeleteModel):
             "Pair": "{{syminfo.basecurrency}}/{{syminfo.currency}}",
             "position_size": "{{strategy.position_size}}",
             "exchange": self.exchange_name,
-            "timestamp": "{{time}}",
+            "timestamp": "{{timenow}}",
             "side": "{{strategy.order.action}}"
         }
         return data
@@ -244,6 +245,7 @@ class GridBot(SoftDeleteModel):
     is_running = models.BooleanField(default=False)
     started_at = models.DateTimeField(null=True, blank=True)
     stopped_at = models.DateTimeField(null=True, blank=True)
+    last_heartbeat = models.DateTimeField(null=True, blank=True)
 
     # Persistence
     active_orders = models.JSONField(default=list)
@@ -255,15 +257,13 @@ class GridBot(SoftDeleteModel):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    def save_state(self):
-        """Delegate state saving to trading manager"""
-        from trading.manager import trading_manager
-        bot_key = f"{self.user}_{self.trading_pair}_{self.exchange_name}_grid"
-        if bot_key in trading_manager._bots:
-            bot = trading_manager._bots[bot_key]
-            self.active_orders = getattr(bot, 'active_orders', [])
-            self.current_grid_levels = getattr(bot, 'current_grid_levels', {})
-            self.save()
+    def save_state(self, active_orders=None, grid_levels=None):
+        """Save bot state directly. Called by BotEngine when needed."""
+        if active_orders is not None:
+            self.active_orders = active_orders
+        if grid_levels is not None:
+            self.current_grid_levels = grid_levels
+        self.save(update_fields=['active_orders', 'current_grid_levels', 'updated_at'])
 
     def __str__(self):
         return f"{self.bot_name} - {self.trading_pair}"
@@ -331,6 +331,7 @@ class MartingaleBot(SoftDeleteModel):
     is_running = models.BooleanField(default=False)
     started_at = models.DateTimeField(null=True, blank=True)
     stopped_at = models.DateTimeField(null=True, blank=True)
+    last_heartbeat = models.DateTimeField(null=True, blank=True)
 
     # Level tracking
     current_level = models.IntegerField(default=0)
@@ -376,11 +377,21 @@ class QuantumAIFund(SoftDeleteModel):
     total_deposits = models.DecimalField(max_digits=20, decimal_places=8, default=0)
     last_trade_at = models.DateTimeField(null=True, blank=True)
 
-    # Profit distribution config (admin configurable: 5-20%)
-    shown_percentage = models.DecimalField(
-        max_digits=5, decimal_places=2, default=20.0,
-        validators=[MinValueValidator(5), MaxValueValidator(20)],
-        help_text="Percentage of actual profit/loss shown to users (5-20%)"
+    # Smoothed return config (admin configurable)
+    monthly_min_return = models.DecimalField(
+        max_digits=5, decimal_places=2, default=2.0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Minimum monthly return shown to users (floor, e.g. 2%)"
+    )
+    monthly_max_return = models.DecimalField(
+        max_digits=5, decimal_places=2, default=15.0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Maximum monthly return shown to users (cap, e.g. 15%)"
+    )
+    reserve_buffer_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, default=10.0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Target reserve as percentage of total deposits (e.g. 10%)"
     )
 
     # Admin Controls
@@ -390,14 +401,162 @@ class QuantumAIFund(SoftDeleteModel):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def save(self, *args, **kwargs):
+        """Encrypt master keys on save if they aren't already encrypted.
+
+        Uses looks_encrypted() (shared with ExchangeCredentials and the
+        encrypt_quantum_fund_keys management command) to detect plaintext.
+        This handles both creation and subsequent updates — any plaintext
+        value found is encrypted before writing to the database.
+        """
+        if not looks_encrypted(self.master_api_key):
+            self.master_api_key = encrypt_api_key(self.master_api_key)
+        if not looks_encrypted(self.master_secret_key):
+            self.master_secret_key = encrypt_api_key(self.master_secret_key)
+        if self.master_passphrase and not looks_encrypted(self.master_passphrase):
+            self.master_passphrase = encrypt_api_key(self.master_passphrase)
+        super().save(*args, **kwargs)
+
+    def get_decrypted_credentials(self):
+        """Get decrypted master credentials for exchange API usage."""
+        return {
+            'api_key': decrypt_api_key(self.master_api_key),
+            'secret_key': decrypt_api_key(self.master_secret_key),
+            'passphrase': decrypt_api_key(self.master_passphrase) if self.master_passphrase else None,
+        }
+
     def __str__(self):
         return f"{self.name} - ${self.total_fund_value:,.2f}"
 
-    def calculate_profit_to_distribute(self):
-        """Calculate shown_percentage of profit for distribution to users"""
-        if self.total_profit <= 0:
-            return Decimal('0')
-        return self.total_profit * (self.shown_percentage / Decimal('100'))
+    def calculate_smoothed_return(self, actual_return_pct: Decimal) -> Decimal:
+        """
+        Smooth actual return into what's shown to users.
+
+        If actual < min  → show min (admin covers loss from reserve)
+        If min ≤ actual ≤ max → show actual (pass-through)
+        If actual > max  → show max (admin keeps excess)
+
+        Args:
+            actual_return_pct: Real return as decimal (e.g. 5.0 = 5%)
+
+        Returns:
+            Shown return as decimal (e.g. 2.0 = 2%)
+        """
+        return max(self.monthly_min_return, min(actual_return_pct, self.monthly_max_return))
+
+    def calculate_excess_return(self, actual_return_pct: Decimal) -> Decimal:
+        """
+        Calculate the portion exceeding max return (goes to admin/reserve).
+        Positive means admin keeps it. Negative means admin covers from reserve.
+        """
+        shown = self.calculate_smoothed_return(actual_return_pct)
+        return actual_return_pct - shown
+
+
+class ReserveFund(SoftDeleteModel):
+    """
+    Reserve buffer for smoothing Quantum AI returns.
+
+    Admin deposits USDT here. When the bot underperforms (< min_return),
+    the reserve covers the difference so users still get paid.
+    When the bot overperforms (> max_return), excess flows here.
+    """
+
+    class Meta:
+        db_table = 'bots_reserve_fund'
+        verbose_name = "Reserve Fund"
+        verbose_name_plural = "Reserve Funds"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    fund = models.OneToOneField(
+        QuantumAIFund, on_delete=models.CASCADE, related_name='reserve'
+    )
+    balance = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    last_top_up = models.DateTimeField(null=True, blank=True)
+    last_withdrawal = models.DateTimeField(null=True, blank=True)
+    low_balance_alert_sent = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Reserve for {self.fund.name} — ${self.balance:,.2f}"
+
+    def is_below_target(self) -> bool:
+        """Check if reserve is below target percentage of deposits."""
+        if self.fund.total_deposits == 0:
+            return True
+        target = self.fund.total_deposits * (self.fund.reserve_buffer_pct / Decimal('100'))
+        return self.balance < target
+
+    def can_cover(self, amount: Decimal) -> bool:
+        """Check if reserve can cover a withdrawal."""
+        return self.balance >= amount
+
+    def record_transaction(self, balance_before: Decimal, amount: Decimal,
+                           txn_type: str, description: str = ""):
+        """
+        Record a reserve movement with full audit trail.
+
+        Args:
+            balance_before: Balance before the change.
+            amount: Amount moved (positive for deposits, negative for withdrawals).
+            txn_type: One of ReserveTransaction.TRANSACTION_TYPES.
+            description: Human-readable reason.
+        """
+        ReserveTransaction.objects.create(
+            fund=self.fund,
+            reserve=self,
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=balance_before + amount,
+            transaction_type=txn_type,
+            description=description,
+        )
+
+
+class ReserveTransaction(TimeStampedModel):
+    """
+    Audit trail for every movement in/out of the reserve fund.
+
+    Every cover, deposit, top-up, and withdrawal writes a row here,
+    making the reserve fully traceable for reconciliation and compliance.
+    """
+
+    class Meta:
+        db_table = 'bots_reserve_transactions'
+        verbose_name = "Reserve Transaction"
+        verbose_name_plural = "Reserve Transactions"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['fund', '-created_at']),
+            models.Index(fields=['transaction_type']),
+        ]
+
+    TRANSACTION_TYPES = [
+        ('top_up', 'Admin Top-Up'),
+        ('withdrawal', 'Admin Withdrawal'),
+        ('shortfall_cover', 'Shortfall Cover (paid to users)'),
+        ('excess_deposit', 'Excess Return Deposit (from overperformance)'),
+        ('smoothing_adj', 'Smoothing Adjustment'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    fund = models.ForeignKey(
+        QuantumAIFund, on_delete=models.CASCADE, related_name='reserve_transactions'
+    )
+    reserve = models.ForeignKey(
+        ReserveFund, on_delete=models.CASCADE, related_name='transactions'
+    )
+    amount = models.DecimalField(max_digits=20, decimal_places=8)
+    balance_before = models.DecimalField(max_digits=20, decimal_places=8)
+    balance_after = models.DecimalField(max_digits=20, decimal_places=8)
+    transaction_type = models.CharField(max_length=30, choices=TRANSACTION_TYPES)
+    description = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.transaction_type} — {self.amount} USDT (balance: {self.balance_before} → {self.balance_after})"
 
 
 # ==================== QUANTUM AI BOT (Admin-Managed Trading Bot) ====================
@@ -436,6 +595,7 @@ class QuantumAIBot(SoftDeleteModel):
     is_running = models.BooleanField(default=False)
     started_at = models.DateTimeField(null=True, blank=True)
     stopped_at = models.DateTimeField(null=True, blank=True)
+    last_heartbeat = models.DateTimeField(null=True, blank=True)
 
     # Performance tracking
     total_trades = models.PositiveIntegerField(default=0)
@@ -504,13 +664,22 @@ class QuantumAIInvestment(SoftDeleteModel):
             return Decimal('0')
         return (self.amount / self.fund.total_deposits) * 100
 
-    def calculate_profit_share(self):
-        """Calculate user's share of 20% fund profit"""
-        if self.status != 'active':
+    def calculate_profit_share(self, actual_return_pct: Decimal) -> Decimal:
+        """
+        Calculate user's share using smoothed return.
+
+        Args:
+            actual_return_pct: Real return as decimal percent (e.g. 5.0 = 5%)
+
+        Returns:
+            User's share in USDT
+        """
+        if self.status != 'active' or self.fund.total_deposits == 0:
             return Decimal('0')
 
-        distributable_profit = self.fund.calculate_profit_to_distribute()
-        return (distributable_profit * self.share_percentage) / 100
+        shown_pct = self.fund.calculate_smoothed_return(actual_return_pct)
+        user_portion = self.amount / self.fund.total_deposits
+        return self.fund.total_deposits * (shown_pct / Decimal('100')) * user_portion
 
 
 # ==================== QUANTUM DEPOSIT WALLETS (Keep Existing) ====================

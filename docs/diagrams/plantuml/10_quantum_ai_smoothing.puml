@@ -1,0 +1,51 @@
+@startuml QuantumAISmoothing
+!theme plain
+title Quantum AI Fund - Return Smoothing Flow
+
+start
+:update_fund_performance(fund_id);
+:Load fund from DB;
+:Get current portfolio value from exchange;
+:Calculate actual_return;
+
+if (actual_return > monthly_max_return?) then (yes)
+  :smoothed_return = monthly_max_return;
+  :excess = actual_return - monthly_max_return;
+  :Deposit excess to ReserveFund;
+  :ReserveFund.balance += excess_amount;
+  note right: Excess capped, buffer grows
+elseif (actual_return < monthly_min_return?) then (yes)
+  :smoothed_return = monthly_min_return;
+  :shortfall = monthly_min_return - actual_return;
+  if (ReserveFund.can_cover(shortfall)?) then (yes)
+    :ReserveFund.balance -= shortfall;
+    note right: Reserve absorbs the loss
+  else (no)
+    :Alert admin: reserve low;
+    :Show best-effort return;
+  endif
+else (within bounds)
+  :smoothed_return = actual_return;
+  note right: No smoothing needed
+endif
+
+:Update QuantumAIFund.total_fund_value;
+:Update total_profit;
+:Calculate profit distribution (admin trigger);
+
+if (Admin triggers distribution?) then (yes)
+  :Load all active QuantumAIInvestments;
+  while (For each investment) is (not done)
+    :user_share = weekly_profit * share_percentage * 0.2;
+    :admin_share = weekly_profit * share_percentage * 0.8;
+    :Create QuantumWeeklyProfit record;
+    :user_accrued_profit += user_share;
+  endwhile
+  :Mark all weeks as distributed;
+else (no)
+  stop
+endif
+
+stop
+
+@enduml

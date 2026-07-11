@@ -1,0 +1,193 @@
+@startuml DomainModel
+!theme plain
+
+title Torgovo2 Domain Model - Core Entities
+
+package "Users" {
+  class CustomUser {
+    + email: String (PK)
+    + subscription_plan: String
+    + max_bots_allowed: int
+    + risk_tolerance: String
+    + referral_code: String
+    + total_trades_executed: int
+    + total_profit_loss: Decimal
+    + two_factor_enabled: bool
+    + is_email_verified: bool
+  }
+  class UserBalance {
+    + currency: String
+    + available: Decimal
+    + hold: Decimal
+  }
+  CustomUser "1" -- "*" UserBalance : has
+  CustomUser "1" --> "0..1" CustomUser : referred_by
+}
+
+package "Exchanges" {
+  class Exchange {
+    + name: String (PK)
+    + is_active: bool
+    + supports_testnet: bool
+    + rate_limit_per_minute: int
+  }
+  class ExchangeCredentials {
+    + exchange_name: String
+    + api_key: String (encrypted)
+    + secret_key: String (encrypted)
+    + is_testnet: bool
+    + is_active: bool
+  }
+  class TradingPair {
+    + symbol: String
+    + base_asset: String
+    + quote_asset: String
+    + price_precision: int
+    + quantity_precision: int
+  }
+  ExchangeCredentials --> CustomUser : user
+  ExchangeCredentials --> Exchange : exchange_name
+  TradingPair --> Exchange : exchange_name
+}
+
+package "Bots" {
+  class SignalBot {
+    + webhook_url: String (UK)
+    + secret_key: String
+    + exchange_name: String
+    + trading_pair: String
+    + is_active: bool
+    + total_trades: int
+    + success_rate: float
+  }
+  class GridBot {
+    + base_amount: Decimal
+    + favor_levels: int
+    + against_levels: int
+    + amount_type: String
+    + is_running: bool
+    + current_profit_loss: Decimal
+  }
+  class MartingaleBot {
+    + base_amount: Decimal
+    + multiplier_factor: Decimal
+    + current_level: int
+    + is_running: bool
+  }
+  class QuantumAIBot {
+    + bot_name: String
+    + exchange_name: String
+    + trading_pair: String
+    + strategy_parameters: JSON
+    + is_running: bool
+  }
+  class Order {
+    + Pair: String
+    + Side: String
+    + Order_type: String
+    + Quantity: Decimal
+    + Price: Decimal
+    + Exchange: String
+    + Details: JSON
+  }
+  class Indicator {
+    + Pair: String
+    + EMA: Decimal
+    + RSI: Decimal
+    + BB: JSON
+  }
+  class PairConfig {
+    + pair_symbol: String
+    + bot_type: String
+    + favor_levels: int
+    + Stop_Loss: Decimal
+  }
+
+  SignalBot --> CustomUser : user
+  GridBot --> CustomUser : user
+  MartingaleBot --> CustomUser : user
+  Order --> CustomUser : user
+  Order --> SignalBot : signal_bot
+  Order --> GridBot : grid_bot
+  Order --> MartingaleBot : martingale_bot
+  Indicator --> CustomUser : user
+  PairConfig --> CustomUser : user
+}
+
+package "Quantum AI Fund" {
+  class QuantumAIFund {
+    + total_fund_value: Decimal
+    + total_profit: Decimal
+    + monthly_min_return: Decimal
+    + monthly_max_return: Decimal
+    + reserve_buffer_pct: Decimal
+  }
+  class ReserveFund {
+    + balance: Decimal
+    + low_balance_alert_sent: bool
+  }
+  class QuantumAIInvestment {
+    + amount: Decimal
+    + share_percentage: Decimal
+    + status: String
+    + accrued_profit: Decimal
+  }
+  class QuantumWeeklyProfit {
+    + week_start: Date
+    + week_end: Date
+    + user_share_percent: Decimal
+    + is_distributed: bool
+  }
+  ReserveFund ||--|| QuantumAIFund : fund
+  QuantumAIBot --> QuantumAIFund : fund
+  QuantumAIInvestment --> QuantumAIFund : fund
+  QuantumAIInvestment --> CustomUser : user
+  QuantumWeeklyProfit --> QuantumAIFund : fund
+}
+
+package "Payments" {
+  class BotSubscriptionPlan {
+    + bot_type: String
+    + price: Decimal
+    + duration_days: int
+    + requires_approval: bool
+  }
+  class BotSubscription {
+    + status: String
+    + payment_screenshot: String
+    + started_at: DateTime
+    + expires_at: DateTime
+  }
+  class PaymentTransaction {
+    + transaction_type: String
+    + amount: Decimal
+    + gateway: String
+    + status: String
+  }
+  BotSubscription --> CustomUser : user
+  BotSubscription --> BotSubscriptionPlan : plan
+  PaymentTransaction --> CustomUser : user
+}
+
+package "Subscriptions" {
+  class TelegramSignalPlan {
+    + name: String
+    + price_monthly: Decimal
+    + signals_per_day: int
+  }
+  class TradingSignal {
+    + signal_type: String
+    + trading_pair: String
+    + entry_price: Decimal
+    + confidence_level: String
+  }
+  class SignalResult {
+    + result_type: String
+    + profit_loss_percent: Decimal
+  }
+  TradingSignal --> TelegramSignalPlan : plan
+  SignalResult ||--|| TradingSignal : signal
+}
+
+center footer Generated for Enterprise Architect import
+@enduml

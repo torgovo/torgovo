@@ -1,0 +1,67 @@
+@startuml DataFlow
+!theme plain
+title Torgovo2 Data Flow Diagram - Level 1
+
+actor User
+actor Admin
+boundary "Exchange API" as EX
+boundary "TradingView" as TV
+
+rectangle "1. Register / Auth" as REG
+rectangle "2. Subscribe / Pay" as SUB
+rectangle "3. Create Bot" as CREATE
+rectangle "4. Execute Trading" as EXEC
+rectangle "5. Monitor Positions" as MON
+rectangle "6. Track PnL" as PNL
+rectangle "7. Smooth Returns" as SMOOTH
+rectangle "8. Distribute Profit" as DIST
+rectangle "9. Withdraw" as WITHDRAW
+
+database "Users DB" as USERS
+database "Subscriptions DB" as SUBS
+database "Bots DB" as BOTS
+database "Orders DB" as ORDERS
+database "Fund DB" as FUND
+database "Reserve DB" as RESERVE
+database "Profit DB" as PROFIT
+
+User --> REG : email, password
+REG --> USERS : user record
+REG --> User : JWT token
+
+User --> SUB : plan_id, payment
+SUB --> SUBS : subscription row
+Admin --> SUB : approve/reject
+
+User --> CREATE : config (levels, pairs)
+CREATE --> BOTS : bot model
+CREATE --> User : bot_id
+
+TV --> EXEC : webhook payload
+Admin --> EXEC : start/stop
+EXEC --> BOTS : read config
+EXEC --> EX : market order via CCXT
+EX --> EXEC : order fill
+EXEC --> ORDERS : order row
+EXEC --> BOTS : update bot state
+
+EXEC --> MON : poll position
+MON --> EX : grid orders
+PNL --> EXEC : PnL data
+
+PNL --> SMOOTH : actual return
+SMOOTH --> FUND : smoothed return
+SMOOTH --> RESERVE : excess deposit
+SMOOTH --> RESERVE : gap withdraw
+
+Admin --> DIST : trigger distribution
+DIST --> BOTS : read share %
+DIST --> FUND : read fund value
+DIST --> PROFIT : weekly profit
+DIST --> User : payout
+
+User --> WITHDRAW : withdrawal request
+Admin --> WITHDRAW : approve
+WITHDRAW --> EX : send crypto
+
+@enduml

@@ -13,7 +13,7 @@ class WebhookLog(TimeStampedModel):
         on_delete=models.CASCADE,
         null=True,
         blank=True,
-        related_name='webhook_logs'
+        related_name='webhook_alerts'
     )
     webhook_id = models.CharField(max_length=50, blank=True)
     ip_address = models.GenericIPAddressField()

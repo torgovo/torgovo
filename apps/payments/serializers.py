@@ -80,6 +80,12 @@ class BlockchainAddressSerializer(serializers.ModelSerializer):
 class WithdrawalRequestSerializer(serializers.ModelSerializer):
     """
     Serializer for WithdrawalRequest model.
+
+    SECURITY: ``user``, ``status``, ``network_fee``, ``processing_fee``,
+    ``total_amount`` and admin fields are read-only because they are
+    server-controlled. Allowing them to be writable let any authenticated
+    user submit a withdrawal status='completed', a free zero-fee withdrawal,
+    or one impersonating another user.
     """
     user_email = serializers.EmailField(source='user.email', read_only=True)
     
@@ -96,19 +102,25 @@ class WithdrawalRequestSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'user', 'user_email', 'transaction_hash',
+            'status', 'network_fee', 'processing_fee', 'total_amount',
             'admin_approved_by', 'admin_notes', 'risk_score',
             'flagged_for_review', 'ip_address', 'user_agent',
             'created_at', 'updated_at'
         ]
         extra_kwargs = {
-            'two_factor_code': {'write_only': True},
-            'email_verification_token': {'write_only': True},
+            'two_factor_code': {'write_only': True, 'required': True},
+            'email_verification_token': {'write_only': True, 'required': False},
         }
 
     def validate_amount(self, value):
         """Validate withdrawal amount."""
         if value <= 0:
             raise serializers.ValidationError("Amount must be greater than 0")
+        # Minimum withdrawal (configurable; default $10)
+        from django.conf import settings
+        min_w = getattr(settings, 'WITHDRAWAL_MIN_AMOUNT', Decimal('10'))
+        if Decimal(value) < Decimal(str(min_w)):
+            raise serializers.ValidationError(f"Minimum withdrawal is {min_w}")
         return value
 
     def validate_to_address(self, value):
@@ -116,6 +128,28 @@ class WithdrawalRequestSerializer(serializers.ModelSerializer):
         if not value or len(value) < 10:
             raise serializers.ValidationError("Invalid withdrawal address")
         return value
+
+    def validate_blockchain(self, value):
+        """Validate chain matches one of the supported chains."""
+        allowed = {'BEP20', 'ERC20', 'TRC20', 'SOL', 'APTOS', 'POLYGON',
+                   'ARBITRUM', 'OPTIMISM', 'AVALANCHE', 'FANTOM', 'Bitcoin'}
+        if value not in allowed:
+            raise serializers.ValidationError(f"Unsupported blockchain: {value}")
+        return value
+
+    def validate(self, attrs):
+        # Cap concurrent pending withdrawals per user (anti-flood)
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            pending = WithdrawalRequest.objects.filter(
+                user=request.user, status__in=('pending', 'processing'),
+            ).count()
+            if pending >= 3:
+                raise serializers.ValidationError(
+                    "Too many pending withdrawals (limit: 3). "
+                    "Wait for one to complete before requesting another."
+                )
+        return attrs
 
 
 class PaymentTransactionSerializer(serializers.ModelSerializer):

@@ -1,4 +1,3 @@
 """
-Torgovo Investments App Package
+Investments app init - cleaned up
 """
-default_app_config = 'apps.investments.apps.InvestmentsConfig'

@@ -25,6 +25,8 @@ urlpatterns = [
     path('api/trading/', include('apps.trading.urls', namespace='trading')),  # New unified trading API
     path('api/exchanges/', include('apps.exchanges.urls', namespace='exchanges')),  # Legacy, will be removed
     path('api/subscriptions/', include('apps.subscriptions.urls', namespace='subscriptions')),
+    path('api/investments/', include('apps.investments.urls', namespace='investments')),
+    path('api/referrals/', include('apps.referrals.urls', namespace='referrals')),
 
     # Custom Bot Webhook (global URL, secret in JSON payload)
     path('api/webhooks/custombot/', include('apps.webhooks.urls', namespace='custombot_webhooks')),

@@ -40,6 +40,20 @@ from apps.payments.models import BotSubscription
 logger = logging.getLogger('bots')
 
 
+def _resolve_webhook_user(request):
+    """Resolve user from X-Webhook-Token header. Returns user or None."""
+    from django.contrib.auth import get_user_model
+    from django.core.exceptions import ValidationError
+    User = get_user_model()
+    token = request.headers.get('X-Webhook-Token') or request.POST.get('webhook_token')
+    if not token:
+        return None
+    try:
+        return User.objects.get(webhook_token=token)
+    except (User.DoesNotExist, ValidationError):
+        return None
+
+
 # ==================== SIGNAL BOT (TradingView Webhook) ====================
 
 class SignalBotViewSet(viewsets.ModelViewSet):
@@ -62,7 +76,7 @@ class SignalBotViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         subscription = BotSubscription.objects.filter(
             user=self.request.user,
-            plan__bot_type='signal',
+            plan__bot_type='custom',
             status='active'
         ).first()
 
@@ -379,7 +393,9 @@ class TelegramSignalSubscriptionViewSet(viewsets.ModelViewSet):
     serializer_class = TelegramSignalSubscriptionSerializer
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        plan = serializer.validated_data.get('plan')
+        expires_at = timezone.now() + timezone.timedelta(days=plan.duration_days) if plan else timezone.now() + timezone.timedelta(days=30)
+        serializer.save(user=self.request.user, expires_at=expires_at)
 
 
 # ==================== ADMIN INDICATOR VIEWS (Old Code) ====================
@@ -389,6 +405,8 @@ class IndicatorView(View):
     """Old endpoint for Binance indicators - admin only"""
 
     async def get(self, request, username, pair):
+        if not request.user.is_authenticated or not request.user.is_staff:
+            return JsonResponse({"error": "Unauthorized"}, status=401)
         try:
             from django.contrib.auth import get_user_model
             User = get_user_model()
@@ -433,6 +451,8 @@ class BybitIndicatorView(View):
     """Old endpoint for Bybit indicators - admin only"""
 
     async def get(self, request, username, pair):
+        if not request.user.is_authenticated or not request.user.is_staff:
+            return JsonResponse({"error": "Unauthorized"}, status=401)
         try:
             from django.contrib.auth import get_user_model
             User = get_user_model()
@@ -474,11 +494,12 @@ class BybitIndicatorView(View):
             return JsonResponse({"error": "Invalid request"}, status=400)
 
 
-@method_decorator(csrf_exempt, name='dispatch')
 class CustomOrderClosingView(View):
-    """Manual order close endpoint - admin only"""
+    """Manual order close endpoint - admin only (POST required for CSRF protection)"""
 
-    async def get(self, request, username, pair):
+    async def post(self, request, username, pair):
+        if not request.user.is_authenticated or not request.user.is_staff:
+            return JsonResponse({"error": "Unauthorized"}, status=401)
         try:
             from django.contrib.auth import get_user_model
             User = get_user_model()
@@ -501,9 +522,11 @@ class CustomOrderClosingView(View):
 
 
 class CustomOrderOpeningView(View):
-    """Manual order open endpoint - admin only"""
+    """Manual order open endpoint - admin only (POST required for CSRF protection)"""
 
-    async def get(self, request, username, pair, side):
+    async def post(self, request, username, pair, side):
+        if not request.user.is_authenticated or not request.user.is_staff:
+            return JsonResponse({"error": "Unauthorized"}, status=401)
         try:
             from django.contrib.auth import get_user_model
             User = get_user_model()
@@ -533,38 +556,44 @@ class BinanceEMAView(View):
 
     async def post(self, request):
         try:
+            user = await sync_to_async(_resolve_webhook_user)(request)
+            if user is None:
+                return JsonResponse({"error": "Unauthorized"}, status=401)
+
             raw_data = request.body.decode('utf-8').strip('"')
             data = json.loads(raw_data)
 
             if "EMA200" in data:
-                username = data["username"]
                 pair_symbol = data["pair"]
                 exchange = data.get("exchange", "binance")
                 ema_value = data["EMA200"]
 
-                from django.contrib.auth import get_user_model
-                User = get_user_model()
-
-                user = await sync_to_async(User.objects.get)(username=username)
                 pair_config = await sync_to_async(PairConfig.objects.get)(
                     user=user, pair_symbol=pair_symbol
                 )
-                pair_config_dict = PairConfigSerializer(pair_config)
-                bot = await get_or_create_bot(user, pair_config_dict, exchange)
+                pair_config_dict = PairConfigSerializer(pair_config).data
 
-                if hasattr(bot, 'update_conditions'):
-                    bot.EMA = ema_value
-                    bot.pair_config = pair_config_dict.data
-                    bot.update_conditions()
+                engine = await sync_to_async(get_or_create_engine)(
+                    user, pair_config_dict, exchange,
+                )
+                if engine is None:
+                    return JsonResponse({"error": "No exchange credentials"}, status=404)
+
+                if hasattr(engine, 'update_conditions'):
+                    engine.EMA = ema_value
+                    engine.pair_config = pair_config_dict
+                    await sync_to_async(engine.update_conditions)()
 
                 return JsonResponse({
                     'status': 'success',
                     'message': f'EMA updated for {pair_symbol}',
-                    'EMA': ema_value
+                    'EMA': ema_value,
                 })
 
             return JsonResponse({"message": "No EMA data"})
 
+        except PairConfig.DoesNotExist:
+            return JsonResponse({"error": "Pair config not found"}, status=404)
         except Exception as e:
             logger.error(f"Error in BinanceEMA view: {str(e)}")
             return JsonResponse({"error": "Invalid request"}, status=400)
@@ -576,11 +605,14 @@ class BinanceRSIView(View):
 
     async def post(self, request):
         try:
+            user = await sync_to_async(_resolve_webhook_user)(request)
+            if user is None:
+                return JsonResponse({"error": "Unauthorized"}, status=401)
+
             raw_data = request.body.decode('utf-8').strip('"')
             data = json.loads(raw_data)
 
             if "RSI" in data:
-                username = data["username"]
                 pair_symbol = data["pair"]
                 exchange = data["exchange"]
                 rsi_value = data["RSI"]
@@ -588,32 +620,35 @@ class BinanceRSIView(View):
                 RSI_color = data.get('color', '')
                 RSI_prev_color = data.get('prev_color', '')
 
-                from django.contrib.auth import get_user_model
-                User = get_user_model()
-
-                user = await sync_to_async(User.objects.get)(username=username)
                 pair_config = await sync_to_async(PairConfig.objects.get)(
                     user=user, pair_symbol=pair_symbol
                 )
-                pair_config_dict = PairConfigSerializer(pair_config)
-                bot = await get_or_create_bot(user, pair_config_dict, exchange)
+                pair_config_dict = PairConfigSerializer(pair_config).data
 
-                if hasattr(bot, 'update_conditions'):
-                    bot.RSI = rsi_value
-                    bot.PrevRSI = PrevRSI
-                    bot.RSI_color = RSI_color
-                    bot.RSI_prev_color = RSI_prev_color
-                    bot.pair_config = pair_config_dict.data
-                    bot.update_conditions()
+                engine = await sync_to_async(get_or_create_engine)(
+                    user, pair_config_dict, exchange,
+                )
+                if engine is None:
+                    return JsonResponse({"error": "No exchange credentials"}, status=404)
+
+                if hasattr(engine, 'update_conditions'):
+                    engine.RSI = rsi_value
+                    engine.PrevRSI = PrevRSI
+                    engine.RSI_color = RSI_color
+                    engine.RSI_prev_color = RSI_prev_color
+                    engine.pair_config = pair_config_dict
+                    await sync_to_async(engine.update_conditions)()
 
                 return JsonResponse({
                     'status': 'success',
                     'message': f'RSI updated for {pair_symbol}',
-                    'RSI': rsi_value
+                    'RSI': rsi_value,
                 })
 
             return JsonResponse({"message": "No RSI data"})
 
+        except PairConfig.DoesNotExist:
+            return JsonResponse({"error": "Pair config not found"}, status=404)
         except Exception as e:
             logger.error(f"Error in BinanceRSI view: {str(e)}")
             return JsonResponse({"error": "Invalid request"}, status=400)
@@ -625,81 +660,86 @@ class BinanceBBView(View):
 
     async def post(self, request):
         try:
+            user = await sync_to_async(_resolve_webhook_user)(request)
+            if user is None:
+                return JsonResponse({"error": "Unauthorized"}, status=401)
+
             raw_data = request.body.decode('utf-8').strip('"')
             data = json.loads(raw_data)
 
             if "BB" in data:
-                username = data["username"]
                 pair_symbol = data["pair"]
                 exchange = data["exchange"]
                 bb_value = data["BB"]
 
-                from django.contrib.auth import get_user_model
-                User = get_user_model()
-
-                user = await sync_to_async(User.objects.get)(username=username)
                 pair_config = await sync_to_async(PairConfig.objects.get)(
                     user=user, pair_symbol=pair_symbol
                 )
-                pair_config_dict = PairConfigSerializer(pair_config)
-                bot = await get_or_create_bot(user, pair_config_dict, exchange)
+                pair_config_dict = PairConfigSerializer(pair_config).data
 
-                if hasattr(bot, 'update_conditions'):
-                    bot.BB = bb_value
-                    bot.pair_config = pair_config_dict.data
-                    bot.update_conditions()
+                engine = await sync_to_async(get_or_create_engine)(
+                    user, pair_config_dict, exchange,
+                )
+                if engine is None:
+                    return JsonResponse({"error": "No exchange credentials"}, status=404)
+
+                if hasattr(engine, 'update_conditions'):
+                    engine.BB = bb_value
+                    engine.pair_config = pair_config_dict
+                    await sync_to_async(engine.update_conditions)()
 
                 return JsonResponse({
                     'status': 'success',
                     'message': f'BB updated for {pair_symbol}',
-                    'BB': bb_value
+                    'BB': bb_value,
                 })
 
             return JsonResponse({"message": "No BB data"})
 
+        except PairConfig.DoesNotExist:
+            return JsonResponse({"error": "Pair config not found"}, status=404)
         except Exception as e:
             logger.error(f"Error in BinanceBB view: {str(e)}")
             return JsonResponse({"error": "Invalid request"}, status=400)
 
 
-# ==================== HELPER FUNCTIONS (From Old Code) ====================
+# ==================== HELPER FUNCTIONS ====================
 
-async def get_or_create_bot(user, pair_config, exchange):
-    """Helper to get or create bot via TradingManager"""
+def get_or_create_engine(user, pair_config_data, exchange_name):
+    """
+    Build a BotEngine config dict from user's PairConfig and credentials,
+    then create a BotEngine instance.
+
+    Replaces old trading_manager.get_bot / create_bot / start_bot pattern.
+    """
+    from apps.trading.engines.bot_engine import BotEngine
+    from apps.exchanges.models import ExchangeCredentials
+    from core.utils import decrypt_api_key
+
+    pair_symbol = pair_config_data.get('pair_symbol', '')
+
+    # Get user's exchange credentials
     try:
-        from trading.manager import trading_manager
-
-        get_bot = sync_to_async(trading_manager.get_bot)
-        bot = await get_bot(user, pair_config.data['pair_symbol'], exchange)
-
-        if not bot:
-            logger.info("Bot not present, creating new one")
-            create_bot = sync_to_async(trading_manager.create_bot)
-            bot = await create_bot(
-                user=user,
-                pair_config=pair_config.data,
-                exchange=exchange
-            )
-        else:
-            logger.debug("Bot present, checking if running")
-
-    except Exception as e:
-        logger.warning(f"Exception handled, creating new bot: {e}")
-        from trading.manager import trading_manager
-        create_bot = sync_to_async(trading_manager.create_bot)
-        bot = await create_bot(
-            user=user,
-            pair_config=pair_config.data,
-            exchange=exchange
+        credentials = ExchangeCredentials.objects.get(
+            user=user, exchange_name=exchange_name, is_active=True
         )
+        creds = credentials.get_decrypted_credentials()
+    except ExchangeCredentials.DoesNotExist:
+        logger.error(f"No credentials for {user.username} on {exchange_name}")
+        return None
 
-    # Ensure bot is started
-    from trading.manager import trading_manager
-    start_bot = sync_to_async(trading_manager.start_bot)
-    await start_bot(
-        user=user,
-        pair_symbol=pair_config.data['pair_symbol'],
-        exchange=exchange
-    )
+    config = {
+        'bot_name': f"{user.username}_{pair_symbol}_{exchange_name}",
+        'user_id': str(user.id),
+        'strategy': 'quantum_ai',
+        'symbol': pair_symbol,
+        'exchange_name': exchange_name,
+        'api_key': creds.get('api_key', ''),
+        'secret_key': creds.get('secret_key', ''),
+        'passphrase': creds.get('passphrase', ''),
+        'is_testnet': getattr(credentials, 'is_testnet', False),
+        'parameters': pair_config_data,
+    }
 
-    return bot
+    engine = BotEngine(config)
+    return engine

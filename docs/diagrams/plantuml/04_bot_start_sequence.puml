@@ -1,0 +1,55 @@
+@startuml BotStartSequence
+!theme plain
+title Grid/Martingale Bot Start Sequence
+
+actor Admin
+participant "Django Admin" as ADMIN
+participant "BotExecutorService" as SERVICE
+participant "Celery Worker" as CELERY
+participant "run_bot()" as RUN
+participant "BotEngine" as ENGINE
+participant "BaseAdapter" as ADAPTER
+participant "Exchange API" as EXCHANGE
+database "PostgreSQL" as DB
+
+Admin -> ADMIN: Click "Start Bot"
+ADMIN -> SERVICE: start_grid_bot(user, bot_id)
+SERVICE -> DB: Check BotSubscription.is_active
+DB --> SERVICE: Active
+SERVICE -> CELERY: run_trading_bot.delay(bot_id, 'grid')
+CELERY -> RUN: run_bot('bot-123', 'grid')
+
+RUN -> DB: Load GridBot (select_related)
+DB --> RUN: Bot model
+RUN -> DB: Check is_running flag
+DB --> RUN: False
+RUN -> DB: SET is_running = True
+RUN -> DB: Load ExchangeCredentials
+DB --> RUN: Credentials (encrypted)
+RUN -> RUN: get_decrypted_credentials()
+RUN -> RUN: _mark_bot_starting('bot-123')
+
+RUN -> ENGINE: BotEngine(config_dict)
+ENGINE -> ENGINE: BotExecutor.from_config(config)
+ENGINE -> ADAPTER: fetch_ticker('BTC/USDT')
+ADAPTER -> EXCHANGE: CCXT fetch_ticker()
+EXCHANGE --> ADAPTER: {last, bid, ask, ...}
+ADAPTER --> ENGINE: Standardized ticker
+
+ENGINE -> ENGINE: update_conditions()
+ENGINE -> ENGINE: calculated_grid_orders(data)
+ENGINE -> ADAPTER: create_market_order_with_cost('BTC/USDT', 'buy', 100)
+ADAPTER -> EXCHANGE: market order
+EXCHANGE --> ADAPTER: {id, price, status, ...}
+ADAPTER --> ENGINE: Order confirmed
+
+ENGINE -> ADAPTER: create_limit_order('sell', 0.002, 51000)
+ENGINE -> ADAPTER: create_limit_order('buy', 0.002, 49000)
+ENGINE -> DB: save_order() - log to Order model
+
+ENGINE --> RUN: {success: True, signal: ..., side: 'Buy'}
+RUN --> CELERY: Result
+CELERY --> ADMIN: Bot started
+ADMIN --> Admin: Confirmation
+
+@enduml

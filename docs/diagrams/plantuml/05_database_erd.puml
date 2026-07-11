@@ -1,0 +1,238 @@
+@startuml DatabaseERD
+!theme plain
+title Torgovo2 Database Schema - Physical ERD
+
+' Tables grouped by app with column details
+
+package "Core" {
+  entity core_audit_log {
+    * id: uuid PK
+    --
+    * user_id: uuid FK -> users_customuser
+    * action: varchar [LOGIN|LOGOUT|CREATE|UPDATE|DELETE|APPROVE]
+    * resource_type: varchar
+    * resource_id: varchar
+    * old_values: jsonb
+    * new_values: jsonb
+    * description: text
+    * ip_address: varchar
+    * created_at: datetime
+  }
+}
+
+package "Users" {
+  entity users_customuser {
+    * id: uuid PK
+    --
+    * email: varchar UK
+    * password: varchar
+    * subscription_plan: varchar
+    * max_bots_allowed: int
+    * risk_tolerance: varchar
+    * referral_code: varchar UK
+    * referred_by_id: uuid FK (nullable)
+    * is_email_verified: bool
+    * is_phone_verified: bool
+    * two_factor_enabled: bool
+    * default_exchange_id: uuid FK (nullable)
+    * total_trades_executed: int
+    * total_profit_loss: decimal
+  }
+
+  entity users_user_balance {
+    * id: uuid PK
+    --
+    * user_id: uuid FK
+    * currency: varchar
+    * available: decimal
+    * hold: decimal
+    #
+    UK: (user_id, currency)
+  }
+}
+
+package "Exchanges" {
+  entity exchanges_exchange {
+    * id: uuid PK
+    --
+    * name: varchar UK
+    * is_active: bool
+    * supports_testnet: bool
+    * rate_limit_per_minute: int
+  }
+
+  entity exchanges_exchange_credentials {
+    * id: uuid PK
+    --
+    * user_id: uuid FK
+    * exchange_name: varchar FK
+    * api_key: text [ENCRYPTED]
+    * secret_key: text [ENCRYPTED]
+    * passphrase: text [ENCRYPTED]
+    * is_testnet: bool
+    * is_active: bool
+    #
+    UK: (user_id, exchange_name)
+  }
+
+  entity exchanges_trading_pair {
+    * id: uuid PK
+    --
+    * exchange_name: varchar FK
+    * symbol: varchar
+    * base_asset: varchar
+    * quote_asset: varchar
+    * is_active: bool
+    * price_precision: int
+    * quantity_precision: int
+    #
+    UK: (exchange_name, symbol)
+  }
+}
+
+package "Bots" {
+  entity bots_signal_bot {
+    * id: uuid PK
+    --
+    * user_id: uuid FK
+    * subscription_id: uuid FK
+    * bot_id: varchar UK
+    * webhook_url: varchar UK
+    * secret_key: varchar
+    * exchange_name: varchar
+    * trading_pair: varchar
+    * is_active: bool
+    * total_trades: int
+    * successful_trades: int
+  }
+
+  entity bots_grid_bot {
+    * id: uuid PK
+    --
+    * user_id: uuid FK
+    * subscription_id: uuid FK
+    * base_amount: decimal
+    * favor_levels: int [1-50]
+    * against_levels: int [1-50]
+    * is_running: bool
+    * active_orders: jsonb
+    * current_grid_levels: jsonb
+    * current_profit_loss: decimal
+  }
+
+  entity bots_martingale_bot {
+    * id: uuid PK
+    --
+    * user_id: uuid FK
+    * subscription_id: uuid FK
+    * base_amount: decimal
+    * multiplier_factor: decimal
+    * current_level: int
+    * is_running: bool
+  }
+
+  entity bots_order {
+    * id: uuid PK
+    --
+    * user_id: uuid FK
+    * pair: varchar
+    * side: varchar [Buy|Sell]
+    * order_type: varchar [market|limit]
+    * quantity: decimal
+    * price: decimal
+    * exchange: varchar
+    * signal_bot_id: uuid FK (nullable)
+    * grid_bot_id: uuid FK (nullable)
+    * martingale_bot_id: uuid FK (nullable)
+    * created_at: datetime
+  }
+}
+
+package "Quantum AI" {
+  entity bots_quantum_ai_fund {
+    * id: uuid PK
+    --
+    * name: varchar
+    * master_api_key: text [ENCRYPTED]
+    * master_secret_key: text [ENCRYPTED]
+    * total_fund_value: decimal
+    * total_profit: decimal
+    * monthly_min_return: decimal
+    * monthly_max_return: decimal
+    * reserve_buffer_pct: decimal
+    * is_active: bool
+  }
+
+  entity bots_reserve_fund {
+    * id: uuid PK
+    --
+    * fund_id: uuid FK UK
+    * balance: decimal
+    * low_balance_alert_sent: bool
+  }
+
+  entity bots_quantum_ai_investment {
+    * id: uuid PK
+    --
+    * user_id: uuid FK
+    * fund_id: uuid FK
+    * subscription_id: uuid FK
+    * amount: decimal
+    * share_percentage: decimal
+    * status: varchar
+    * accrued_profit: decimal
+    #
+    UK: (user_id, fund_id)
+  }
+}
+
+package "Payments" {
+  entity payments_bot_subscription_plan {
+    * id: uuid PK
+    --
+    * bot_type: varchar
+    * name: varchar
+    * price: decimal
+    * duration_days: int
+    * requires_approval: bool
+  }
+
+  entity payments_bot_subscription {
+    * id: uuid PK
+    --
+    * user_id: uuid FK
+    * plan_id: uuid FK
+    * status: varchar [pending_payment|pending_approval|active|expired|cancelled|rejected]
+    * payment_screenshot: varchar
+    * started_at: datetime
+    * expires_at: datetime
+    #
+    UK: (user_id, plan_id)
+  }
+}
+
+' Relationships
+users_customuser ||..o{ users_user_balance : "has"
+users_customuser ||..o| users_customuser : "referred_by"
+
+users_customuser ||..o{ exchanges_exchange_credentials : "owns"
+exchanges_exchange ||..o{ exchanges_exchange_credentials : ""
+exchanges_exchange ||..o{ exchanges_trading_pair : "has"
+
+users_customuser ||..o{ bots_signal_bot : "owns"
+users_customuser ||..o{ bots_grid_bot : "owns"
+users_customuser ||..o{ bots_martingale_bot : "owns"
+users_customuser ||..o{ bots_order : "places"
+
+bots_quantum_ai_fund ||..|| bots_reserve_fund : "has"
+bots_quantum_ai_fund ||..o{ bots_quantum_ai_investment : "invests in"
+users_customuser ||..o{ bots_quantum_ai_investment : "invests"
+
+payments_bot_subscription_plan ||..o{ payments_bot_subscription : "subscribes to"
+users_customuser ||..o{ payments_bot_subscription : "purchases"
+
+bots_signal_bot --> payments_bot_subscription : subscription
+bots_grid_bot --> payments_bot_subscription : subscription
+bots_martingale_bot --> payments_bot_subscription : subscription
+
+@enduml

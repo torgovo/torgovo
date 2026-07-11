@@ -828,7 +828,7 @@ class BybitBots:
             for o in open_orders:
                 try:
                     p = round(float(o.get('price')), 8)
-                except:
+                except Exception:
                     continue
                 s = o.get('side', '').lower()
                 oid = o.get('id') or o.get('orderId') or o.get('clientOrderId')
@@ -891,7 +891,7 @@ class BybitBots:
                                 if (o2.get('id') == order_id) or (o2.get('orderId') == order_id) or (o2.get('clientOrderId') == order_id):
                                     return False
                             return True
-                        except:
+                        except Exception:
                             return False
 
                 # --- Process favor orders (these are the grid that, when filled, should cause you to create new against orders) ---

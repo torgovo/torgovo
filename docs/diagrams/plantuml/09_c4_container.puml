@@ -1,0 +1,44 @@
+@startuml C4ContainerDiagram
+!theme plain
+title C4 Container Diagram
+
+actor Trader
+actor Admin
+rectangle "Daphne ASGI Server" as WEB {
+  [Django Admin] as ADMIN_UI
+  [DRF API] as DRF
+  [WebSocket] as WS
+}
+rectangle "Celery Worker" as CELERY {
+  [Trading Executor] as TRADE
+  [Fund Updater] as FUND
+}
+rectangle "Celery Beat" as BEAT {
+  [Scheduler] as SCHED
+}
+database "PostgreSQL" as DB
+database "Redis" as REDIS
+
+actor "Exchange APIs\n(Bybit/Binance/OKX)" as EX
+actor "TradingView" as TV
+
+Trader --> WEB : HTTPS /api/*
+Admin --> WEB : HTTPS /admin/
+TV --> DRF : POST /api/webhooks/
+
+DRF --> DB : SQL
+DRF --> REDIS : cache/sessions
+WS --> REDIS : channel layer
+
+CELERY --> REDIS : task queue
+BEAT --> REDIS : schedule
+CELERY --> DB : SQL
+TRADE --> EX : CCXT REST
+
+note right of CELERY
+  run_trading_bot.delay()
+  stop_bot.delay()
+  update_fund_performance()
+end note
+
+@enduml

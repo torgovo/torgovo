@@ -21,6 +21,20 @@ def custom_exception_handler(exc, context):
     # to get the standard error response.
     response = exception_handler(exc, context)
 
+    # Handle custom TradingBotException (DRF default handler returns None for these)
+    if response is None and isinstance(exc, TradingBotException):
+        response = Response(
+            {'error': str(exc.message) if hasattr(exc, 'message') else str(exc)},
+            status=getattr(exc, 'status_code', 400),
+        )
+
+    # Handle built-in PermissionError (raised by bot view perform_create)
+    if response is None and isinstance(exc, PermissionError):
+        response = Response(
+            {'error': str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     # Add custom error handling
     if response is not None:
         custom_response_data = {
@@ -75,21 +89,23 @@ def get_error_code(exception):
     Map exception to error code.
     """
     error_codes = {
-        'AuthenticationFailed': 'AUTHENTICATION_FAILED',
-        'NotAuthenticated': 'AUTHENTICATION_REQUIRED',
-        'PermissionDenied': 'PERMISSION_DENIED',
-        'NotFound': 'RESOURCE_NOT_FOUND',
-        'ValidationError': 'VALIDATION_ERROR',
-        'ParseError': 'PARSE_ERROR',
-        'MethodNotAllowed': 'METHOD_NOT_ALLOWED',
-        'NotAcceptable': 'NOT_ACCEPTABLE',
-        'UnsupportedMediaType': 'UNSUPPORTED_MEDIA_TYPE',
-        'Throttled': 'RATE_LIMIT_EXCEEDED',
-        'PermissionDenied': 'PERMISSION_DENIED',
-        'Http404': 'RESOURCE_NOT_FOUND',
-        'ValidationError': 'VALIDATION_ERROR',
+    'AuthenticationFailed': 'AUTHENTICATION_FAILED',
+    'NotAuthenticated': 'AUTHENTICATION_REQUIRED',
+    'PermissionDenied': 'PERMISSION_DENIED',
+    'PermissionError': 'PERMISSION_DENIED',
+    'NotFound': 'RESOURCE_NOT_FOUND',
+    'ValidationError': 'VALIDATION_ERROR',
+    'ParseError': 'PARSE_ERROR',
+    'MethodNotAllowed': 'METHOD_NOT_ALLOWED',
+    'NotAcceptable': 'NOT_ACCEPTABLE',
+    'UnsupportedMediaType': 'UNSUPPORTED_MEDIA_TYPE',
+    'Throttled': 'RATE_LIMIT_EXCEEDED',
+    'Http404': 'RESOURCE_NOT_FOUND',
     }
 
+    # Check if the exception has its own error_code attribute (e.g. TradingBotException)
+    if hasattr(exception, 'error_code'):
+        return exception.error_code
     exception_type = exception.__class__.__name__
     return error_codes.get(exception_type, 'INTERNAL_SERVER_ERROR')
 
@@ -155,6 +171,7 @@ def get_status_code(exception):
         'AuthenticationFailed': status.HTTP_401_UNAUTHORIZED,
         'NotAuthenticated': status.HTTP_401_UNAUTHORIZED,
         'PermissionDenied': status.HTTP_403_FORBIDDEN,
+        'PermissionError': status.HTTP_400_BAD_REQUEST,
         'NotFound': status.HTTP_404_NOT_FOUND,
         'ValidationError': status.HTTP_400_BAD_REQUEST,
         'ParseError': status.HTTP_400_BAD_REQUEST,
@@ -163,9 +180,11 @@ def get_status_code(exception):
         'UnsupportedMediaType': status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         'Throttled': status.HTTP_429_TOO_MANY_REQUESTS,
         'Http404': status.HTTP_404_NOT_FOUND,
-        'ValidationError': status.HTTP_400_BAD_REQUEST,
     }
 
+    # Check if the exception has its own status_code attribute (e.g. TradingBotException)
+    if hasattr(exception, 'status_code'):
+        return exception.status_code
     exception_type = exception.__class__.__name__
     return status_codes.get(exception_type, status.HTTP_500_INTERNAL_SERVER_ERROR)
 

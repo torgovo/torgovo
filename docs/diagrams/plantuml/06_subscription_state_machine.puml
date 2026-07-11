@@ -1,0 +1,42 @@
+@startuml SubscriptionStateMachine
+!theme plain
+title BotSubscription State Machine
+
+state "pending_payment" as PENDING_PAYMENT
+state "pending_approval" as PENDING_APPROVAL
+state "active" as ACTIVE
+state "expired" as EXPIRED
+state "cancelled" as CANCELLED
+state "rejected" as REJECTED
+
+[*] --> PENDING_PAYMENT : User purchases plan
+PENDING_PAYMENT --> PENDING_APPROVAL : Upload payment proof
+PENDING_PAYMENT --> CANCELLED : Cancel before payment
+
+PENDING_APPROVAL --> ACTIVE : Admin approves
+PENDING_APPROVAL --> REJECTED : Admin rejects
+PENDING_APPROVAL --> CANCELLED : Cancel during review
+
+ACTIVE --> EXPIRED : expires_at reached
+ACTIVE --> CANCELLED : Admin force-cancel
+ACTIVE --> ACTIVE : Renew (extends expires_at)
+
+EXPIRED --> ACTIVE : Re-subscribe
+EXPIRED --> [*] : Grace period expired
+
+CANCELLED --> [*]
+REJECTED --> [*]
+
+note right of PENDING_APPROVAL
+  Admin reviews payment
+  screenshot before
+  approving or rejecting
+end note
+
+note right of ACTIVE
+  Bot creation allowed
+  Engine checks is_expired
+  before starting
+end note
+
+@enduml

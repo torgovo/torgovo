@@ -29,30 +29,32 @@ webhook_patterns = [
 
 # Main URL patterns
 urlpatterns = [
+    # Exchange management (must come before router to avoid capture by exchange-detail)
+    path('exchanges/list/', views.ExchangeListView.as_view(), name='exchange-list-view'),
+    path('exchanges/<str:exchange_name>/symbols/', views.ExchangeSymbolsView.as_view(), name='exchange-symbols'),
+    
     # API routes (these use the router)
-    path('api/', include(router.urls)),
+    path('', include(router.urls)),
     
     # Webhook routes
-    path('api/webhooks/', include(webhook_patterns)),
+    path('webhooks/', include(webhook_patterns)),
     
     # Technical indicators (manual POST endpoints)
-    path('api/indicators/ema/', views.EMAIndicatorView.as_view(), name='ema-indicator'),
-    path('api/indicators/rsi/', views.RSIIndicatorView.as_view(), name='rsi-indicator'),
-    
-    # Exchange management
-    path('api/exchanges/list/', views.ExchangeListView.as_view(), name='exchange-list'),
-    path('api/exchanges/<str:exchange_name>/symbols/', views.ExchangeSymbolsView.as_view(), name='exchange-symbols'),
+    path('indicators/ema/manual/', views.EMAIndicatorView.as_view(), name='ema-indicator'),
+    path('indicators/ema/', views.EMAWebhookView.as_view(), name='ema-webhook'),
+    path('indicators/rsi/manual/', views.RSIIndicatorView.as_view(), name='rsi-indicator'),
+    path('indicators/rsi/', views.RSIWebhookView.as_view(), name='rsi-webhook'),
     
     # User management
-    path('api/users/my-orders/', views.UserOrdersView.as_view(), name='user-orders'),
-    path('api/users/profile/', views.UserProfileView.as_view(), name='user-profile'),
+    path('users/my-orders/', views.UserOrdersView.as_view(), name='user-orders'),
+    path('users/profile/', views.UserProfileView.as_view(), name='user-profile'),
     
     # Quantum AI blockchain addresses
-    path('api/bots/blockchain-addresses/', views.BlockchainAddressesView.as_view(), name='blockchain-addresses'),
-    path('api/bots/quantum-ai/<uuid:bot_id>/deposit/', views.QuantumAIDepositView.as_view(), name='quantum-deposit'),
+    path('bots/blockchain-addresses/', views.BlockchainAddressesView.as_view(), name='blockchain-addresses'),
+    path('bots/quantum-ai/<uuid:bot_id>/deposit/', views.QuantumAIDepositView.as_view(), name='quantum-deposit'),
     
     # Bot actions
-    path('api/bots/<uuid:bot_id>/start/', views.StartBotView.as_view(), name='bot-start'),
-    path('api/bots/<uuid:bot_id>/stop/', views.StopBotView.as_view(), name='bot-stop'),
-    path('api/bots/<uuid:bot_id>/pause/', views.PauseBotView.as_view(), name='bot-pause'),
+    path('bots/<uuid:bot_id>/start/', views.StartBotView.as_view(), name='bot-start'),
+    path('bots/<uuid:bot_id>/stop/', views.StopBotView.as_view(), name='bot-stop'),
+    path('bots/<uuid:bot_id>/pause/', views.PauseBotView.as_view(), name='bot-pause'),
 ]

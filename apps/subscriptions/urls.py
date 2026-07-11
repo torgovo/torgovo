@@ -7,11 +7,11 @@ from rest_framework.routers import DefaultRouter
 from . import views as subscription_views
 
 router = DefaultRouter()
-router.register(r'plans', subscription_views.TelegramSignalPlanViewSet)
-router.register(r'subscriptions', subscription_views.TelegramSubscriptionViewSet)
-router.register(r'channels', subscription_views.TelegramChannelViewSet)
-router.register(r'signals', subscription_views.TradingSignalViewSet)
-router.register(r'signal-results', subscription_views.SignalResultViewSet)
+router.register(r'plans', subscription_views.TelegramSignalPlanViewSet, basename='plans')
+router.register(r'subscriptions', subscription_views.TelegramSubscriptionViewSet, basename='subscriptions')
+router.register(r'channels', subscription_views.TelegramChannelViewSet, basename='channels')
+router.register(r'signals', subscription_views.TradingSignalViewSet, basename='signals')
+router.register(r'signal-results', subscription_views.SignalResultViewSet, basename='signal-results')
 
 app_name = 'subscriptions'
 
@@ -34,4 +34,9 @@ urlpatterns = [
 
     # Signal statistics
     path('statistics/', subscription_views.SignalStatisticsView.as_view(), name='signal_statistics'),
+    
+    # NEW TELEGRAM SIGNAL ENDPOINTS (separate from main subscriptions)
+    path('telegram/plans/', subscription_views.TelegramPlanListView.as_view(), name='telegram-plan-list'),
+    path('telegram/my-usage/', subscription_views.MyTelegramUsageView.as_view(), name='telegram-my-usage'),
+    path('telegram/subscribe/', subscription_views.TelegramSubscribeView.as_view(), name='telegram-subscribe'),
 ]

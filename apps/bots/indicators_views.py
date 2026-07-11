@@ -1,5 +1,15 @@
 """
 Technical indicator webhook views for async trading signals.
+
+These views receive EMA, RSI, and BB values from TradingView webhooks
+and update the BotEngine instance for that user/pair.
+
+Flow:
+1. TradingView fires webhook with indicator value
+2. View looks up user + PairConfig
+3. Finds or creates the BotEngine instance
+4. Updates the indicator on the engine (engine.EMA = value)
+5. Calls engine.startBot() to evaluate entry/exit conditions
 """
 import json
 import logging
@@ -7,386 +17,300 @@ from django.views import View
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
-from django.db.models import Q
 from asgiref.sync import sync_to_async
 
 logger = logging.getLogger('apps.indicators')
 
+# In-memory engine registry (same as oldbybit.py pattern)
+# Key: "{user_id}_{pair_symbol}_{exchange}" -> BotEngine instance
+_engine_registry = {}
+
+
+def _resolve_webhook_user(request):
+    """Resolve user from X-Webhook-Token header. Returns user or None."""
+    from django.contrib.auth import get_user_model
+    from django.core.exceptions import ValidationError
+    User = get_user_model()
+    token = request.headers.get('X-Webhook-Token') or request.POST.get('webhook_token')
+    if not token:
+        return None
+    try:
+        return User.objects.get(webhook_token=token)
+    except (User.DoesNotExist, ValidationError):
+        return None
+
+
+def _get_or_create_engine(user, pair_config, exchange_name):
+    """Get existing engine or create a new one for this user/pair/exchange."""
+    from apps.trading.engines.bot_engine import BotEngine
+    from apps.exchanges.models import ExchangeCredentials
+
+    pair_symbol = pair_config.pair_symbol
+    key = f"{user.id}_{pair_symbol}_{exchange_name}"
+
+    if key in _engine_registry:
+        engine = _engine_registry[key]
+        # Update pair_config in case it changed
+        engine.pair_config.update(_pair_config_to_dict(pair_config))
+        return engine
+
+    # Build config dict
+    try:
+        credentials = ExchangeCredentials.objects.get(
+            user=user, exchange_name=exchange_name, is_active=True
+        )
+        creds = credentials.get_decrypted_credentials()
+    except ExchangeCredentials.DoesNotExist:
+        logger.error(f"No credentials for {user.username} on {exchange_name}")
+        return None
+
+    config = {
+        'bot_name': f"{user.username}_{pair_symbol}_{exchange_name}",
+        'user_id': str(user.id),
+        'strategy': 'quantum_ai',
+        'symbol': pair_symbol,
+        'exchange_name': exchange_name,
+        'api_key': creds.get('api_key', ''),
+        'secret_key': creds.get('secret_key', ''),
+        'passphrase': creds.get('passphrase', ''),
+        'is_testnet': getattr(credentials, 'is_testnet', False),
+        'parameters': _pair_config_to_dict(pair_config),
+    }
+
+    engine = BotEngine(config)
+    _engine_registry[key] = engine
+    logger.info(f"Created BotEngine for {key}")
+    return engine
+
+
+def _pair_config_to_dict(pair_config):
+    """Convert PairConfig model to plain dict for BotEngine."""
+    return {
+        'pair_symbol': pair_config.pair_symbol,
+        'quantity': pair_config.quantity or 0,
+        'favor_levels': pair_config.favor_levels or 3,
+        'against_levels': pair_config.against_levels or 3,
+        'favor_level_qty': pair_config.favor_level_qty or 0,
+        'against_level_qty': pair_config.against_level_qty or 0,
+        'favor_level_difference': pair_config.favor_level_difference or 0.5,
+        'against_level_difference': pair_config.against_level_difference or 0.5,
+        'Order_Type': pair_config.Order_Type or 'market',
+        'Amount_Type': pair_config.Amount_Type or 'dollar',
+        'SLTP_Type': pair_config.SLTP_Type or 'dollar',
+        'Stop_Loss': pair_config.Stop_Loss,
+        'Take_Profit': pair_config.Take_Profit,
+        'RSI_Lower': pair_config.RSI_Lower or 30,
+        'RSI_Upper': pair_config.RSI_Upper or 70,
+        'RSI_Entry': pair_config.RSI_Entry,
+        'BB_Entry': pair_config.BB_Entry,
+        'EMA_RSI_Entry': pair_config.EMA_RSI_Entry,
+        'EMA_BB_Entry': pair_config.EMA_BB_Entry,
+        'BB_RSI_Entry': pair_config.BB_RSI_Entry,
+        'EMA_BB_RSI_Entry': pair_config.EMA_BB_RSI_Entry,
+        'BB_Exit': pair_config.BB_Exit,
+        'RSI_Exit': pair_config.RSI_Exit,
+        'EMA_RSI_Exit': pair_config.EMA_RSI_Exit,
+        'EMA_BB_Exit': pair_config.EMA_BB_Exit,
+        'BB_RSI_Exit': pair_config.BB_RSI_Exit,
+        'EMA_BB_RSI_Exit': pair_config.EMA_BB_RSI_Exit,
+        'SL_Exit': pair_config.SL_Exit,
+    }
+
 
 @method_decorator(csrf_exempt, name='dispatch')
 class EMAIndicatorView(View):
-    """Handle EMA (Exponential Moving Average) webhook signals."""
+    """Handle EMA webhook from TradingView. Updates engine.EMA then runs startBot()."""
 
     async def post(self, request):
-        """Process EMA trading signal."""
         try:
-            # Parse JSON data
+            user = await sync_to_async(_resolve_webhook_user)(request)
+            if user is None:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized'}, status=401)
+
             raw_data = request.body.decode('utf-8').strip('"')
             data = json.loads(raw_data)
 
-            # Validate required fields
             if "EMA200" not in data:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': 'EMA200 value is required'
-                }, status=400)
+                return JsonResponse({'status': 'error', 'message': 'EMA200 value is required'}, status=400)
 
-            username = data.get("username")
             pair_symbol = data.get("pair")
-            exchange = data.get("exchange", "binance")
-            ema_value = data.get("EMA200")
+            exchange = data.get("exchange", "bybit")
+            ema_value = float(data.get("EMA200"))
 
-            if not username or not pair_symbol:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': 'username and pair are required'
-                }, status=400)
+            if not pair_symbol:
+                return JsonResponse({'status': 'error', 'message': 'pair is required'}, status=400)
 
-            # Get user and pair config
-            from apps.authentication.models import User
             from apps.bots.models import PairConfig
 
             try:
-                user = await sync_to_async(User.objects.get)(username=username)
-                pair_config = await sync_to_async(PairConfig.objects.get)(
-                    user=user, pair_symbol=pair_symbol
-                )
-            except User.DoesNotExist:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': f'User {username} not found'
-                }, status=404)
+                pair_config = await sync_to_async(PairConfig.objects.get)(user=user, pair_symbol=pair_symbol)
             except PairConfig.DoesNotExist:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': f'Pair config for {pair_symbol} not found'
-                }, status=404)
+                return JsonResponse({'status': 'error', 'message': f'Pair config for {pair_symbol} not found'}, status=404)
 
-            # Update bot configuration
-            bot = await self.get_or_create_bot(user, pair_config, exchange)
-            bot.EMA = ema_value
-            await sync_to_async(bot.save)()
+            # Get or create engine, update EMA, run strategy
+            engine = await sync_to_async(_get_or_create_engine)(user, pair_config, exchange)
+            if engine is None:
+                return JsonResponse({'status': 'error', 'message': 'No exchange credentials found'}, status=404)
 
-            # Check entry conditions
-            await self.check_entry_conditions(bot, data)
+            engine.EMA = ema_value
+
+            # Save indicator to DB
+            await sync_to_async(self._save_indicator)(user, pair_symbol, engine)
+
+            # Run strategy evaluation (checks all conditions and trades if met)
+            await sync_to_async(engine.startBot)()
 
             return JsonResponse({
                 'status': 'success',
                 'message': f'EMA processed for {pair_symbol}',
                 'EMA': ema_value,
-                'bot_updated': True
+                'current_side': engine.current_side,
+                'reason': engine.reason,
             })
 
         except json.JSONDecodeError:
-            return JsonResponse({
-                'status': 'error',
-                'message': 'Invalid JSON format'
-            }, status=400)
+            return JsonResponse({'status': 'error', 'message': 'Invalid JSON format'}, status=400)
         except Exception as e:
-            logger.error(f"Error in EMA webhook: {e}")
-            return JsonResponse({
-                'status': 'error',
-                'message': 'Internal server error'
-            }, status=500)
+            logger.error(f"Error in EMA webhook: {e}", exc_info=True)
+            return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
 
-    async def get_or_create_bot(self, user, pair_config, exchange):
-        """Get or create Quantum AI bot for the user."""
-        from apps.bots.models import QuantumAIBot
-
-        bot, created = await sync_to_async(QuantumAIBot.objects.get_or_create)(
-            user=user,
-            defaults={
-                'bot_name': f'{pair_config.pair_symbol} Quantum AI',
-                'is_active': True
-            }
-        )
-        return bot
-
-    async def check_entry_conditions(self, bot, data):
-        """Check if entry conditions are met based on EMA signals."""
-        ema_value = float(data.get("EMA200", 0))
-
-        # Simple EMA-based entry logic
-        if ema_value > 0:
-            # Update bot's technical indicators
-            bot_details = {
-                'ema_value': ema_value,
-                'timestamp': data.get('timestamp'),
-                'signal_strength': 'medium'
-            }
-
-            # Log the signal
-            await self.log_signal(bot, 'EMA', bot_details)
-
-    async def log_signal(self, bot, indicator_type, details):
-        """Log technical indicator signal."""
-        from apps.bots.models import BotExecutionLog
-
-        await sync_to_async(BotExecutionLog.objects.create)(
-            user=bot.user,
-            bot_type='quantum',
-            bot_id=bot.id,
-            action=f'{indicator_type}_signal',
-            message=f'{indicator_type} signal received: {details}',
-            level='info',
-            data=details
+    def _save_indicator(self, user, pair_symbol, engine):
+        from apps.bots.models import Indicator
+        Indicator.objects.create(
+            Pair=pair_symbol, user=user,
+            EMA=engine.EMA, RSI=engine.RSI, Prev_RSI=engine.PrevRSI,
+            Color=engine.RSI_color or '', Prev_Color=engine.RSI_prev_color or '',
+            BB=engine.BB or '',
         )
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class RSIIndicatorView(View):
-    """Handle RSI (Relative Strength Index) webhook signals."""
+    """Handle RSI webhook from TradingView. Updates engine.RSI/PrevRSI/colors then runs startBot()."""
 
     async def post(self, request):
-        """Process RSI trading signal."""
         try:
-            # Parse JSON data
+            user = await sync_to_async(_resolve_webhook_user)(request)
+            if user is None:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized'}, status=401)
+
             raw_data = request.body.decode('utf-8').strip('"')
             data = json.loads(raw_data)
 
-            # Validate required fields
             if "RSI" not in data:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': 'RSI value is required'
-                }, status=400)
+                return JsonResponse({'status': 'error', 'message': 'RSI value is required'}, status=400)
 
-            username = data.get("username")
             pair_symbol = data.get("pair")
-            exchange = data.get("exchange", "binance")
-            rsi_value = data.get("RSI")
-            prev_rsi = data.get("PrevRSI", rsi_value)
+            exchange = data.get("exchange", "bybit")
+            rsi_value = float(data.get("RSI"))
+            prev_rsi = float(data.get("PrevRSI", rsi_value))
             color = data.get("color", "white")
             prev_color = data.get("prev_color", "white")
 
-            if not username or not pair_symbol:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': 'username and pair are required'
-                }, status=400)
+            if not pair_symbol:
+                return JsonResponse({'status': 'error', 'message': 'pair is required'}, status=400)
 
-            # Get user and pair config
-            from apps.authentication.models import User
             from apps.bots.models import PairConfig
 
             try:
-                user = await sync_to_async(User.objects.get)(username=username)
-                pair_config = await sync_to_async(PairConfig.objects.get)(
-                    user=user, pair_symbol=pair_symbol
-                )
-            except User.DoesNotExist:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': f'User {username} not found'
-                }, status=404)
+                pair_config = await sync_to_async(PairConfig.objects.get)(user=user, pair_symbol=pair_symbol)
             except PairConfig.DoesNotExist:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': f'Pair config for {pair_symbol} not found'
-                }, status=404)
+                return JsonResponse({'status': 'error', 'message': f'Pair config for {pair_symbol} not found'}, status=404)
 
-            # Update bot configuration
-            bot = await self.get_or_create_bot(user, pair_config, exchange)
-            bot.RSI = rsi_value
-            await sync_to_async(bot.save)()
+            engine = await sync_to_async(_get_or_create_engine)(user, pair_config, exchange)
+            if engine is None:
+                return JsonResponse({'status': 'error', 'message': 'No exchange credentials found'}, status=404)
 
-            # Check entry conditions
-            await self.check_entry_conditions(bot, data)
+            engine.RSI = rsi_value
+            engine.PrevRSI = prev_rsi
+            engine.RSI_color = color
+            engine.RSI_prev_color = prev_color
+
+            await sync_to_async(self._save_indicator)(user, pair_symbol, engine)
+            await sync_to_async(engine.startBot)()
 
             return JsonResponse({
                 'status': 'success',
                 'message': f'RSI processed for {pair_symbol}',
                 'RSI': rsi_value,
-                'bot_updated': True
+                'current_side': engine.current_side,
+                'reason': engine.reason,
             })
 
         except json.JSONDecodeError:
-            return JsonResponse({
-                'status': 'error',
-                'message': 'Invalid JSON format'
-            }, status=400)
+            return JsonResponse({'status': 'error', 'message': 'Invalid JSON format'}, status=400)
         except Exception as e:
-            logger.error(f"Error in RSI webhook: {e}")
-            return JsonResponse({
-                'status': 'error',
-                'message': 'Internal server error'
-            }, status=500)
+            logger.error(f"Error in RSI webhook: {e}", exc_info=True)
+            return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
 
-    async def get_or_create_bot(self, user, pair_config, exchange):
-        """Get or create Quantum AI bot for the user."""
-        from apps.bots.models import QuantumAIBot
-
-        bot, created = await sync_to_async(QuantumAIBot.objects.get_or_create)(
-            user=user,
-            defaults={
-                'bot_name': f'{pair_config.pair_symbol} Quantum AI',
-                'is_active': True
-            }
-        )
-        return bot
-
-    async def check_entry_conditions(self, bot, data):
-        """Check if entry conditions are met based on RSI signals."""
-        rsi_value = float(data.get("RSI", 50))
-        prev_rsi = float(data.get("PrevRSI", 50))
-        color = data.get("color", "white")
-        prev_color = data.get("prev_color", "white")
-
-        # RSI-based entry logic
-        signal_type = None
-        if rsi_value < 30 and prev_rsi >= 30:  # Oversold crossover
-            signal_type = 'buy'
-        elif rsi_value > 70 and prev_rsi <= 70:  # Overbought crossover
-            signal_type = 'sell'
-
-        if signal_type:
-            bot_details = {
-                'rsi_value': rsi_value,
-                'prev_rsi': prev_rsi,
-                'signal_type': signal_type,
-                'color': color,
-                'prev_color': prev_color,
-                'timestamp': data.get('timestamp')
-            }
-
-            # Log the signal
-            await self.log_signal(bot, 'RSI', bot_details)
-
-    async def log_signal(self, bot, indicator_type, details):
-        """Log technical indicator signal."""
-        from apps.bots.models import BotExecutionLog
-
-        await sync_to_async(BotExecutionLog.objects.create)(
-            user=bot.user,
-            bot_type='quantum',
-            bot_id=bot.id,
-            action=f'{indicator_type}_signal',
-            message=f'{indicator_type} signal received: {details}',
-            level='info',
-            data=details
+    def _save_indicator(self, user, pair_symbol, engine):
+        from apps.bots.models import Indicator
+        Indicator.objects.create(
+            Pair=pair_symbol, user=user,
+            EMA=engine.EMA, RSI=engine.RSI, Prev_RSI=engine.PrevRSI,
+            Color=engine.RSI_color or '', Prev_Color=engine.RSI_prev_color or '',
+            BB=engine.BB or '',
         )
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 class BollingerBandsView(View):
-    """Handle Bollinger Bands webhook signals."""
+    """Handle Bollinger Bands webhook from TradingView. Updates engine.BB then runs startBot()."""
 
     async def post(self, request):
-        """Process Bollinger Bands trading signal."""
         try:
-            # Parse JSON data
+            user = await sync_to_async(_resolve_webhook_user)(request)
+            if user is None:
+                return JsonResponse({'status': 'error', 'message': 'Unauthorized'}, status=401)
+
             raw_data = request.body.decode('utf-8').strip('"')
             data = json.loads(raw_data)
 
-            # Validate required fields
             if "BB" not in data:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': 'BB value is required'
-                }, status=400)
+                return JsonResponse({'status': 'error', 'message': 'BB value is required'}, status=400)
 
-            username = data.get("username")
             pair_symbol = data.get("pair")
-            exchange = data.get("exchange", "binance")
+            exchange = data.get("exchange", "bybit")
             bb_signal = data.get("BB")
 
-            if not username or not pair_symbol:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': 'username and pair are required'
-                }, status=400)
+            if not pair_symbol:
+                return JsonResponse({'status': 'error', 'message': 'pair is required'}, status=400)
 
-            # Get user and pair config
-            from apps.authentication.models import User
             from apps.bots.models import PairConfig
 
             try:
-                user = await sync_to_async(User.objects.get)(username=username)
-                pair_config = await sync_to_async(PairConfig.objects.get)(
-                    user=user, pair_symbol=pair_symbol
-                )
-            except User.DoesNotExist:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': f'User {username} not found'
-                }, status=404)
+                pair_config = await sync_to_async(PairConfig.objects.get)(user=user, pair_symbol=pair_symbol)
             except PairConfig.DoesNotExist:
-                return JsonResponse({
-                    'status': 'error',
-                    'message': f'Pair config for {pair_symbol} not found'
-                }, status=404)
+                return JsonResponse({'status': 'error', 'message': f'Pair config for {pair_symbol} not found'}, status=404)
 
-            # Update bot configuration
-            bot = await self.get_or_create_bot(user, pair_config, exchange)
-            bot.BB = bb_signal
-            await sync_to_async(bot.save)()
+            engine = await sync_to_async(_get_or_create_engine)(user, pair_config, exchange)
+            if engine is None:
+                return JsonResponse({'status': 'error', 'message': 'No exchange credentials found'}, status=404)
 
-            # Check entry conditions
-            await self.check_entry_conditions(bot, data)
+            engine.BB = bb_signal
+
+            await sync_to_async(self._save_indicator)(user, pair_symbol, engine)
+            await sync_to_async(engine.startBot)()
 
             return JsonResponse({
                 'status': 'success',
                 'message': f'Bollinger Bands processed for {pair_symbol}',
                 'BB': bb_signal,
-                'bot_updated': True
+                'current_side': engine.current_side,
+                'reason': engine.reason,
             })
 
         except json.JSONDecodeError:
-            return JsonResponse({
-                'status': 'error',
-                'message': 'Invalid JSON format'
-            }, status=400)
+            return JsonResponse({'status': 'error', 'message': 'Invalid JSON format'}, status=400)
         except Exception as e:
-            logger.error(f"Error in Bollinger Bands webhook: {e}")
-            return JsonResponse({
-                'status': 'error',
-                'message': 'Internal server error'
-            }, status=500)
+            logger.error(f"Error in Bollinger Bands webhook: {e}", exc_info=True)
+            return JsonResponse({'status': 'error', 'message': 'Internal server error'}, status=500)
 
-    async def get_or_create_bot(self, user, pair_config, exchange):
-        """Get or create Quantum AI bot for the user."""
-        from apps.bots.models import QuantumAIBot
-
-        bot, created = await sync_to_async(QuantumAIBot.objects.get_or_create)(
-            user=user,
-            defaults={
-                'bot_name': f'{pair_config.pair_symbol} Quantum AI',
-                'is_active': True
-            }
-        )
-        return bot
-
-    async def check_entry_conditions(self, bot, data):
-        """Check if entry conditions are met based on Bollinger Bands signals."""
-        bb_signal = data.get("BB", "")
-
-        # Bollinger Bands-based entry logic
-        signal_type = None
-        if "Crossing Up Band" in bb_signal:
-            signal_type = 'buy'
-        elif "Crossing Down Band" in bb_signal:
-            signal_type = 'sell'
-
-        if signal_type:
-            bot_details = {
-                'bb_signal': bb_signal,
-                'signal_type': signal_type,
-                'timestamp': data.get('timestamp')
-            }
-
-            # Log the signal
-            await self.log_signal(bot, 'BollingerBands', bot_details)
-
-    async def log_signal(self, bot, indicator_type, details):
-        """Log technical indicator signal."""
-        from apps.bots.models import BotExecutionLog
-
-        await sync_to_async(BotExecutionLog.objects.create)(
-            user=bot.user,
-            bot_type='quantum',
-            bot_id=bot.id,
-            action=f'{indicator_type}_signal',
-            message=f'{indicator_type} signal received: {details}',
-            level='info',
-            data=details
+    def _save_indicator(self, user, pair_symbol, engine):
+        from apps.bots.models import Indicator
+        Indicator.objects.create(
+            Pair=pair_symbol, user=user,
+            EMA=engine.EMA, RSI=engine.RSI, Prev_RSI=engine.PrevRSI,
+            Color=engine.RSI_color or '', Prev_Color=engine.RSI_prev_color or '',
+            BB=engine.BB or '',
         )

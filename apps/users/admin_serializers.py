@@ -49,32 +49,24 @@ class UserAdminDetailSerializer(serializers.ModelSerializer):
 
     def get_total_bots(self, obj):
         """Get total number of bots for this user."""
-        from apps.bots.models import WebhookAlert, GridBot, MartingaleBot, QuantumAIBot
+        from apps.bots.models import SignalBot, GridBot, MartingaleBot, QuantumAIBot
 
         return (
-            WebhookAlert.objects.filter(user=obj, is_deleted=False).count() +
+            SignalBot.objects.filter(user=obj, is_deleted=False).count() +
             GridBot.objects.filter(user=obj, is_deleted=False).count() +
-            MartingaleBot.objects.filter(user=obj, is_deleted=False).count() +
-            QuantumAIBot.objects.filter(user=obj, is_deleted=False).count()
+            MartingaleBot.objects.filter(user=obj, is_deleted=False).count()
         )
 
     def get_total_deposits(self, obj):
         """Get total deposited amount for Quantum AI."""
-        from apps.bots.models import QuantumAIBot
         from apps.payments.models import QuantumAIDeposit
 
-        # Sum of Quantum AI bot deposits
-        bot_deposits = QuantumAIBot.objects.filter(
-            user=obj
-        ).aggregate(total=models.Sum('total_deposited'))['total'] or 0
-
-        # Sum of approved deposits
         deposit_deposits = QuantumAIDeposit.objects.filter(
             user=obj,
             status='approved'
         ).aggregate(total=models.Sum('usdt_amount'))['total'] or 0
 
-        return float(bot_deposits + deposit_deposits)
+        return float(deposit_deposits)
 
     def get_last_activity(self, obj):
         """Get user's last activity timestamp."""

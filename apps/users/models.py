@@ -2,8 +2,11 @@
 Users App Models - Torgovo Crypto Trading Platform
 Production-ready CustomUser model with trading profile
 """
+import uuid
+
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
+from django.core.validators import RegexValidator
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 from django_extensions.db.models import TimeStampedModel
@@ -17,6 +20,15 @@ class CustomUser(AbstractUser):
     Extended User model with trading-specific fields
     Integrates with all trading bots, subscriptions, and payment systems
     """
+
+    # Override email to be unique (required because USERNAME_FIELD = 'email').
+    # Django's stock AbstractUser does NOT enforce email uniqueness, which lets
+    # multiple accounts share an address — a real auth-bypass risk because
+    # `authenticate(username=email)` returns whichever row comes first.
+    email = models.EmailField(_('email address'), unique=True)
+
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['username']
 
     # Subscription Plans (matching your business logic)
     SUBSCRIPTION_PLAN_CHOICES = [
@@ -121,16 +133,54 @@ class CustomUser(AbstractUser):
         help_text=_("Quantum AI profit compounding frequency")
     )
 
-    # System Fields
-    is_verified = models.BooleanField(
-        default=False,
-        help_text=_("Email/Phone verification status")
+    # Phone / Verification
+    phone_number = models.CharField(
+        max_length=20,
+        unique=True,
+        null=True,
+        blank=True,
+        validators=[
+            RegexValidator(
+                regex=r'^\+?1?\d{9,15}$',
+                message="Phone number must be entered in the format: '+999999999'. Up to 15 digits allowed."
+            )
+        ]
     )
+
+    is_email_verified = models.BooleanField(
+        default=False,
+        help_text=_("Email verification status")
+    )
+
+    is_phone_verified = models.BooleanField(
+        default=False,
+        help_text=_("Phone verification status")
+    )
+
+    two_factor_enabled = models.BooleanField(default=False)
+    last_login_ip = models.GenericIPAddressField(null=True, blank=True)
 
     timezone = models.CharField(
         max_length=50,
         default='UTC',
         help_text=_("User's timezone for reporting")
+    )
+
+    referral_code = models.CharField(max_length=20, unique=True, blank=True, null=True)
+    referred_by = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='customuser_referrals'   # changed from 'referrals'
+    )
+
+    # Webhook authentication token
+    webhook_token = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        editable=False,
+        help_text=_("Token used to authenticate webhook calls from TradingView"),
     )
 
     # Timestamps
@@ -156,6 +206,10 @@ class CustomUser(AbstractUser):
         }
         self.max_bots_allowed = plan_limits.get(self.subscription_plan, 3)
         super().save(*args, **kwargs)
+
+    @property
+    def full_name(self):
+        return self.get_full_name()
 
     def get_full_trading_profile(self):
         """Get complete trading profile for admin/dashboard"""

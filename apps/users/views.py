@@ -2,16 +2,20 @@
 Admin-only views for user management
 """
 from django.contrib.auth import get_user_model
-from rest_framework import status, generics, permissions
+from rest_framework import status, generics, permissions, filters
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Count, Sum, Q
 from django.utils import timezone
+from django.conf import settings
+from django.core.mail import send_mail
 from datetime import timedelta
 
-from apps.bots.models import WebhookAlert, GridBot, MartingaleBot, QuantumAIBot, Order
-from apps.payments.models import BlockchainAddress, QuantumAIDeposit as Deposit
+from apps.investments.models import WebhookAlertBot as WebhookAlert
+from apps.bots.models import GridBot, MartingaleBot, QuantumAIBot, Order
+from apps.payments.models import BlockchainAddress, WithdrawalRequest, QuantumAIDeposit as Deposit
+from apps.referrals.models import Referral
 from core.permissions import IsAdminUser
 from core.pagination import StandardResultsSetPagination
 from .admin_serializers import UserAdminSerializer, UserAdminDetailSerializer
@@ -35,8 +39,10 @@ class UserListView(generics.ListAPIView):
         queryset = queryset.annotate(
             total_deposits=Count('quantum_deposits', distinct=True),
             active_bots_count=Count(
-                Q(webhook_alerts__is_active=True, grid_bots__is_running=True) |
-                Q(martingale_bots__is_running=True, quantum_ai_bots__is_active=True),
+                Q(botbase_bots__is_active=True) |
+                Q(grid_bots__is_running=True) |
+                Q(martingale_bots__is_running=True) |
+                Q(quantum_ai_investments__status='active'),
                 distinct=True
             )
         ).select_related('profile')
@@ -80,7 +86,7 @@ def admin_dashboard_stats(request):
         subscription_stats = {}
         from apps.authentication.models import UserProfile
 
-        for plan_type, display_name in UserProfile.SUBSCRIPTION_PLAN_CHOICES:
+        for plan_type, display_name in UserProfile.SUBSCRIPTION_PLANS:
             count = UserProfile.objects.filter(
                 subscription_plan=plan_type
             ).count()
@@ -100,7 +106,7 @@ def admin_dashboard_stats(request):
             WebhookAlert.objects.filter(is_active=True).count() +
             GridBot.objects.filter(is_running=True).count() +
             MartingaleBot.objects.filter(is_running=True).count() +
-            QuantumAIBot.objects.filter(is_active=True).count()
+            QuantumAIBot.objects.filter(is_running=True).count()
         )
 
         # Trading statistics
@@ -128,10 +134,10 @@ def admin_dashboard_stats(request):
 
         # Exchange distribution
         exchange_stats = {}
-        for webhook in WebhookAlert.objects.values('exchange_name').annotate(
+        for webhook in WebhookAlert.objects.values('exchange__name').annotate(
             count=Count('id')
         ):
-            exchange_stats[webhook['exchange_name']] = webhook['count']
+            exchange_stats[webhook['exchange__name']] = webhook['count']
 
         return Response({
             'user_statistics': {
@@ -186,7 +192,6 @@ def admin_create_blockchain_address(request):
             coin_type=coin_type,
             blockchain=blockchain,
             address=address,
-            admin_only_configurable=True,
             is_active=True
         )
 
@@ -198,7 +203,6 @@ def admin_create_blockchain_address(request):
                 'blockchain': blockchain_addr.blockchain,
                 'address': blockchain_addr.address,
                 'is_active': blockchain_addr.is_active,
-                'admin_only_configurable': blockchain_addr.admin_only_configurable,
                 'created_at': blockchain_addr.created_at,
             }
         }, status=status.HTTP_201_CREATED)
@@ -238,16 +242,12 @@ def admin_bots_overview(request):
 
         quantum_stats = {
             'total': QuantumAIBot.objects.count(),
-            'active': QuantumAIBot.objects.filter(is_active=True).count(),
+            'active': QuantumAIBot.objects.filter(is_running=True).count(),
             'running': 0,  # Quantum AI bots have different state
-            'total_deposited': float(
-                QuantumAIBot.objects.aggregate(
-                    total=Sum('total_deposited')
-                )['total'] or 0
-            ),
+            'total_deposited': 0,
             'total_profit_loss': float(
                 QuantumAIBot.objects.aggregate(
-                    total=Sum('current_profit_loss')
+                    total=Sum('total_profit_loss')
                 )['total'] or 0
             ),
         }
@@ -257,7 +257,7 @@ def admin_bots_overview(request):
 
         for exchange in exchanges:
             webhook_stats['exchanges'][exchange] = WebhookAlert.objects.filter(
-                exchange_name=exchange
+                exchange__name=exchange
             ).count()
             grid_stats['exchanges'][exchange] = GridBot.objects.filter(
                 exchange_name=exchange
@@ -281,7 +281,7 @@ def admin_bots_overview(request):
             ).count(),
             'platform_volume': float(
                 Order.objects.aggregate(
-                    total=Sum('quantity')
+                    total=Sum('Quantity')
                 )['total'] or 0
             ),
             'by_type': {
@@ -304,3 +304,177 @@ def admin_bots_overview(request):
         return Response({
             'error': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_trade_logs(request):
+    """View all trade logs with filters (admin only)."""
+    from rest_framework import filters
+    
+    queryset = Order.objects.all().select_related('user', 'signal_bot', 'grid_bot', 'martingale_bot')
+    
+    # Apply filters
+    user_id = request.query_params.get('user_id')
+    if user_id:
+        queryset = queryset.filter(user_id=user_id)
+    
+    exchange = request.query_params.get('exchange')
+    if exchange:
+        queryset = queryset.filter(exchange=exchange)
+    
+    bot_id = request.query_params.get('bot_id')
+    if bot_id:
+        queryset = queryset.filter(
+            Q(signal_bot_id=bot_id) | Q(grid_bot_id=bot_id) | Q(martingale_bot_id=bot_id)
+        )
+    
+    start_date = request.query_params.get('start_date')
+    if start_date:
+        queryset = queryset.filter(timestamp__gte=start_date)
+    
+    end_date = request.query_params.get('end_date')
+    if end_date:
+        queryset = queryset.filter(timestamp__lte=end_date)
+    
+    # Paginate results
+    paginator = StandardResultsSetPagination()
+    result_page = paginator.paginate_queryset(queryset, request)
+    
+    from apps.bots.serializers import OrderSerializer
+    serializer = OrderSerializer(result_page, many=True)
+    return paginator.get_paginated_response(serializer.data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def admin_restrict_user(request, pk):
+    """Restrict/disable user account (admin only)."""
+    try:
+        user = User.objects.get(pk=pk)
+        
+        action = request.data.get('action', 'disable')
+        reason = request.data.get('reason', '')
+        
+        if action == 'disable':
+            user.is_active = False
+        elif action == 'enable':
+            user.is_active = True
+        elif action == 'restrict':
+            user.is_active = False
+        else:
+            return Response(
+                {'error': 'Invalid action. Use "enable", "disable", or "restrict"'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        user.save()
+        
+        return Response({
+            'message': f'User {user.email} has been {action}d',
+            'user_id': str(user.pk),
+            'is_active': user.is_active
+        })
+    
+    except User.DoesNotExist:
+        return Response(
+            {'error': 'User not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def admin_send_email(request):
+    """Send emails (system-wide or targeted) (admin only)."""
+    email_type = request.data.get('type', 'system')
+    subject = request.data.get('subject')
+    message = request.data.get('message')
+    recipients = request.data.get('recipients', [])  # List of user IDs or 'all'
+    
+    if not subject or not message:
+        return Response(
+            {'error': 'Subject and message are required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        if email_type == 'system':
+            if recipients == 'all':
+                users = User.objects.filter(is_active=True)
+            else:
+                users = User.objects.filter(id__in=recipients, is_active=True)
+            
+            successful = 0
+            failed = 0
+            
+            for user in users:
+                try:
+                    send_mail(
+                        subject=subject,
+                        message=message,
+                        from_email=settings.DEFAULT_FROM_EMAIL,
+                        recipient_list=[user.email],
+                        fail_silently=False
+                    )
+                    successful += 1
+                except Exception:
+                    failed += 1
+            
+            return Response({
+                'message': f'Email sent to {successful} users',
+                'successful': successful,
+                'failed': failed
+            })
+        
+        else:
+            return Response(
+                {'error': 'Invalid email type'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to send emails: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminUser])
+def admin_process_withdrawals(request):
+    """Process manual withdrawals every 2 weeks (admin only)."""
+    try:
+        pending_withdrawals = WithdrawalRequest.objects.filter(status='pending')
+        
+        if not pending_withdrawals.exists():
+            return Response({
+                'message': 'No pending withdrawals to process',
+                'processed': 0
+            })
+        
+        successful = 0
+        failed = 0
+        
+        for withdrawal in pending_withdrawals:
+            try:
+                withdrawal.status = 'completed'
+                withdrawal.save()
+                successful += 1
+            except Exception as e:
+                withdrawal.status = 'failed'
+                withdrawal.error_message = str(e)
+                withdrawal.save()
+                failed += 1
+        
+        return Response({
+            'message': f'Processed {successful} withdrawals ({failed} failed)',
+            'successful': successful,
+            'failed': failed
+        })
+    
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to process withdrawals: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

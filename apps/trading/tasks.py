@@ -11,13 +11,14 @@ logger = logging.getLogger('trading.tasks')
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def run_trading_bot(self, bot_id: str, bot_type: str = 'grid'):
+def run_trading_bot(self, bot_id: str, bot_type: str = 'grid', restore_mode: bool = False):
     """
     Run a single iteration of a trading bot.
 
     Args:
         bot_id: UUID of the bot
         bot_type: 'grid', 'martingale', 'signal', or 'quantum_ai'
+        restore_mode: If True, attach to existing position instead of entry eval
 
     Returns:
         Execution result dict
@@ -25,7 +26,7 @@ def run_trading_bot(self, bot_id: str, bot_type: str = 'grid'):
     from .engines.execution import run_bot
 
     try:
-        result = run_bot(bot_id, bot_type=bot_type)
+        result = run_bot(bot_id, bot_type=bot_type, restore_mode=restore_mode)
 
         if not result.get('success') and result.get('error'):
             logger.error(f"Bot {bot_id} execution failed: {result['error']}")
@@ -122,8 +123,160 @@ def check_all_active_bots():
         run_trading_bot.delay(str(bot_id), bot_type='martingale')
         results.append(str(bot_id))
 
+    # Schedule running quantum AI bots
+    from apps.bots.models import QuantumAIBot
+    quantum_bots = QuantumAIBot.objects.filter(
+        is_running=True, is_deleted=False
+    ).values_list('id', flat=True)
+    for bot_id in quantum_bots:
+        run_trading_bot.delay(str(bot_id), bot_type='quantum_ai')
+        results.append(str(bot_id))
+
     logger.info(f"Scheduled {len(results)} active bots for execution")
     return {'scheduled_bots': results, 'count': len(results)}
+
+
+@shared_task
+def check_stale_bots():
+    """
+    Find bots that are marked running but haven't sent a heartbeat in > 5 minutes.
+    
+    - If an open position exists on the exchange → restart in restore_mode
+      (attaches monitoring threads without placing new entry orders)
+    - If no open position → mark is_running=False so normal restart works next time
+    
+    Runs every 2 minutes via Celery Beat.
+    """
+    from django.utils import timezone
+    from datetime import timedelta
+
+    cutoff = timezone.now() - timedelta(minutes=5)
+    models_to_check = [
+        ('grid', 'GridBot'),
+        ('martingale', 'MartingaleBot'),
+        ('quantum_ai', 'QuantumAIBot'),
+    ]
+    restored = 0
+    stopped = 0
+    errors = 0
+
+    for bot_type, model_name in models_to_check:
+        try:
+            from apps.bots.models import GridBot, MartingaleBot, QuantumAIBot
+            model_map = {
+                'GridBot': GridBot,
+                'MartingaleBot': MartingaleBot,
+                'QuantumAIBot': QuantumAIBot,
+            }
+            model = model_map[model_name]
+
+            # Bots with stale heartbeat
+            stale_bots = model.objects.filter(
+                is_running=True, is_deleted=False,
+                last_heartbeat__lt=cutoff
+            )
+
+            # Bots that have never sent a heartbeat but started > 5 min ago
+            never_heartbeat = model.objects.filter(
+                is_running=True, is_deleted=False,
+                last_heartbeat__isnull=True,
+                started_at__lt=cutoff
+            )
+
+            for bot in list(stale_bots) + list(never_heartbeat):
+                try:
+                    _handle_stale_bot(bot, bot_type)
+                    restored += 1
+                except Exception as e:
+                    logger.error(f"Failed to recover stale bot {bot.id}: {e}")
+                    errors += 1
+        except Exception as e:
+            logger.error(f"Error checking {model_name} stale bots: {e}")
+            errors += 1
+
+    logger.info(f"Stale bot check complete: {restored} restored, {stopped} stopped, {errors} errors")
+    return {'restored': restored, 'stopped': stopped, 'errors': errors}
+
+
+def _handle_stale_bot(bot, bot_type):
+    """
+    Handle a stale bot: check for open position and recover or stop.
+    """
+    from django.utils import timezone
+    from decimal import Decimal
+    has_position = False
+    exchange_name = bot.exchange_name
+    trading_pair = bot.trading_pair
+    bot_id = str(bot.id)
+
+    # Try to check for open position on exchange
+    try:
+        if bot_type == 'quantum_ai':
+            from apps.bots.models import QuantumAIBot, QuantumAIFund
+            from core.utils import decrypt_api_key
+            fund = QuantumAIFund.objects.get(id=bot.fund_id)
+            api_key = decrypt_api_key(fund.master_api_key)
+            secret_key = decrypt_api_key(fund.master_secret_key)
+            passphrase = decrypt_api_key(fund.master_passphrase) if fund.master_passphrase else ''
+            from ..trading.exchanges import get_adapter
+            adapter = get_adapter(
+                exchange_name=exchange_name,
+                credentials={
+                    'api_key': api_key,
+                    'secret_key': secret_key,
+                    'passphrase': passphrase,
+                },
+                demo_mode=False,
+            )
+            position = adapter.fetch_position(trading_pair)
+            has_position = position and float(position.get('contracts', 0)) > 0
+        else:
+            # User bots: need user credentials
+            from apps.exchanges.models import ExchangeCredentials
+            credentials = ExchangeCredentials.objects.get(
+                user=bot.user,
+                exchange_name=exchange_name,
+                is_active=True
+            )
+            creds = credentials.get_decrypted_credentials()
+            from ..trading.exchanges import get_adapter
+            adapter = get_adapter(
+                exchange_name=exchange_name,
+                credentials=creds,
+                demo_mode=credentials.is_testnet,
+            )
+            position = adapter.fetch_position(trading_pair)
+            has_position = position and float(position.get('contracts', 0)) > 0
+    except Exception as e:
+        logger.warning(f"Could not check position for stale bot {bot_id}: {e}")
+        # If we can't check the exchange, safest to just mark stopped
+        # so next user action starts fresh
+        has_position = False
+
+    if has_position:
+        logger.warning(f"Stale bot {bot_id} has open position — restarting in restore_mode")
+        bot.is_running = False
+        bot.last_heartbeat = timezone.now()
+        bot.save(update_fields=['is_running', 'last_heartbeat', 'updated_at'])
+        run_trading_bot.delay(bot_id, bot_type, restore_mode=True)
+        try:
+            from core.telegram_service import TelegramService
+            TelegramService.send_admin_alert(
+                f"🚨 Bot Restored\n\n"
+                f"Bot {bot.bot_name} ({bot_id}) was restored after worker crash.\n"
+                f"Type: {bot_type}\n"
+                f"Pair: {bot.trading_pair}\n"
+                f"Exchange: {bot.exchange_name}\n"
+                f"Mode: restore (attached to existing position)\n"
+                f"Action: Monitoring threads re-started, no new entry orders."
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send admin alert for bot restore: {e}")
+    else:
+        logger.info(f"Stale bot {bot_id} has no open position — marking stopped")
+        bot.is_running = False
+        bot.last_heartbeat = timezone.now()
+        bot.save(update_fields=['is_running', 'last_heartbeat', 'updated_at'])
 
 
 def _get_bot_instance(bot_id: str, bot_type: str):
@@ -138,6 +291,9 @@ def _get_bot_instance(bot_id: str, bot_type: str):
         elif bot_type == 'signal':
             from apps.bots.models import SignalBot
             return SignalBot.objects.get(id=bot_id)
+        elif bot_type == 'quantum_ai':
+            from apps.bots.models import QuantumAIBot
+            return QuantumAIBot.objects.get(id=bot_id)
     except Exception:
         return None
 

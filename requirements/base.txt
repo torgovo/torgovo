@@ -52,7 +52,7 @@ jsonschema>=4.20.0
 
 # Time series and data analysis (for technical indicators)
 pandas>=2.1.3
-numpy>=1.26.0
+numpy>=1.26.0,<2
 
 # Monitoring and logging
 sentry-sdk>=1.38.0

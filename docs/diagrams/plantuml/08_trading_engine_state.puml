@@ -1,0 +1,58 @@
+@startuml TradingEngineStateMachine
+!theme plain
+title BotEngine Trading State Machine
+
+state "IDLE" as IDLE
+state "STARTING" as STARTING
+state "Loading Config" as LOAD
+state "EVALUATING" as EVAL
+state "BUY SIGNAL" as BUY
+state "SELL SIGNAL" as SELL
+state "Placing Grid Orders" as GRID
+state "Monitoring" as MON {
+  state "Monitor Grid" as MON_G
+  state "Monitor SL/TP" as MON_SLTP
+}
+state "Closing Position" as CLOSE
+state "DUPLICATE" as DUP
+
+[*] --> IDLE : Bot created
+IDLE --> STARTING : run_bot()
+STARTING --> LOAD : is_running check passed
+LOAD --> EVAL : config loaded
+EVAL --> BUY : buy condition matched
+EVAL --> SELL : sell condition matched
+EVAL --> IDLE : no condition met (retry)
+
+BUY --> GRID : initial order placed
+SELL --> GRID : initial order placed
+GRID --> MON : grid orders placed
+
+MON_G --> MON_G : order filled → place counter
+MON_SLTP --> CLOSE : TP or SL hit
+MON_SLTP --> MON_SLTP : within bounds (poll)
+
+CLOSE --> IDLE : reset_trading_state()
+
+STARTING --> DUP : already running
+DUP --> [*]
+
+note right of EVAL
+  6 Buy entry cases:
+  EMA+RSI, BB+RSI, EMA+BB, etc.
+  4 Sell exit cases
+end note
+
+note right of MON_G
+  Background thread:
+  polls exchange for fills,
+  places opposite grid orders
+end note
+
+note right of MON_SLTP
+  Background thread:
+  polls position PnL %,
+  triggers close at SL/TP
+end note
+
+@enduml

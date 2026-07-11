@@ -1,6 +1,10 @@
 """
 Quantum AI Trading Strategy
 
+NOTE: The execution of this strategy runs through apps/trading/engines/bot_engine.py,
+which was ported from the reference file oldbybit.py using raw CCXT calls.
+oldbybit.py is the original reference — DO NOT MODIFY it.
+
 Core logic extracted from oldbybit.py and apps/exchanges/handlers/bybitbot.py.
 This is a grid-based strategy that uses multiple technical indicators (EMA, RSI, BB)
 to generate entry signals and manages positions with grid orders.

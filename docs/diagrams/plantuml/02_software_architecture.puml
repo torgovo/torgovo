@@ -1,0 +1,86 @@
+@startuml SoftwareArchitecture
+!theme plain
+
+title Torgovo2 Software Architecture - Layered View
+
+package "Presentation Layer" {
+  [Django Admin] as ADMIN
+  [DRF API Views] as API
+  [Webhook Endpoint] as WEBHOOK
+  [React Frontend] as UI
+}
+
+package "Services Layer" {
+  [BotExecutorService] as BES
+  [QuantumAIFundService] as QFS
+  [SubscriptionService] as SS
+  [TelegramService] as TS
+}
+
+package "Trading Engine" {
+  [run_bot / stop_bot] as RUN
+  [BotEngine] as BE
+  [BotExecutor] as BEX
+}
+
+package "Strategies (Pure Python)" {
+  [BaseStrategy] as BS <<abstract>>
+  [QuantumAIStrategy] as QAS
+  [GridTradingStrategy] as GTS
+  [MartingaleStrategy] as MS
+}
+
+package "Exchange Adapters (Pure Python)" {
+  [BaseAdapter] as BA <<abstract>>
+  [BybitAdapter] as BYA
+  [BinanceAdapter] as BIA
+  [OKXAdapter] as OKA
+  [MEXCAdapter] as MXA
+  [AlpacaAdapter] as APA
+}
+
+database "PostgreSQL" as DB
+database "Redis" as REDIS
+node "Celery Worker" as CELERY
+node "Exchange APIs" as EXCHANGE
+
+ADMIN --> BES
+API --> BES
+API --> QFS
+WEBHOOK --> BES
+
+BES --> RUN
+RUN --> BE
+RUN --> BEX
+
+BE --> BS
+BE --> BA
+BEX --> BS
+BEX --> BA
+
+QAS ..|> BS
+GTS ..|> BS
+MS ..|> BS
+
+BYA ..|> BA
+BIA ..|> BA
+OKA ..|> BA
+MXA ..|> BA
+APA ..|> BA
+
+BA --> EXCHANGE
+
+CELERY --> RUN
+BE --> DB
+BEX --> DB
+
+legend right
+  Layer colors:
+  Presentation = Django views
+  Services = Business logic
+  Engine = Trading execution
+  Strategies = Pure Python ABC
+  Adapters = Exchange abstraction
+end legend
+
+@enduml

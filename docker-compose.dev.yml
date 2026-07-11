@@ -98,6 +98,32 @@ services:
     restart: unless-stopped
     command: celery -A config worker --loglevel=info --concurrency=2
 
+  # Celery Beat (Periodic Tasks)
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - DJANGO_SECRET_KEY=django-insecure-development-key-change-in-production
+      - DEBUG=True
+      - DB_NAME=torgovo
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres123
+      - DB_HOST=db
+      - DB_PORT=5432
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - FERNET_KEY=your-32-byte-encryption-key-123456789012
+      - ALLOWED_HOSTS=localhost,127.0.0.1
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+    command: celery -A config beat --loglevel=info
+
 volumes:
   postgres_data:
   redis_data:

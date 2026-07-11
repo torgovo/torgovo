@@ -22,10 +22,10 @@ router.register(r'telegram-subscriptions', views.TelegramSignalSubscriptionViewS
 app_name = 'bots'
 
 urlpatterns = [
-    # DRF Viewset routes
-    path('', include(router.urls)),
-
-    # Old indicator endpoints for manual admin bot
+    # Specific indicator webhook paths — BEFORE router so they take priority
+    path('indicators/ema/', views.BinanceEMAView.as_view(), name='binance-ema-webhook'),
+    path('indicators/rsi/', views.BinanceRSIView.as_view(), name='binance-rsi-webhook'),
+    path('indicators/bb/', views.BinanceBBView.as_view(), name='binance-bb-webhook'),
     path('indicators/binance/<str:username>/<str:pair>/',
          views.IndicatorView.as_view(),
          name='binance-indicator'),
@@ -38,9 +38,9 @@ urlpatterns = [
     path('indicators/open/<str:username>/<str:pair>/<str:side>/',
          views.CustomOrderOpeningView.as_view(),
          name='open-order'),
-    path('indicators/ema/', views.BinanceEMAView.as_view(), name='binance-ema-webhook'),
-    path('indicators/rsi/', views.BinanceRSIView.as_view(), name='binance-rsi-webhook'),
-    path('indicators/bb/', views.BinanceBBView.as_view(), name='binance-bb-webhook'),
+
+    # DRF Viewset routes (generic — keep after specific paths)
+    path('', include(router.urls)),
 
     # Bot control actions
     path('grid/<str:bot_id>/start/', views.GridBotViewSet.as_view({'post': 'start'}), name='grid-bot-start'),

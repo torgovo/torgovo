@@ -19,17 +19,9 @@ All CCXT calls (create_order, fetch_open_orders, fetch_order, etc.) are
 identical to oldbybit.py. The only difference is how the exchange is
 initialized (via the adapter pattern instead of hardcoded credentials).
 
-CCXT methods used directly:
-- self.exchange.create_order()
-- self.exchange.create_market_buy_order_with_cost()
-- self.exchange.create_market_sell_order_with_cost()
-- self.exchange.fetch_open_orders()
-- self.exchange.fetch_order()
-- self.exchange.fetch_ticker()
-- self.exchange.fetch_positions()
-- self.exchange.fetch_position()
-- self.exchange.cancel_all_orders()
-- self.exchange.amount_to_precision()
+Exchange calls go through the adapter (self.executor.adapter) which handles
+exchange-specific params, rate limiting, and error normalization for all
+exchanges (Bybit, Binance, OKX, MEXC, Coinbase, etc.).
 """
 import logging
 import time
@@ -39,8 +31,10 @@ from datetime import datetime
 
 import pytz
 from django.db import close_old_connections
+from django.utils import timezone
 
 from .execution import BotExecutor
+from core.telegram_service import TelegramService
 
 logger = logging.getLogger('trading.engines')
 
@@ -64,7 +58,12 @@ class BotEngine:
         # Build executor (gives us the adapter with initialized CCXT exchange)
         self.executor = BotExecutor.from_config(config)
 
-        # The raw CCXT exchange object — same as oldbybit.py self.exchange
+        # Remove sensitive credentials from config after adapter init
+        self.config.pop('api_key', None)
+        self.config.pop('secret_key', None)
+        self.config.pop('passphrase', None)
+
+        # The raw CCXT exchange object — kept for backward compatibility
         self.exchange = self.executor.adapter.exchange
 
         # Symbol formatting (matches oldbybit.py exactly)
@@ -95,6 +94,7 @@ class BotEngine:
         self.bot_running = False
         self.monitoring_threads = []
         self.lock = threading.Lock()
+        self.sltp_lock = threading.Lock()
         self.monitoring = False
         self._stop_event = threading.Event()
 
@@ -121,6 +121,19 @@ class BotEngine:
         self.signals_generated = 0
         self.orders_executed = 0
 
+        # Heartbeat tracking
+        self._heartbeat_counter = 0
+        self._heartbeat_interval = 60  # update DB every 60 iterations
+
+        # SL/TP change tracking (last known values placed on exchange)
+        self._last_sl: Optional[float] = None
+        self._last_tp: Optional[float] = None
+
+        # Quantum AI Strategy instance (synced with indicators for external use)
+        from ..strategies.quantum_ai import QuantumAIStrategy
+        self.strategy = QuantumAIStrategy(parameters=self.pair_config)
+        self.strategy.symbol = self.symbol
+
         logger.info(f"✅ BotEngine initialized for {self.bot_name}")
 
     # =========================================================================
@@ -131,7 +144,7 @@ class BotEngine:
         with self.lock:
             logger.info("updating conditions inside Lock")
 
-            self.current_price = self.exchange.fetch_ticker(self.symbol)['last']
+            self.current_price = self.executor.adapter.fetch_ticker(self.symbol)['last']
             self.EmaBuyCondition = (self.current_price >= self.EMA != 0)
             self.EmaSellCondition = (self.current_price <= self.EMA != 0)
 
@@ -146,6 +159,20 @@ class BotEngine:
             self.NoTrade = (self.count == 0 and self.current_side == "None")
             self.BuyTrade = (self.count == 1 and self.current_side == "Buy")
             self.SellTrade = (self.count == 1 and self.current_side == "Sell")
+
+            self._sync_strategy()
+
+    def _sync_strategy(self):
+        """Sync current indicator values to the strategy instance."""
+        self.strategy.EMA = self.EMA
+        self.strategy.RSI = self.RSI
+        self.strategy.PrevRSI = self.PrevRSI
+        self.strategy.RSI_color = self.RSI_color
+        self.strategy.RSI_prev_color = self.RSI_prev_color
+        self.strategy.BB = self.BB
+        self.strategy.current_price = self.current_price
+        self.strategy.current_side = self.current_side
+        self.strategy.count = self.count
 
     # =========================================================================
     # INDICATOR DATA STRING (from oldbybit.py — exact copy)
@@ -209,8 +236,27 @@ class BotEngine:
 
     def startBot(self):
         self.update_conditions()
-        self.current_price = self.exchange.fetch_ticker(self.symbol)["last"]
+        self.current_price = self.executor.adapter.fetch_ticker(self.symbol)['last']
         self.bot_running = True
+
+        restore_mode = self.config.get('restore_mode', False)
+
+        # ---- RESTORE MODE: attach to existing position, skip entry eval ----
+        if restore_mode:
+            logger.info(f"{self.bot_name} starting in RESTORE MODE — attaching to existing position")
+            self._start_monitoring_for_existing_position()
+            return
+
+        # Send Telegram notification
+        try:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            user_id = self.config.get('user_id')
+            if user_id:
+                user = User.objects.get(id=user_id)
+                TelegramService.notify_bot_started(user, self.config.get('strategy', 'trading'), self.config)
+        except Exception as e:
+            logger.warning(f"Failed to send Telegram start notification: {e}")
 
         logger.info(f"current side: {self.current_side}")
         logger.info(f"{self.bot_name} BOT START")
@@ -475,9 +521,9 @@ class BotEngine:
             against_level_qty_dollar = None
             logger.info(f"coin calculated: {quantity}, {favor_level_qty}, {against_level_qty}")
 
-        quantity = float(self.exchange.amount_to_precision(self.symbol, quantity))
-        favor_level_qty = float(self.exchange.amount_to_precision(self.symbol, favor_level_qty))
-        against_level_qty = float(self.exchange.amount_to_precision(self.symbol, against_level_qty))
+        quantity = float(self.executor.adapter.amount_to_precision(self.symbol, quantity))
+        favor_level_qty = float(self.executor.adapter.amount_to_precision(self.symbol, favor_level_qty))
+        against_level_qty = float(self.executor.adapter.amount_to_precision(self.symbol, against_level_qty))
 
         data = {
             "category": 'futures',
@@ -503,8 +549,7 @@ class BotEngine:
     # =========================================================================
 
     def fetch_current_price(self):
-        ticker, symbol = self.exchange.fetch_ticker, self.symbol
-        self.current_price = ticker(symbol)["last"]
+        self.current_price = self.executor.adapter.get_current_price(self.symbol)
         thread_id = threading.get_ident()
         logger.info(f"Thread ID: {thread_id} | Fetched current price: {self.current_price}")
         return self.current_price
@@ -517,43 +562,62 @@ class BotEngine:
         """Place an order and save it to the database."""
         try:
             from apps.bots.models import Order, Indicator
-            from django.contrib.auth import get_user_model
 
             user_id = self.config.get('user_id')
-            if not user_id:
-                logger.warning("No user_id in config, skipping order save")
-                return
+            bot_name = self.config.get('bot_name', 'unnamed')
 
-            User = get_user_model()
-            user = User.objects.get(id=user_id)
+            order_kwargs = {
+                'Pair': self.symbol,
+                'Side': side,
+                'Category': 'futures',
+                'Order_type': 'Market',
+                'Quantity': self.pair_config.get('quantity', 0),
+                'Price': self.current_price,
+                'Exchange': self.config.get('exchange_name', 'Bybit'),
+                'Description': f'[{bot_name}] {description}',
+                'Details': details if isinstance(details, dict) else {'raw': str(details)},
+            }
 
-            indicator = Indicator.objects.create(
-                Pair=self.symbol,
-                user=user,
-                EMA=self.EMA,
-                RSI=self.RSI,
-                Prev_RSI=self.PrevRSI,
-                Color=self.RSI_color or '',
-                Prev_Color=self.RSI_prev_color or '',
-                BB=self.BB or '',
-                TSI=self.TSI,
-                ADX=self.ADX,
-            )
-            order = Order.objects.create(
-                Pair=self.symbol,
-                user=user,
-                Indicators=indicator,
-                Side=side,
-                Category="futures",
-                Order_type="Market",
-                Quantity=self.pair_config.get("quantity", 0),
-                Price=self.current_price,
-                Exchange=self.config.get('exchange_name', 'Bybit'),
-                Description=description,
-                Details=details if isinstance(details, dict) else {'raw': str(details)},
-            )
+            if user_id:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                user = User.objects.get(id=user_id)
+                order_kwargs['user'] = user
+
+                indicator = Indicator.objects.create(
+                    Pair=self.symbol,
+                    user=user,
+                    EMA=self.EMA,
+                    RSI=self.RSI,
+                    Prev_RSI=self.PrevRSI,
+                    Color=self.RSI_color or '',
+                    Prev_Color=self.RSI_prev_color or '',
+                    BB=self.BB or '',
+                    TSI=self.TSI,
+                    ADX=self.ADX,
+                )
+                order_kwargs['Indicators'] = indicator
+
+            order = Order.objects.create(**order_kwargs)
             logger.info(f"Placed order: {order}")
             self.orders_executed += 1
+
+            # Send Telegram notification if configured
+            if user_id:
+                try:
+                    if hasattr(user, 'telegram_token') and user.telegram_token and hasattr(user, 'telegram_chat_id') and user.telegram_chat_id:
+                        trade_data = {
+                            'symbol': self.symbol,
+                            'side': side,
+                            'amount': str(self.pair_config.get('quantity', 0)),
+                            'price': str(self.current_price),
+                            'exchange': self.config.get('exchange_name', 'Bybit'),
+                            'timestamp': timezone.now().isoformat(),
+                        }
+                        TelegramService.send_trade_alert(user, trade_data)
+                except Exception as e:
+                    logger.warning(f"Failed to send Telegram notification: {e}")
+
             return order
         except Exception as e:
             logger.error(f"Failed to save order: {e}")
@@ -564,13 +628,19 @@ class BotEngine:
 
     def create_order(self, order_type, side, quantity, price):
         try:
+            adapter = self.executor.adapter
             if self.pair_config.get('Amount_Type') == "dollar":
                 if order_type == 'market':
-                    data = self.exchange.create_market_order_with_cost(self.symbol, side, quantity, params={'category': 'linear'})
+                    data = adapter.create_market_order_with_cost(self.symbol, side, quantity)
                 elif order_type == 'limit':
-                    data = self.exchange.create_order(self.symbol, order_type, side, quantity, price, params={'category': 'linear'})
+                    data = adapter.create_limit_order(self.symbol, side, quantity, price)
             else:
-                data = self.exchange.create_order(self.symbol, order_type, side, quantity, price, params={'category': 'linear'})
+                if order_type == 'market':
+                    data = adapter.create_market_order(self.symbol, side, quantity)
+                elif order_type == 'limit':
+                    data = adapter.create_limit_order(self.symbol, side, quantity, price)
+                else:
+                    data = adapter.create_market_order(self.symbol, side, quantity)
             logger.info(f"Order type: {order_type} - Side: {side} - Quantity: {quantity} - Price: {price}")
             return data
         except Exception as e:
@@ -582,19 +652,22 @@ class BotEngine:
 
     def close_open_order(self, description):
         try:
-            closing_symbol = self.symbol.replace('/', '')
-            position = self.exchange.fetch_positions(symbols=closing_symbol, params={'category': 'linear'})
-            size = float(position[0]['contracts'])
-            self.Unrealized_Pnl = float(position[0]['unrealizedPnl'])
+            adapter = self.executor.adapter
+            position = adapter.fetch_position(self.symbol)
+            if not position or float(position.get('contracts', 0)) == 0:
+                logger.info(f"No position found on {self.symbol}")
+                return None
+            size = float(position['contracts'])
+            self.Unrealized_Pnl = float(position.get('unrealized_pnl', 0))
 
-            side = position[0]['side']
+            side = position.get('side', '')
             if self.pair_config.get('SLTP_Type') == 'percentage':
                 self.Percentage = self.Unrealized_Pnl / size * 1000
                 self.last_trade_pnl = self.Unrealized_Pnl
 
             if side == 'short':
                 try:
-                    detail = self.exchange.create_order(symbol=closing_symbol, type='market', amount=size, side='buy', params={'reduceOnly': True})
+                    detail = adapter.create_market_order(self.symbol, 'buy', size, {'reduceOnly': True})
                     self.save_order(side, description, detail)
                     return detail
                 except Exception as e:
@@ -604,13 +677,15 @@ class BotEngine:
 
             elif side == 'long':
                 try:
-                    detail = self.exchange.create_order(symbol=closing_symbol, type='market', amount=size, side='sell', params={'reduceOnly': True})
+                    detail = adapter.create_market_order(self.symbol, 'sell', size, {'reduceOnly': True})
                     self.save_order(side, description, detail)
                     return detail
                 except Exception as e:
                     logger.error(f"Closing long order failed: {e}")
 
                 logger.info('Long Order Closed')
+            else:
+                logger.info(f"No recognized side: {side}")
 
         except Exception as e:
             logger.error(f"No position found: {e}")
@@ -622,9 +697,8 @@ class BotEngine:
 
     def close_all_orders(self, description):
         logger.info(f"cancelling all limit orders of self.symbol: {self.symbol}, pair_config['pair_symbol']: {self.pair_config.get('pair_symbol')}")
-        closing_symbol = self.symbol.replace('/', '')
         self.reset_trading_state()
-        self.exchange.cancel_all_orders(symbol=closing_symbol)
+        self.executor.adapter.cancel_all_orders(self.symbol)
         position = self.close_open_order(description)
         self.reason = description
         logger.info(f"All Orders Closed: {description}")
@@ -680,10 +754,10 @@ class BotEngine:
                 qty_dollar = data['qty_dollar']
                 logger.info(f"pair config amount type dollar {self.pair_config.get('Amount_Type')} - cost in dollars:{qty_dollar} - side: {side}")
                 if side == 'Buy':
-                    initial_order = self.exchange.create_market_buy_order_with_cost(self.symbol, cost=qty_dollar, params={'category': 'linear'})
+                    initial_order = self.executor.adapter.create_market_order_with_cost(self.symbol, 'buy', qty_dollar)
                     logger.info(f"initial market buy order with dollar cost: {initial_order}")
                 elif side == 'Sell':
-                    initial_order = self.exchange.create_market_sell_order_with_cost(self.symbol, cost=qty_dollar, params={'category': 'linear'})
+                    initial_order = self.executor.adapter.create_market_order_with_cost(self.symbol, 'sell', qty_dollar)
                     logger.info(f"initial market sell order with dollar cost: {initial_order}")
 
             elif self.pair_config.get('Amount_Type') == "coin":
@@ -729,6 +803,10 @@ class BotEngine:
                     self.create_order('limit', 'sell', against_level_qty, level_price)
                 except Exception as e:
                     logger.error(f"Creating against order failed: {e}")
+
+        # Place exchange-native SL/TP orders (falls back to polling)
+        with self.sltp_lock:
+            self._place_sltp_orders(side, price)
 
         # Start monitoring orders in a separate thread
         time.sleep(3)
@@ -780,7 +858,7 @@ class BotEngine:
                     order_id = resp.get('orderId') if isinstance(resp, dict) else None
                 if order_id is None:
                     # fallback: find the order by price in open orders
-                    open_orders = self.exchange.fetch_open_orders(symbol=self.symbol, params={'category': 'linear'})
+                    open_orders = self.executor.adapter.fetch_open_orders(self.symbol)
                     logger.info('fetched open orders')
                     for o in open_orders:
                         if float(o.get('price', 0)) == float(price) and o.get('side', '').lower() == ord_side.lower():
@@ -797,11 +875,11 @@ class BotEngine:
 
         # --- INITIALIZE maps with currently-open grid orders ---
         try:
-            open_orders = self.exchange.fetch_open_orders(symbol=self.symbol, params={'category': 'linear'})
+            open_orders = self.executor.adapter.fetch_open_orders(self.symbol)
             for o in open_orders:
                 try:
                     p = round(float(o.get('price')), 8)
-                except:
+                except Exception:
                     continue
                 s = o.get('side', '').lower()
                 oid = o.get('id') or o.get('orderId') or o.get('clientOrderId')
@@ -833,12 +911,16 @@ class BotEngine:
         against_levels.sort(reverse=reverse_for_against)
 
         # --- MAIN monitor loop (order-id based) ---
+        self._heartbeat_counter = 0
         while self.monitoring:
             try:
                 close_old_connections()
+                self._heartbeat_counter += 1
+                if self._heartbeat_counter % self._heartbeat_interval == 0:
+                    self._update_heartbeat()
 
                 # fetch open orders once per iteration
-                open_orders = self.exchange.fetch_open_orders(symbol=self.symbol, params={'category': 'linear'})
+                open_orders = self.executor.adapter.fetch_open_orders(self.symbol)
                 current_buy_prices = set(float(order['price']) for order in open_orders if order['side'].lower() == 'buy')
                 current_sell_prices = set(float(order['price']) for order in open_orders if order['side'].lower() == 'sell')
 
@@ -847,7 +929,7 @@ class BotEngine:
                     if not order_id:
                         return False
                     try:
-                        o = self.exchange.fetch_order(order_id, symbol=self.symbol, params={'category': 'linear'})
+                        o = self.executor.adapter.fetch_order(order_id, self.symbol)
                         logger.info(f"fetch order in is_filled function: {o}")
                         status = o.get('status') or o.get('state')
                         if isinstance(status, str) and status.lower() in ('closed', 'filled', 'filled_partially'):
@@ -859,7 +941,7 @@ class BotEngine:
                                 if (o2.get('id') == order_id) or (o2.get('orderId') == order_id) or (o2.get('clientOrderId') == order_id):
                                     return False
                             return True
-                        except:
+                        except Exception:
                             return False
 
                 # --- Process favor orders ---
@@ -895,7 +977,7 @@ class BotEngine:
                                     against_levels.append(place_price)
                                     against_levels.sort(reverse=reverse_for_against)
                                     self.against_lvl = against_levels[:]
-                                    open_orders = self.exchange.fetch_open_orders(symbol=self.symbol, params={'category': 'linear'})
+                                    open_orders = self.executor.adapter.fetch_open_orders(self.symbol)
                                     current_buy_prices = set(float(order['price']) for order in open_orders if order['side'].lower() == 'buy')
                                     current_sell_prices = set(float(order['price']) for order in open_orders if order['side'].lower() == 'sell')
                             last_favor_level = executed_level
@@ -916,7 +998,7 @@ class BotEngine:
                                     against_levels.append(place_price)
                                     against_levels.sort(reverse=reverse_for_against)
                                     self.against_lvl = against_levels[:]
-                                    open_orders = self.exchange.fetch_open_orders(symbol=self.symbol, params={'category': 'linear'})
+                                    open_orders = self.executor.adapter.fetch_open_orders(self.symbol)
                                     current_buy_prices = set(float(order['price']) for order in open_orders if order['side'].lower() == 'buy')
                                     current_sell_prices = set(float(order['price']) for order in open_orders if order['side'].lower() == 'sell')
                             last_favor_level = executed_level
@@ -957,7 +1039,7 @@ class BotEngine:
                                     favor_levels.append(place_price)
                                     favor_levels.sort(reverse=reverse_for_favor)
                                     self.favor_lvl = favor_levels[:]
-                                    open_orders = self.exchange.fetch_open_orders(symbol=self.symbol, params={'category': 'linear'})
+                                    open_orders = self.executor.adapter.fetch_open_orders(self.symbol)
                                     current_buy_prices = set(float(order['price']) for order in open_orders if order['side'].lower() == 'buy')
                                     current_sell_prices = set(float(order['price']) for order in open_orders if order['side'].lower() == 'sell')
                             last_against_level = executed_level
@@ -978,7 +1060,7 @@ class BotEngine:
                                     favor_levels.append(place_price)
                                     favor_levels.sort(reverse=reverse_for_favor)
                                     self.favor_lvl = favor_levels[:]
-                                    open_orders = self.exchange.fetch_open_orders(symbol=self.symbol, params={'category': 'linear'})
+                                    open_orders = self.executor.adapter.fetch_open_orders(self.symbol)
                                     current_buy_prices = set(float(order['price']) for order in open_orders if order['side'].lower() == 'buy')
                                     current_sell_prices = set(float(order['price']) for order in open_orders if order['side'].lower() == 'sell')
                             last_against_level = executed_level
@@ -1000,9 +1082,15 @@ class BotEngine:
     def monitor_lossProfit(self, side):
         loss_profit_percentage = 0.0
         time.sleep(4)
+        self._heartbeat_counter = 0
 
         while self.monitoring and not self._stop_event.is_set():
             try:
+                self._heartbeat_counter += 1
+                if self._heartbeat_counter % 12 == 0:  # ~60s at 5s wait
+                    self._update_heartbeat()
+                if self._heartbeat_counter % 4 == 0:  # ~20s at 5s wait
+                    self._refresh_sltp_if_changed()
                 loss_profit_percentage = self.check_lossProfit_percent()
                 if loss_profit_percentage is None:
                     loss_profit_percentage = 0.0
@@ -1029,12 +1117,14 @@ class BotEngine:
 
     def check_lossProfit_percent(self):
         try:
-            position = self.exchange.fetch_position(symbol=self.symbol, params={'category': 'linear'})
+            position = self.executor.adapter._make_request('fetch_position', self.symbol)
             if position:
-                size = float(position['notional'])
-                pnl = float(position['unrealizedPnl'])
+                size = float(position.get('notional', 0))
+                pnl = float(position.get('unrealizedPnl', 0))
+                if size == 0:
+                    size = float(position.get('contracts', 0)) * self.current_price
                 self.Unrealized_Pnl = pnl
-                self.Percentage = pnl / size * 1000
+                self.Percentage = pnl / size * 1000 if size != 0 else 0.0
             else:
                 logger.info(f"No position found on {self.symbol} of bot: {self.bot_name}")
         except Exception as e:
@@ -1066,6 +1156,270 @@ class BotEngine:
             against_level_qty = self.pair_config['against_level_qty']
             logger.info(f"coin calculated: {quantity}, {favor_level_qty}, {against_level_qty}")
             return quantity, favor_level_qty, against_level_qty
+
+    # =========================================================================
+    # EXCHANGE-NATIVE SL/TP (replaces 5-second polling with exchange stops)
+    # =========================================================================
+
+    def _place_sltp_orders(self, side, entry_price):
+        """Place exchange-native stop-loss and take-profit orders.
+
+        Calculates trigger prices from pair_config Stop_Loss/Take_Profit
+        percentage values, then places them via adapter methods.
+
+        Falls back silently to the polling monitor_lossProfit thread if
+        the exchange doesn't support native SL/TP or the placement fails.
+        """
+        sl_val = self.pair_config.get('Stop_Loss', -999)
+        tp_val = self.pair_config.get('Take_Profit', 999)
+
+        is_long = side.lower() == 'buy'
+        adapter = self.executor.adapter
+
+        # Determine position size for reduceOnly order
+        try:
+            position = adapter.fetch_position(self.symbol)
+            size = float(position['contracts']) if position and float(position.get('contracts', 0)) > 0 else 0
+        except Exception:
+            size = 0
+
+        if size == 0:
+            qty_config = self.pair_config
+            if self.pair_config.get('Amount_Type') == 'dollar':
+                size = round(qty_config['quantity'] / entry_price, 4) if entry_price else 0
+            else:
+                size = qty_config.get('quantity', 0)
+            size = float(adapter.amount_to_precision(self.symbol, size)) if size else 0
+
+        if size <= 0:
+            logger.info(f"SL/TP: no position size for {self.symbol}, skipping")
+            return
+
+        opposite_side = 'sell' if is_long else 'buy'
+
+        # Place Take Profit
+        if tp_val != 999:
+            if is_long:
+                tp_price = entry_price * (1 + tp_val / 1000)
+            else:
+                tp_price = entry_price * (1 - tp_val / 1000)
+            try:
+                tp_result = adapter.create_take_profit_order(
+                    symbol=self.symbol, side=opposite_side, amount=size,
+                    take_profit_price=tp_price, params={'reduceOnly': True}
+                )
+                if tp_result.get('retCode') == 0:
+                    logger.info(f"TP set @ ${tp_price:.4f}")
+                    self._last_tp = tp_val
+                else:
+                    logger.warning(f"TP placement warn: {tp_result.get('retMsg', '?')}")
+            except NotImplementedError:
+                logger.info(f"SL/TP: exchange has no native TP, using polling fallback")
+            except Exception as e:
+                logger.warning(f"TP placement failed (non-critical): {e}")
+
+        # Place Stop Loss
+        if sl_val != -999:
+            if is_long:
+                sl_price = entry_price * (1 + sl_val / 1000)
+            else:
+                sl_price = entry_price * (1 - sl_val / 1000)
+            try:
+                sl_result = adapter.create_stop_loss_order(
+                    symbol=self.symbol, side=opposite_side, amount=size,
+                    stop_price=sl_price, params={'reduceOnly': True}
+                )
+                if sl_result.get('retCode') == 0:
+                    logger.info(f"SL set @ ${sl_price:.4f}")
+                    self._last_sl = sl_val
+                else:
+                    logger.warning(f"SL placement warn: {sl_result.get('retMsg', '?')}")
+            except NotImplementedError:
+                logger.info(f"SL/TP: exchange has no native SL, using polling fallback")
+            except Exception as e:
+                logger.warning(f"SL placement failed (non-critical): {e}")
+
+    def _refresh_sltp_if_changed(self):
+        """Check DB for SL/TP config changes and re-apply via exchange-native orders.
+
+        Compares current DB values (GridBot/MartingaleBot take_profit_percent
+        and stop_loss_percent) against the last-known values placed on the
+        exchange.  If different, updates pair_config and re-calls
+        _place_sltp_orders().
+
+        Called periodically from monitor_lossProfit (~every 20 s).
+        """
+        bot_id = self.config.get('bot_id')
+        bot_type = self.config.get('bot_type', '')
+        if not bot_id or bot_type not in ('grid', 'martingale'):
+            return
+
+        with self.sltp_lock:
+            try:
+                if bot_type == 'grid':
+                    from apps.bots.models import GridBot
+                    bot = GridBot.objects.only(
+                        'take_profit_percent', 'stop_loss_percent'
+                    ).get(id=bot_id)
+                else:
+                    from apps.bots.models import MartingaleBot
+                    bot = MartingaleBot.objects.only(
+                        'take_profit_percent', 'stop_loss_percent'
+                    ).get(id=bot_id)
+
+                db_tp = float(bot.take_profit_percent) if bot.take_profit_percent is not None else None
+                db_sl = float(bot.stop_loss_percent) if bot.stop_loss_percent is not None else None
+
+                if db_tp == self._last_tp and db_sl == self._last_sl:
+                    return
+
+                logger.info(f"SL/TP config changed: re-applying SL={db_sl}, TP={db_tp}")
+                self.pair_config['Stop_Loss'] = db_sl
+                self.pair_config['Take_Profit'] = db_tp
+
+                # Fetch current position to get accurate entry price and side
+                side = None
+                entry_price = self.current_price
+                try:
+                    position = self.executor.adapter.fetch_position(self.symbol)
+                    if position and float(position.get('contracts', 0)) > 0:
+                        entry_price = float(position.get('entryPrice', self.current_price))
+                        side = 'buy' if position.get('side') == 'long' else 'sell'
+                except Exception:
+                    pass
+
+                if not side:
+                    raw = self.current_side.lower()
+                    if raw in ('buy', 'sell'):
+                        side = raw
+
+                if side:
+                    self._place_sltp_orders(side, entry_price)
+            except Exception as e:
+                logger.warning(f"Failed to refresh SL/TP: {e}")
+
+    # =========================================================================
+    # HEARTBEAT (stale-bot detection)
+    # =========================================================================
+
+    def _update_heartbeat(self):
+        """Update bot's last_heartbeat timestamp in DB.
+        
+        Called from monitoring threads every ~60 seconds.
+        Uses .update() to avoid loading the full model instance.
+        """
+        bot_id = self.config.get('bot_id')
+        bot_type = self.config.get('bot_type', 'grid')
+        if not bot_id:
+            return
+        try:
+            if bot_type == 'quantum_ai':
+                from apps.bots.models import QuantumAIBot
+                QuantumAIBot.objects.filter(id=bot_id).update(
+                    last_heartbeat=timezone.now()
+                )
+            elif bot_type == 'grid':
+                from apps.bots.models import GridBot
+                GridBot.objects.filter(id=bot_id).update(
+                    last_heartbeat=timezone.now()
+                )
+            elif bot_type == 'martingale':
+                from apps.bots.models import MartingaleBot
+                MartingaleBot.objects.filter(id=bot_id).update(
+                    last_heartbeat=timezone.now()
+                )
+        except Exception as e:
+            logger.warning(f"Heartbeat update failed for {bot_id}: {e}")
+
+    # =========================================================================
+    # RESTORE MODE (attach to existing position after worker restart)
+    # =========================================================================
+
+    def _start_monitoring_for_existing_position(self):
+        """
+        Start monitoring threads for an existing position on the exchange.
+        Called instead of entry evaluation when bot starts in restore_mode.
+        """
+        try:
+            adapter = self.executor.adapter
+            position = adapter.fetch_position(self.symbol)
+            if not position or float(position.get('contracts', 0)) == 0:
+                logger.info(f"No position found for {self.symbol} in restore mode — nothing to monitor")
+                self.bot_running = False
+                return
+
+            size = float(position['contracts'])
+            side = position.get('side', '')
+            entry_price = float(position.get('entryPrice', self.current_price))
+
+            self.current_side = "Buy" if side == 'long' else "Sell"
+            self.count = 1
+            self.current_price = entry_price
+            logger.info(f"Restore mode: attached to {side} position, size={size}, entry={entry_price}")
+
+            # Fetch open orders to rebuild grid levels
+            open_orders = adapter.fetch_open_orders(self.symbol)
+            favor_levels = []
+            against_levels = []
+            for o in open_orders:
+                try:
+                    p = float(o.get('price', 0))
+                except Exception:
+                    continue
+                if p == 0:
+                    continue
+                if side == 'long':
+                    if o.get('side', '').lower() == 'sell':
+                        favor_levels.append(p)
+                    else:
+                        against_levels.append(p)
+                else:
+                    if o.get('side', '').lower() == 'buy':
+                        favor_levels.append(p)
+                    else:
+                        against_levels.append(p)
+
+            self.favor_lvl = sorted(favor_levels, reverse=(side == 'short'))
+            self.against_lvl = sorted(against_levels, reverse=(side == 'long'))
+
+            logger.info(f"Restore mode: restored {len(favor_levels)} favor levels, {len(against_levels)} against levels")
+
+            # Use default level qty from config
+            favor_level_qty = float(self.pair_config.get('favor_level_qty', 0))
+            against_level_qty = float(self.pair_config.get('against_level_qty', 0))
+
+            # Place exchange-native SL/TP orders (falls back to polling)
+            with self.sltp_lock:
+                self._place_sltp_orders(side, entry_price)
+
+            # Start monitoring threads (do NOT place any new orders)
+            time.sleep(1)
+            self.monitoring = True
+            self.bot_running = True
+
+            grid_thread = threading.Thread(
+                target=self.monitor_grid_orders,
+                args=(side, entry_price, favor_levels, against_levels, favor_level_qty, against_level_qty),
+                name=f"GridMonitor-Restore-{self.symbol}"
+            )
+            grid_thread.daemon = True
+            grid_thread.start()
+            self.monitoring_threads.append(grid_thread)
+
+            sltp_thread = threading.Thread(
+                target=self.monitor_lossProfit,
+                args=(side,),
+                name=f"SLTP-Restore-{self.symbol}"
+            )
+            sltp_thread.daemon = True
+            sltp_thread.start()
+            self.monitoring_threads.append(sltp_thread)
+
+            logger.info(f"Restore mode: monitoring threads started for {self.symbol}")
+
+        except Exception as e:
+            logger.error(f"Failed to start restore monitoring for {self.symbol}: {e}", exc_info=True)
+            self.bot_running = False
 
     # =========================================================================
     # STATUS & METRICS

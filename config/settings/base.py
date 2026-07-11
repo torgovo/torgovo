@@ -9,7 +9,7 @@ from decouple import config
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = config('DJANGO_SECRET_KEY', default='django-insecure-change-me-in-production')
+SECRET_KEY = config('DJANGO_SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=False, cast=bool)
@@ -18,6 +18,7 @@ ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='', cast=lambda v: [s.strip() fo
 
 # Application definition
 DJANGO_APPS = [
+    'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -30,9 +31,9 @@ DJANGO_APPS = [
 THIRD_PARTY_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'django_filters',
     'corsheaders',
-    'daphne',
     'channels',
     'drf_yasg',
     # 'allauth',  # Temporarily disabled
@@ -102,7 +103,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': config('DB_NAME', default='torgovo'),
         'USER': config('DB_USER', default='postgres'),
-        'PASSWORD': config('DB_PASSWORD', default='password'),
+        'PASSWORD': config('DB_PASSWORD'),
         'HOST': config('DB_HOST', default='localhost'),
         'PORT': config('DB_PORT', default='5432'),
         'OPTIONS': {
@@ -177,15 +178,23 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_PAGINATION_CLASS': 'core.pagination.StandardResultsSetPagination',
     'PAGE_SIZE': 20,
-    'DEFAULT_SCHEMA_CLASS': 'rest_framework.schemas.coreapi.AutoSchema',
+    'DEFAULT_SCHEMA_CLASS': 'rest_framework.schemas.openapi.AutoSchema',
     'EXCEPTION_HANDLER': 'core.exceptions.custom_exception_handler',
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
-        'rest_framework.throttling.UserRateThrottle'
+        'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '100/hour',
-        'user': '1000/hour'
+        'user': '1000/hour',
+        # Scoped: protect sensitive endpoints from credential-stuffing /
+        # webhook flooding.
+        'login': '20/hour',
+        'register': '20/hour',
+        'password_reset': '10/hour',
+        'webhook': '120/min',
+        'withdrawal': '5/hour',
     }
 }
 
@@ -199,7 +208,9 @@ SIMPLE_JWT = {
     'BLACKLIST_AFTER_ROTATION': True,
     'UPDATE_LAST_LOGIN': True,
     'ALGORITHM': 'HS256',
-    'SIGNING_KEY': config('JWT_SECRET_KEY', default=SECRET_KEY),
+    # SECURITY (HIGH-4): JWT signing key MUST be separate from DJANGO_SECRET_KEY.
+    # Sharing keys means rotating one invalidates the other. No fallback.
+    'SIGNING_KEY': config('JWT_SECRET_KEY'),
     'VERIFYING_KEY': None,
     'AUTH_HEADER_TYPES': ('Bearer',),
     'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
@@ -237,10 +248,11 @@ SOCIALACCOUNT_PROVIDERS = {
 
 # CORS Configuration
 CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=False, cast=bool)
+# SECURITY (LOW-5): filter empty strings caused by trailing commas in .env
 CORS_ALLOWED_ORIGINS = config(
     'CORS_ALLOWED_ORIGINS',
     default='',
-    cast=lambda v: [s.strip() for s in v.split(',')]
+    cast=lambda v: [s.strip() for s in v.split(',') if s.strip()]
 )
 
 # Security Settings
@@ -297,7 +309,10 @@ LOGGING = {
         },
         'trading': {
             'handlers': ['file', 'console'],
-            'level': 'DEBUG',
+            # SECURITY (MED-3): DEBUG in base settings risks logging CCXT raw
+            # HTTP bodies (partial API keys, account balances). Override to
+            # DEBUG only in development.py.
+            'level': 'INFO',
             'propagate': False,
         },
     },
@@ -312,7 +327,23 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 
 # Encryption key for API keys
-FERNET_KEY = config('FERNET_KEY', default='your-encryption-key-32-chars-long!')
+# Check os.environ first so tests can inject a valid key without .env interference.
+# decouple gives .env priority over os.environ (ConfigEnv.get() uses `data or environ`),
+# which would otherwise make test key injection impossible.  Production via Docker
+# has no .env file (ConfigShell → os.environ only), so both paths resolve identically.
+# Other settings keep plain config() because they don't need test-time injection.
+FERNET_KEY = os.environ.get('FERNET_KEY') or config('FERNET_KEY')
+
+from cryptography.fernet import Fernet
+try:
+    Fernet(FERNET_KEY.encode())
+except Exception:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        "FERNET_KEY is invalid. Generate a valid key with:\n"
+        "  python -c \"from cryptography.fernet import Fernet; "
+        "print(Fernet.generate_key().decode())\""
+    )
 
 # File Upload Configuration
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5242880  # 5MB

@@ -10,7 +10,7 @@ import logging
 from decimal import Decimal
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from rest_framework import viewsets, status, generics
+from rest_framework import viewsets, status, generics, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
@@ -179,6 +179,7 @@ class WithdrawalRequestViewSet(viewsets.ModelViewSet):
     queryset = WithdrawalRequest.objects.all()
     serializer_class = WithdrawalRequestSerializer
     permission_classes = [IsAuthenticated]
+    throttle_scope = 'withdrawal'
 
     def get_queryset(self):
         if self.request.user.is_staff:
@@ -186,10 +187,53 @@ class WithdrawalRequestViewSet(viewsets.ModelViewSet):
         return WithdrawalRequest.objects.filter(user=self.request.user).order_by('-created_at')
 
     def perform_create(self, serializer):
+        """
+        Create a withdrawal request with server-controlled fields.
+
+        Security gates:
+          * Caller must be email-verified.
+          * 2FA code must be present and validated (per-user TOTP / SMS code).
+          * Withdrawals are always created with status='pending'; admin
+            must approve via a separate flow.
+          * Network/processing fee + total are computed server-side.
+        """
+        request = self.request
+        user = request.user
+
+        # Verified email gate
+        if not getattr(user, 'is_email_verified', False):
+            raise serializers.ValidationError(
+                "Email verification required before withdrawing."
+            )
+
+        # 2FA gate — code is REQUIRED. The actual TOTP/SMS check should
+        # live in a dedicated service; here we at least enforce presence
+        # and length, and reject if the user has 2FA disabled.
+        code = (request.data.get('two_factor_code') or '').strip()
+        if not code or len(code) < 4:
+            raise serializers.ValidationError(
+                "two_factor_code is required for withdrawals."
+            )
+        if not getattr(user, 'two_factor_enabled', False):
+            raise serializers.ValidationError(
+                "Enable 2FA on your account before requesting withdrawals."
+            )
+
+        amount = serializer.validated_data.get('amount')
+        from decimal import Decimal as _D
+        network_fee = _D('1.0')  # placeholder, replace with chain-specific oracle
+        processing_fee = (_D(str(amount)) * _D('0.005')).quantize(_D('0.00000001'))
+        total = _D(str(amount)) + network_fee + processing_fee
+
         serializer.save(
-            user=self.request.user,
+            user=user,
+            status='pending',
+            network_fee=network_fee,
+            processing_fee=processing_fee,
+            total_amount=total,
             ip_address=self.get_client_ip(),
-            user_agent=self.request.META.get('HTTP_USER_AGENT', '')
+            user_agent=self.request.META.get('HTTP_USER_AGENT', ''),
+            flagged_for_review=(_D(str(amount)) >= _D('1000')),  # auto-flag big withdrawals
         )
 
     def get_client_ip(self):

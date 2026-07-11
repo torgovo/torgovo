@@ -175,9 +175,12 @@ def get_exchange_symbols(request, exchange_name):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_exchange_rates(request):
-    """Get current exchange rates for trading pairs."""
+    """Get current exchange rates for trading pairs via CCXT."""
     try:
+        import ccxt
+
         pairs_param = request.GET.get('pairs', None)
+        exchange_param = request.GET.get('exchange', 'bybit')
         rates = {}
 
         if pairs_param:
@@ -189,13 +192,50 @@ def get_exchange_rates(request):
         else:
             trading_pairs = TradingPair.objects.filter(is_active=True)[:50]
 
-        for pair in trading_pairs:
-            rates[pair.symbol] = {
-                'price': Decimal('45000.00'),  # Placeholder
-                'exchange': pair.exchange_name,
-                'volume_24h': Decimal('1234567.89'),
-                'change_24h': Decimal('2.5')
-            }
+        # Try live prices via CCXT (no auth needed for public tickers)
+        try:
+            exchange_class = getattr(ccxt, exchange_param.lower(), None)
+            if exchange_class:
+                exchange = exchange_class({'enableRateLimit': True})
+                exchange.load_markets()
+
+                for pair in trading_pairs:
+                    try:
+                        ticker = exchange.fetch_ticker(pair.symbol)
+                        rates[pair.symbol] = {
+                            'price': str(ticker.get('last', 0)),
+                            'exchange': pair.exchange_name,
+                            'volume_24h': str(ticker.get('quoteVolume', 0)),
+                            'change_24h': str(ticker.get('percentage', 0)),
+                            'high_24h': str(ticker.get('high', 0)),
+                            'low_24h': str(ticker.get('low', 0)),
+                        }
+                    except Exception:
+                        # Pair not available on this exchange
+                        rates[pair.symbol] = {
+                            'price': None,
+                            'exchange': pair.exchange_name,
+                            'error': f'{pair.symbol} not available on {exchange_param}',
+                        }
+            else:
+                raise ValueError(f"Exchange {exchange_param} not supported")
+
+        except Exception as e:
+            logger.warning(f"CCXT fetch failed, falling back to DB: {e}")
+            # Fallback: use ExchangeRate model
+            for pair in trading_pairs:
+                try:
+                    rate_obj = ExchangeRate.objects.filter(
+                        from_currency=pair.base_asset,
+                        to_currency=pair.quote_asset
+                    ).latest('timestamp')
+                    rates[pair.symbol] = {
+                        'price': str(rate_obj.rate),
+                        'exchange': rate_obj.exchange_name,
+                        'source': 'cached',
+                    }
+                except ExchangeRate.DoesNotExist:
+                    rates[pair.symbol] = {'price': None, 'exchange': pair.exchange_name}
 
         return Response({
             'success': True,
@@ -209,4 +249,5 @@ def get_exchange_rates(request):
             'success': False,
             'error': 'Failed to retrieve exchange rates'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 

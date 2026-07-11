@@ -38,14 +38,19 @@ app.conf.task_acks_late = True
 # Schedule periodic tasks
 # NOTE: Only reference tasks that actually exist in apps/trading/tasks.py
 app.conf.beat_schedule = {
-    # Run all active grid/martingale bots every 60 seconds
-    'run-active-bots': {
-        'task': 'apps.trading.tasks.check_all_active_bots',
-        'schedule': 60.0,
-    },
-    # Distribute Quantum AI profits every 2 weeks (fortnightly)
-    'distribute-quantum-ai-profits': {
-        'task': 'apps.trading.tasks.distribute_quantum_ai_profits',
-        'schedule': 60 * 60 * 24 * 14,  # 14 days in seconds
-    },
-}
+        # Run all active grid/martingale bots every 60 seconds
+        'run-active-bots': {
+            'task': 'apps.trading.tasks.check_all_active_bots',
+            'schedule': 60.0,
+        },
+        # Check for stale bots (missed heartbeats) every 2 minutes
+        'check-stale-bots': {
+            'task': 'apps.trading.tasks.check_stale_bots',
+            'schedule': 120.0,
+        },
+        # Distribute Quantum AI profits every 2 weeks (fortnightly)
+        'distribute-quantum-ai-profits': {
+            'task': 'apps.trading.tasks.distribute_quantum_ai_profits',
+            'schedule': 60 * 60 * 24 * 14,  # 14 days in seconds
+        },
+    }

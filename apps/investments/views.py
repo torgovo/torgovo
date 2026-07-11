@@ -5,6 +5,7 @@ Implements all endpoints from DOCUMENTATION.md
 import uuid
 import logging
 from decimal import Decimal
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db import transaction as db_transaction
@@ -33,7 +34,7 @@ class IsOwner(permissions.BasePermission):
             elif hasattr(obj, 'user_id'):
                 return obj.user_id == request.user.id
             return False
-        except:
+        except Exception:
             return False
 
 
@@ -64,7 +65,7 @@ class OrderFilter(django_filters.FilterSet):
 class ExchangeViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Exchange.objects.filter(status='active')
     serializer_class = ExchangeSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
     
     @action(detail=False, methods=['get'])
     def supported(self, request):
@@ -94,6 +95,7 @@ class ExchangeCredentialViewSet(viewsets.ModelViewSet):
 class TradingPairViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = TradingPair.objects.filter(is_active=True)
     serializer_class = TradingPairSerializer
+    permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['exchange', 'base_asset', 'quote_asset']
     search_fields = ['symbol']
@@ -143,6 +145,9 @@ class GridBotViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         return GridBot.objects.filter(user=self.request.user)
+    
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
 
 
 class MartingaleBotViewSet(viewsets.ModelViewSet):
@@ -152,6 +157,9 @@ class MartingaleBotViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         return MartingaleBot.objects.filter(user=self.request.user)
+    
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
 
 
 class QuantumAIBotViewSet(viewsets.ModelViewSet):
@@ -162,28 +170,22 @@ class QuantumAIBotViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return QuantumAIBot.objects.filter(user=self.request.user)
     
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+    
     @action(detail=True, methods=['post'])
     def generate_addresses(self, request, pk=None):
-        """Generate blockchain deposit addresses for Quantum AI"""
-        bot = self.get_object()
-        # In production, generate real addresses via exchange APIs
-        addresses = {
-            'USDT': {
-                'BEP20': f'0x{uuid.uuid4().hex[:40]}',
-                'ERC20': f'0x{uuid.uuid4().hex[:40]}',
-                'TRC20': f'T{uuid.uuid4().hex[:33]}',
-            },
-            'USDC': {
-                'BEP20': f'0x{uuid.uuid4().hex[:40]}',
-                'ERC20': f'0x{uuid.uuid4().hex[:40]}',
-            },
-            'BTC': {
-                'Bitcoin': f'1{uuid.uuid4().hex[:33]}',
-            }
-        }
-        bot.blockchain_addresses = addresses
-        bot.save()
-        return Response({'addresses': addresses})
+        """
+        Deposit addresses MUST come from a real custodial wallet / exchange
+        sub-account, never be generated client-side. Returning random hex
+        strings would cause users to send funds to attacker-controlled
+        addresses that nobody owns. Disabled until an exchange-backed
+        address provisioning service is wired in.
+        """
+        return Response(
+            {'error': 'Address provisioning is not configured. Contact support.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
 
 class OrderViewSet(viewsets.ModelViewSet):
@@ -195,6 +197,9 @@ class OrderViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         return Order.objects.filter(user=self.request.user)
+    
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
     
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
@@ -214,6 +219,9 @@ class PositionViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return Position.objects.filter(user=self.request.user)
     
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+    
     @action(detail=True, methods=['post'])
     def close(self, request, pk=None):
         position = self.get_object()
@@ -224,6 +232,7 @@ class PositionViewSet(viewsets.ModelViewSet):
 class TechnicalIndicatorViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = TechnicalIndicator.objects.all()
     serializer_class = TechnicalIndicatorSerializer
+    permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['indicator_type', 'trading_pair', 'exchange']
     pagination_class = StandardResultsSetPagination
@@ -248,21 +257,29 @@ class UserBalanceViewSet(viewsets.ModelViewSet):
 # ==================== WEBHOOK HANDLERS ====================
 
 class TradingViewWebhookView(APIView):
-    """Handle TradingView webhook alerts"""
+    """
+    Handle TradingView webhook alerts. Validates the bot's stored
+    ``secret_key`` against the payload field in constant time to defeat
+    timing attacks.
+    """
     permission_classes = [permissions.AllowAny]
-    
+    throttle_scope = 'webhook'
+
     def post(self, request, webhook_id):
+        import hmac as _hmac
         try:
             bot = WebhookAlertBot.objects.get(webhook_id=webhook_id, is_active=True)
-            
-            # Verify secret key
-            secret = request.data.get('secret')
-            if secret != bot.secret_key:
+
+            # Verify secret key in constant time
+            secret = str(request.data.get('secret', ''))
+            expected = str(bot.secret_key or '')
+            if not expected or not _hmac.compare_digest(secret, expected):
+                logger.warning(f"Invalid webhook secret for {webhook_id}")
                 return Response({'error': 'Invalid secret key'}, status=status.HTTP_403_FORBIDDEN)
-            
+
             # Process the trade
             action = request.data.get('action', '').lower()
-            amount = Decimal(request.data.get('order', {}).get('amount', bot.default_amount))
+            amount = Decimal(str(request.data.get('order', {}).get('amount', bot.default_amount)))
             
             if action in ['buy', 'sell']:
                 self.execute_trade(bot, action, amount, request.data)
@@ -307,8 +324,15 @@ class TradingViewWebhookView(APIView):
 
 
 class EMAWebhookView(APIView):
-    """Handle EMA indicator webhooks"""
-    permission_classes = [permissions.AllowAny]
+    """
+    Handle EMA indicator webhooks.
+
+    SECURITY: Previously this endpoint accepted any ``username`` in the body
+    and stored the indicator against that user — allowing anyone with the
+    URL to write indicators on behalf of any account. Now restricted to
+    staff/admin; the upstream indicator producer must use an admin token.
+    """
+    permission_classes = [permissions.IsAdminUser]
     
     def post(self, request):
         try:
@@ -340,6 +364,8 @@ class EMAWebhookView(APIView):
                 'EMA': ema_value
             })
             
+        except Http404:
+            raise
         except Exception as e:
             logger.error(f"EMA webhook error: {str(e)}")
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -351,8 +377,12 @@ class EMAWebhookView(APIView):
 
 
 class RSIWebhookView(APIView):
-    """Handle RSI indicator webhooks"""
-    permission_classes = [permissions.AllowAny]
+    """
+    Handle RSI indicator webhooks. Restricted to staff/admin for the same
+    reason as :class:`EMAWebhookView` — previously vulnerable to spoofing
+    of any ``username``.
+    """
+    permission_classes = [permissions.IsAdminUser]
     
     def post(self, request):
         try:
@@ -385,6 +415,8 @@ class RSIWebhookView(APIView):
                 'RSI': rsi_value
             })
             
+        except Http404:
+            raise
         except Exception as e:
             logger.error(f"RSI webhook error: {str(e)}")
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -392,8 +424,8 @@ class RSIWebhookView(APIView):
 
 
 class EMAIndicatorView(APIView):
-    """Manual EMA indicator submission"""
-    permission_classes = [permissions.AllowAny]
+    """Manual EMA indicator submission (admin/staff only)."""
+    permission_classes = [permissions.IsAdminUser]
     
     def post(self, request):
         return Response({
@@ -403,8 +435,8 @@ class EMAIndicatorView(APIView):
 
 
 class RSIIndicatorView(APIView):
-    """Manual RSI indicator submission"""
-    permission_classes = [permissions.AllowAny]
+    """Manual RSI indicator submission (admin/staff only)."""
+    permission_classes = [permissions.IsAdminUser]
     
     def post(self, request):
         return Response({
@@ -414,8 +446,8 @@ class RSIIndicatorView(APIView):
 
 
 class ExchangeListView(APIView):
-    """List supported exchanges"""
-    permission_classes = [permissions.AllowAny]
+    """List supported exchanges (authenticated)."""
+    permission_classes = [permissions.IsAuthenticated]
     
     def get(self, request):
         exchanges = Exchange.objects.filter(status='active')
@@ -512,64 +544,88 @@ class UserProfileView(APIView):
 
 
 class BlockchainAddressesView(APIView):
-    """Get blockchain deposit addresses for Quantum AI"""
+    """
+    Return the configured deposit addresses for Quantum AI.
+
+    Only returns addresses that have been pre-provisioned by an admin in
+    ``apps.payments.BlockchainAddress`` (real, owned addresses). It will
+    never fabricate addresses — sending funds to a random hex string would
+    cause irreversible loss.
+    """
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def get(self, request):
-        # Return predefined addresses (in production, generate per user)
-        addresses = {
-            'USDT': {
-                'BEP20': '0x' + uuid.uuid4().hex[:40],
-                'ERC20': '0x' + uuid.uuid4().hex[:40],
-                'TRC20': 'T' + uuid.uuid4().hex[:33],
-                'SOL': '9WzDX' + uuid.uuid4().hex[:40],
-            },
-            'USDC': {
-                'BEP20': '0x' + uuid.uuid4().hex[:40],
-                'ERC20': '0x' + uuid.uuid4().hex[:40],
-            },
-            'BTC': {
-                'Bitcoin': '1' + uuid.uuid4().hex[:33],
-            }
-        }
+        from apps.payments.models import BlockchainAddress
+        addresses = {}
+        for entry in BlockchainAddress.objects.filter(is_active=True):
+            addresses.setdefault(entry.coin_type, {})[entry.blockchain] = entry.address
+        if not addresses:
+            return Response(
+                {'error': 'No deposit addresses configured. Contact support.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response(addresses)
 
 
 class QuantumAIDepositView(APIView):
-    """Handle Quantum AI deposit with screenshot"""
+    """Handle Quantum AI deposit submission (creates pending QuantumAIDeposit)."""
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def post(self, request, bot_id):
+        from apps.payments.models import QuantumAIDeposit
+        from apps.bots.models import QuantumAIFund
         try:
-            bot = QuantumAIBot.objects.get(id=bot_id, user=request.user)
-            
-            amount = request.data.get('amount')
-            coin_type = request.data.get('coin_type')
-            blockchain = request.data.get('blockchain')
-            transaction_hash = request.data.get('transaction_hash')
+            bot = QuantumAIFund.objects.get(id=bot_id)
+        except QuantumAIFund.DoesNotExist:
+            return Response({'error': 'Bot not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            amount_raw = request.data.get('amount')
+            coin_type = (request.data.get('coin_type') or '').upper().strip()
+            blockchain = (request.data.get('blockchain') or '').upper().strip()
+            transaction_hash = (request.data.get('transaction_hash') or '').strip()
+            from_address = (request.data.get('from_address') or '').strip()
             screenshot = request.FILES.get('screenshot')
-            
-            # Validate deposit
-            if not all([amount, coin_type, blockchain, transaction_hash]):
-                return Response({'error': 'Missing required fields'}, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Process deposit (implement your logic)
-            # Save to transaction model, update balances, etc.
-            
+
+            if not all([amount_raw, coin_type, blockchain]):
+                return Response({'error': 'amount, coin_type and blockchain are required'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if not transaction_hash and not screenshot:
+                return Response({'error': 'Provide a transaction hash or a screenshot'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                amount = Decimal(str(amount_raw))
+            except Exception:
+                return Response({'error': 'Invalid amount'}, status=status.HTTP_400_BAD_REQUEST)
+            if amount <= 0:
+                return Response({'error': 'Amount must be > 0'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Deduplicate by tx hash
+            if transaction_hash and QuantumAIDeposit.objects.filter(transaction_hash=transaction_hash).exists():
+                return Response({'error': 'Transaction hash already submitted'},
+                                status=status.HTTP_409_CONFLICT)
+
+            deposit = QuantumAIDeposit.objects.create(
+                user=request.user,
+                quantum_bot=bot,
+                amount=amount,
+                currency=coin_type,
+                blockchain=blockchain,
+                from_address=from_address,
+                transaction_hash=transaction_hash,
+                transaction_screenshot=screenshot,
+                status='pending',
+            )
             return Response({
                 'message': 'Deposit submitted for review',
-                'bot_id': str(bot.id),
-                'amount': amount,
-                'coin_type': coin_type,
-                'blockchain': blockchain,
-                'transaction_hash': transaction_hash
-            })
-            
-        except QuantumAIBot.DoesNotExist:
-            return Response({'error': 'Bot not found'}, status=status.HTTP_404_NOT_FOUND)
+                'deposit_id': str(deposit.id),
+                'status': deposit.status,
+            }, status=status.HTTP_201_CREATED)
         except Exception as e:
             logger.error(f"Quantum AI deposit error: {str(e)}")
-            return Response({'error': 'Deposit failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({'error': 'Deposit failed'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class StartBotView(APIView):

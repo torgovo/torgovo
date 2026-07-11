@@ -412,16 +412,24 @@ class BaseAdapter(ABC):
 
     def _normalize_position(self, position: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize position data to standard format."""
+        def safe_float(val, default=0.0):
+            if val is None:
+                return default
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return default
+
         return {
             'symbol': position.get('symbol'),
             'side': position.get('side'),
-            'contracts': float(position.get('contracts', 0)),
-            'entry_price': float(position.get('entryPrice', 0)),
-            'mark_price': float(position.get('markPrice', 0)),
-            'unrealized_pnl': float(position.get('unrealizedPnl', 0)),
-            'leverage': float(position.get('leverage', 1)),
-            'liquidation_price': float(position.get('liquidationPrice', 0)) if position.get('liquidationPrice') else None,
-            'margin': float(position.get('margin', 0)),
+            'contracts': safe_float(position.get('contracts')),
+            'entry_price': safe_float(position.get('entryPrice')),
+            'mark_price': safe_float(position.get('markPrice')),
+            'unrealized_pnl': safe_float(position.get('unrealizedPnl')),
+            'leverage': safe_float(position.get('leverage'), 1),
+            'liquidation_price': safe_float(position.get('liquidationPrice'), None),
+            'margin': safe_float(position.get('margin')),
         }
 
     def close_position(self, symbol: str, side: str, amount: float) -> Dict[str, Any]:
@@ -480,6 +488,58 @@ class BaseAdapter(ABC):
         except Exception:
             pass
         return 0.0
+
+    def fetch_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch a single position for a symbol (singular wrapper).
+        Some exchanges (Bybit, Binance futures) have this as a distinct endpoint.
+        Falls back to fetch_positions() and returns the first match.
+
+        Args:
+            symbol: Trading pair
+
+        Returns:
+            Position dict or None
+        """
+        formatted_symbol = self.format_symbol(symbol)
+        try:
+            position = self._make_request('fetch_position', formatted_symbol)
+            return self._normalize_position(position)
+        except (ccxt.NotSupported, AttributeError):
+            positions = self.fetch_positions(symbol)
+            if positions:
+                return positions[0]
+            return {
+                'symbol': formatted_symbol,
+                'side': None,
+                'contracts': 0,
+                'entry_price': 0,
+                'unrealized_pnl': 0,
+            }
+
+    def create_market_order_with_cost(
+        self,
+        symbol: str,
+        side: str,
+        cost: float,
+        params: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a market order by cost (quote currency) instead of amount.
+        Supported by Bybit (create_market_buy_order_with_cost / _sell).
+
+        Falls back to standard market order with calculated amount.
+        """
+        formatted_symbol = self.format_symbol(symbol)
+        try:
+            method = f'create_market_{side}_order_with_cost'
+            order = self._make_request(method, formatted_symbol, cost, params=params or {})
+            return self._normalize_order(order)
+        except (ccxt.NotSupported, AttributeError):
+            # Fallback: estimate amount from current price
+            price = self.get_current_price(symbol)
+            amount = cost / price if price > 0 else cost
+            return self.create_market_order(symbol, side, amount, params)
 
     def execute_order(self, signal: Dict[str, Any]) -> Dict[str, Any]:
         """
