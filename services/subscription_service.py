@@ -4,12 +4,12 @@ Handles state transitions and side effects.
 """
 
 import logging
-import uuid
-from decimal import Decimal
+
 from django.db import transaction
-from django.utils import timezone
+from django.db.models import Q
+
+from apps.bots.models import QuantumAIFund, QuantumAIInvestment
 from apps.payments.models import BotSubscription
-from apps.bots.models import PairConfig, GridBot, MartingaleBot, QuantumAIInvestment, QuantumAIFund
 from core.models import AuditLog
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ class SubscriptionService:
         try:
             subscription = BotSubscription.objects.select_for_update().get(id=subscription_id)
 
-            if subscription.status not in ['pending_payment', 'pending_approval']:
+            if subscription.status not in ["pending_payment", "pending_approval"]:
                 raise ValueError(f"Cannot approve subscription with status: {subscription.status}")
 
             # Approve the subscription
@@ -43,16 +43,16 @@ class SubscriptionService:
             bot_type = subscription.plan.bot_type
 
             # Create bot/fund based on type
-            if bot_type == 'quantum_ai':
+            if bot_type == "quantum_ai":
                 SubscriptionService._create_quantum_ai_investment(subscription)
 
             # Log the approval
             AuditLog.objects.create(
                 user=admin_user,
-                action='bot_subscription_approved',
-                resource_type='BotSubscription',
+                action="bot_subscription_approved",
+                resource_type="BotSubscription",
                 resource_id=str(subscription.id),
-                description=f"Approved {bot_type} subscription for {subscription.user.email}"
+                description=f"Approved {bot_type} subscription for {subscription.user.email}",
             )
 
             logger.info(f"Approved {bot_type} subscription for {subscription.user.email}")
@@ -71,8 +71,8 @@ class SubscriptionService:
         if not fund:
             raise ValueError("No active Quantum AI fund found. Admin must create one first.")
 
-        # Calculate USDT amount (placeholder - implement conversion later)
-        usdt_amount = Decimal('100.00')  #  Convert from crypto amount
+        # Calculate USDT amount from subscription plan price
+        usdt_amount = subscription.plan.price
 
         # Create investment
         investment = QuantumAIInvestment.objects.create(
@@ -80,14 +80,16 @@ class SubscriptionService:
             fund=fund,
             subscription=subscription,
             amount=usdt_amount,
-            status='pending'
+            status="pending",
         )
 
         # Calculate share percentage
         investment.share_percentage = investment.calculate_share_percentage()
         investment.save()
 
-        logger.info(f"Created Quantum AI investment for {subscription.user.email}: {usdt_amount} USDT")
+        logger.info(
+            f"Created Quantum AI investment for {subscription.user.email}: {usdt_amount} USDT"
+        )
 
     @staticmethod
     @transaction.atomic
@@ -95,7 +97,7 @@ class SubscriptionService:
         """Reject a pending subscription"""
         subscription = BotSubscription.objects.select_for_update().get(id=subscription_id)
 
-        if subscription.status not in ['pending_payment', 'pending_approval']:
+        if subscription.status not in ["pending_payment", "pending_approval"]:
             raise ValueError(f"Cannot reject subscription with status: {subscription.status}")
 
         subscription.reject(admin_user, reason)
@@ -103,11 +105,11 @@ class SubscriptionService:
         # Log the rejection
         AuditLog.objects.create(
             user=admin_user,
-            action='bot_subscription_rejected',
-            resource_type='BotSubscription',
+            action="bot_subscription_rejected",
+            resource_type="BotSubscription",
             resource_id=str(subscription.id),
-            new_values={'rejection_reason': reason},
-            description=f"Rejected {subscription.plan.bot_type} subscription: {reason}"
+            new_values={"rejection_reason": reason},
+            description=f"Rejected {subscription.plan.bot_type} subscription: {reason}",
         )
 
         logger.info(f"Rejected subscription {subscription_id}: {reason}")
@@ -116,9 +118,11 @@ class SubscriptionService:
     @staticmethod
     def get_pending_subscriptions():
         """Get all subscriptions pending approval"""
-        return BotSubscription.objects.filter(
-            status='pending_approval'
-        ).select_related('user', 'plan').order_by('-created_at')
+        return (
+            BotSubscription.objects.filter(status="pending_approval")
+            .select_related("user", "plan")
+            .order_by("-created_at")
+        )
 
     @staticmethod
     def get_subscription_dashboard_stats():
@@ -126,11 +130,11 @@ class SubscriptionService:
         from django.db.models import Count, Sum
 
         stats = BotSubscription.objects.aggregate(
-            total=Count('id'),
-            pending_approval=Count('id', filter=models.Q(status='pending_approval')),
-            active=Count('id', filter=models.Q(status='active')),
-            expired=Count('id', filter=models.Q(status='expired')),
-            total_revenue=Sum('plan__price', filter=models.Q(status='active')),
+            total=Count("id"),
+            pending_approval=Count("id", filter=Q(status="pending_approval")),
+            active=Count("id", filter=Q(status="active")),
+            expired=Count("id", filter=Q(status="expired")),
+            total_revenue=Sum("plan__price", filter=Q(status="active")),
         )
 
         return stats

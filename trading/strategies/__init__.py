@@ -2,6 +2,7 @@
 Trading Strategies Package
 Exchange-AGNOSTIC trading logic
 """
+
 from .quantum_ai import QuantumAIStrategy
 
 # Will add more strategies:
@@ -10,5 +11,5 @@ from .quantum_ai import QuantumAIStrategy
 # from .custom_bot import CustomBotStrategy
 
 __all__ = [
-    'QuantumAIStrategy',
+    "QuantumAIStrategy",
 ]

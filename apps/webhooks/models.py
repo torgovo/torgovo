@@ -1,19 +1,22 @@
 """
 Webhook models for TradingView integration
 """
-from django.db import models
+
 from django.conf import settings
+from django.db import models
+
 from core.models import TimeStampedModel
 
 
 class WebhookLog(TimeStampedModel):
     """Log of all webhook requests for debugging and monitoring."""
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         null=True,
         blank=True,
-        related_name='webhook_alerts'
+        related_name="webhook_alerts",
     )
     webhook_id = models.CharField(max_length=50, blank=True)
     ip_address = models.GenericIPAddressField()
@@ -26,9 +29,9 @@ class WebhookLog(TimeStampedModel):
     error_message = models.TextField(blank=True)
 
     class Meta:
-        db_table = 'webhooks_logs'
+        db_table = "webhooks_logs"
         indexes = [
-            models.Index(fields=['user', 'created_at']),
-            models.Index(fields=['webhook_id']),
-            models.Index(fields=['is_successful']),
+            models.Index(fields=["user", "created_at"]),
+            models.Index(fields=["webhook_id"]),
+            models.Index(fields=["is_successful"]),
         ]

@@ -1,14 +1,17 @@
 """
 Martingale trading strategy implementation
 """
-import time
+
 import logging
+import time
 from decimal import Decimal
-from typing import Dict, Any
+from typing import Any, Dict
+
 from django.utils import timezone
+
 from .base import BaseTradingStrategy, TradingBotException
 
-logger = logging.getLogger('trading')
+logger = logging.getLogger("trading")
 
 
 class MartingaleTradingStrategy(BaseTradingStrategy):
@@ -29,23 +32,23 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
         super().__init__(user, exchange_bot, config=config)
 
         # Martingale configuration
-        self.trading_pair = config['trading_pair']
-        self.base_amount = Decimal(str(config['base_amount']))
-        self.favor_levels = config['favor_levels']
-        self.against_levels = config['against_levels']
-        self.level_spacing_percent = Decimal(str(config['level_spacing_percent']))
-        self.multiplier_factor = Decimal(str(config['multiplier_factor']))
-        self.take_profit_percent = Decimal(str(config['take_profit_percent']))
-        self.stop_loss_percent = Decimal(str(config['stop_loss_percent']))
+        self.trading_pair = config["trading_pair"]
+        self.base_amount = Decimal(str(config["base_amount"]))
+        self.favor_levels = config["favor_levels"]
+        self.against_levels = config["against_levels"]
+        self.level_spacing_percent = Decimal(str(config["level_spacing_percent"]))
+        self.multiplier_factor = Decimal(str(config["multiplier_factor"]))
+        self.take_profit_percent = Decimal(str(config["take_profit_percent"]))
+        self.stop_loss_percent = Decimal(str(config["stop_loss_percent"]))
 
         # Martingale state
         self.current_level = 0
         self.max_level_reached = 0
         self.current_position_size = self.base_amount
-        self.entry_price = Decimal('0')
+        self.entry_price = Decimal("0")
         self.last_side = None
         self.consecutive_losses = 0
-        self.max_consecutive_losses = config.get('max_consecutive_losses', 7)
+        self.max_consecutive_losses = config.get("max_consecutive_losses", 7)
 
     def start(self):
         """Start the martingale trading strategy."""
@@ -58,7 +61,7 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
 
             # Get current price
             ticker = self.exchange_bot.get_ticker(self.trading_pair)
-            current_price = Decimal(str(ticker['last']))
+            current_price = Decimal(str(ticker["last"]))
 
             if current_price == 0:
                 raise TradingBotException("Invalid current price")
@@ -68,7 +71,7 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
             self.is_running = True
             self.start_time = timezone.now()
 
-            self.log_activity('start', f"Martingale trading started for {self.trading_pair}")
+            self.log_activity("start", f"Martingale trading started for {self.trading_pair}")
             logger.info(f"Martingale trading started for {self.user.email} on {self.trading_pair}")
 
             # Main trading loop
@@ -89,7 +92,7 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
         # Close any open positions
         self.close_positions()
 
-        self.log_activity('stop', f"Martingale trading stopped for {self.trading_pair}")
+        self.log_activity("stop", f"Martingale trading stopped for {self.trading_pair}")
         logger.info(f"Martingale trading stopped for {self.user.email}")
 
     def run_martingale_loop(self):
@@ -102,7 +105,7 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
 
                 # Update current price
                 ticker = self.exchange_bot.get_ticker(self.trading_pair)
-                current_price = Decimal(str(ticker['last']))
+                current_price = Decimal(str(ticker["last"]))
 
                 # Analyze market conditions and make trading decisions
                 self.analyze_market_conditions(current_price)
@@ -130,17 +133,17 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
             recent_indicators = TechnicalIndicator.objects.filter(
                 pair=self.trading_pair,
                 exchange=self.exchange_bot.exchange_name,
-                indicator_type__in=['RSI', 'EMA', 'BB'],
-                timestamp__gte=timezone.now() - timezone.timedelta(minutes=30)
-            ).order_by('-timestamp')[:10]
+                indicator_type__in=["RSI", "EMA", "BB"],
+                timestamp__gte=timezone.now() - timezone.timedelta(minutes=30),
+            ).order_by("-timestamp")[:10]
 
             # Simple trading logic based on indicators
             should_buy = self.evaluate_buy_signal(recent_indicators, current_price)
             should_sell = self.evaluate_sell_signal(recent_indicators, current_price)
 
-            if should_buy and self.last_side != 'buy':
+            if should_buy and self.last_side != "buy":
                 self.execute_buy(current_price)
-            elif should_sell and self.last_side != 'sell':
+            elif should_sell and self.last_side != "sell":
                 self.execute_sell(current_price)
 
         except Exception as e:
@@ -149,7 +152,7 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
     def evaluate_buy_signal(self, indicators: list, current_price: Decimal) -> bool:
         """Evaluate if we should execute a buy order."""
         # Simplified logic - implement proper technical analysis
-        rsi_values = [ind.value for ind in indicators if ind.indicator_type == 'RSI']
+        rsi_values = [ind.value for ind in indicators if ind.indicator_type == "RSI"]
 
         if rsi_values:
             latest_rsi = rsi_values[0]
@@ -160,7 +163,7 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
     def evaluate_sell_signal(self, indicators: list, current_price: Decimal) -> bool:
         """Evaluate if we should execute a sell order."""
         # Simplified logic - implement proper technical analysis
-        rsi_values = [ind.value for ind in indicators if ind.indicator_type == 'RSI']
+        rsi_values = [ind.value for ind in indicators if ind.indicator_type == "RSI"]
 
         if rsi_values:
             latest_rsi = rsi_values[0]
@@ -176,14 +179,12 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
 
             # Execute market buy order
             order = self.exchange_bot.create_market_order(
-                symbol=self.trading_pair,
-                side='buy',
-                amount=float(position_size)
+                symbol=self.trading_pair, side="buy", amount=float(position_size)
             )
 
             # Update state
-            self.entry_price = Decimal(str(order.get('price', current_price)))
-            self.last_side = 'buy'
+            self.entry_price = Decimal(str(order.get("price", current_price)))
+            self.last_side = "buy"
             self.current_position_size = position_size
 
             # Set take profit and stop loss
@@ -191,26 +192,28 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
 
             # Log trade
             trade_data = {
-                'symbol': self.trading_pair,
-                'exchange': self.exchange_bot.exchange_name,
-                'side': 'buy',
-                'amount': position_size,
-                'price': self.entry_price,
-                'executed_price': Decimal(str(order.get('price', self.entry_price))),
-                'order_id': order.get('id', ''),
-                'status': order.get('status', 'filled'),
-                'take_profit': self.take_profit_price,
-                'stop_loss': self.stop_loss_price,
-                'description': f'Martingale buy order at level {self.current_level}',
-                'details': {
-                    'martingale_level': self.current_level,
-                    'multiplier_used': float(self.multiplier_factor ** self.current_level),
-                    'position_size': float(position_size),
-                }
+                "symbol": self.trading_pair,
+                "exchange": self.exchange_bot.exchange_name,
+                "side": "buy",
+                "amount": position_size,
+                "price": self.entry_price,
+                "executed_price": Decimal(str(order.get("price", self.entry_price))),
+                "order_id": order.get("id", ""),
+                "status": order.get("status", "filled"),
+                "take_profit": self.take_profit_price,
+                "stop_loss": self.stop_loss_price,
+                "description": f"Martingale buy order at level {self.current_level}",
+                "details": {
+                    "martingale_level": self.current_level,
+                    "multiplier_used": float(self.multiplier_factor**self.current_level),
+                    "position_size": float(position_size),
+                },
             }
 
             self.log_trade(trade_data)
-            self.log_activity('buy_executed', f"Martingale buy executed at level {self.current_level}")
+            self.log_activity(
+                "buy_executed", f"Martingale buy executed at level {self.current_level}"
+            )
 
         except Exception as e:
             self.handle_error(e, "execute_buy")
@@ -223,21 +226,19 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
 
             # Get current balance of the base asset
             balance = self.exchange_bot.get_balance()
-            base_currency = self.trading_pair.split('/')[0]
-            available_balance = balance['free'].get(base_currency, 0)
+            base_currency = self.trading_pair.split("/")[0]
+            available_balance = balance["free"].get(base_currency, 0)
 
             if available_balance <= 0:
                 return  # No balance to sell
 
             # Execute market sell order
             order = self.exchange_bot.create_market_order(
-                symbol=self.trading_pair,
-                side='sell',
-                amount=float(available_balance)
+                symbol=self.trading_pair, side="sell", amount=float(available_balance)
             )
 
             # Calculate profit/loss
-            exit_price = Decimal(str(order.get('price', current_price)))
+            exit_price = Decimal(str(order.get("price", current_price)))
             profit_loss = (exit_price - self.entry_price) * self.current_position_size
 
             # Update martingale state based on result
@@ -254,35 +255,38 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
 
                 # Check if we've reached max consecutive losses
                 if self.consecutive_losses >= self.max_consecutive_losses:
-                    self.log_activity('max_losses_reached', f"Max consecutive losses reached: {self.consecutive_losses}")
+                    self.log_activity(
+                        "max_losses_reached",
+                        f"Max consecutive losses reached: {self.consecutive_losses}",
+                    )
                     self.stop()
 
             # Update state
-            self.last_side = 'sell'
-            self.entry_price = Decimal('0')
+            self.last_side = "sell"
+            self.entry_price = Decimal("0")
 
             # Log trade
             trade_data = {
-                'symbol': self.trading_pair,
-                'exchange': self.exchange_bot.exchange_name,
-                'side': 'sell',
-                'amount': available_balance,
-                'price': exit_price,
-                'executed_price': Decimal(str(order.get('price', exit_price))),
-                'order_id': order.get('id', ''),
-                'status': order.get('status', 'filled'),
-                'profit_loss': profit_loss,
-                'description': f'Martingale close from level {self.current_level - 1}',
-                'details': {
-                    'consecutive_losses': self.consecutive_losses - 1,
-                    'current_level': self.current_level,
-                    'entry_price': float(self.entry_price),
-                    'exit_price': float(exit_price),
-                }
+                "symbol": self.trading_pair,
+                "exchange": self.exchange_bot.exchange_name,
+                "side": "sell",
+                "amount": available_balance,
+                "price": exit_price,
+                "executed_price": Decimal(str(order.get("price", exit_price))),
+                "order_id": order.get("id", ""),
+                "status": order.get("status", "filled"),
+                "profit_loss": profit_loss,
+                "description": f"Martingale close from level {self.current_level - 1}",
+                "details": {
+                    "consecutive_losses": self.consecutive_losses - 1,
+                    "current_level": self.current_level,
+                    "entry_price": float(self.entry_price),
+                    "exit_price": float(exit_price),
+                },
             }
 
             self.log_trade(trade_data)
-            self.log_activity('sell_executed', f"Martingale sell executed, P/L: {profit_loss}")
+            self.log_activity("sell_executed", f"Martingale sell executed, P/L: {profit_loss}")
 
         except Exception as e:
             self.handle_error(e, "execute_sell")
@@ -290,7 +294,7 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
     def calculate_position_size(self) -> Decimal:
         """Calculate position size based on current martingale level."""
         base_amount = self.base_amount
-        multiplier = self.multiplier_factor ** self.current_level
+        multiplier = self.multiplier_factor**self.current_level
         return base_amount * multiplier
 
     def set_exit_prices(self):
@@ -302,7 +306,7 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
         tp_multiplier = 1 + (self.take_profit_percent / 100)
         sl_multiplier = 1 - (self.stop_loss_percent / 100)
 
-        if self.last_side == 'buy':
+        if self.last_side == "buy":
             self.take_profit_price = self.entry_price * tp_multiplier
             self.stop_loss_price = self.entry_price * sl_multiplier
         else:  # sell position (not typical for martingale)
@@ -312,24 +316,26 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
     def check_risk_management(self, current_price: Decimal):
         """Check risk management conditions."""
         # Check stop loss
-        if self.stop_loss_price and self.last_side == 'buy':
+        if self.stop_loss_price and self.last_side == "buy":
             if current_price <= self.stop_loss_price:
                 self.execute_stop_loss()
-        elif self.last_side == 'sell' and self.stop_loss_price:
+        elif self.last_side == "sell" and self.stop_loss_price:
             if current_price >= self.stop_loss_price:
                 self.execute_stop_loss()
 
         # Check take profit
         if self.take_profit_price:
-            if self.last_side == 'buy' and current_price >= self.take_profit_price:
+            if self.last_side == "buy" and current_price >= self.take_profit_price:
                 self.execute_take_profit()
-            elif self.last_side == 'sell' and current_price <= self.take_profit_price:
+            elif self.last_side == "sell" and current_price <= self.take_profit_price:
                 self.execute_take_profit()
 
     def execute_stop_loss(self):
         """Execute stop loss order."""
         try:
-            self.log_activity('stop_loss_triggered', f"Stop loss triggered at level {self.current_level}")
+            self.log_activity(
+                "stop_loss_triggered", f"Stop loss triggered at level {self.current_level}"
+            )
             # Current position will be closed in the next iteration
         except Exception as e:
             self.handle_error(e, "execute_stop_loss")
@@ -337,7 +343,9 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
     def execute_take_profit(self):
         """Execute take profit order."""
         try:
-            self.log_activity('take_profit_triggered', f"Take profit triggered at level {self.current_level}")
+            self.log_activity(
+                "take_profit_triggered", f"Take profit triggered at level {self.current_level}"
+            )
         except Exception as e:
             self.handle_error(e, "execute_take_profit")
 
@@ -347,7 +355,7 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
             if self.last_side:
                 # Close current position
                 ticker = self.exchange_bot.get_ticker(self.trading_pair)
-                current_price = Decimal(str(ticker['last']))
+                current_price = Decimal(str(ticker["last"]))
                 self.execute_sell(current_price)
         except Exception as e:
             self.handle_error(e, "close_positions")
@@ -355,33 +363,37 @@ class MartingaleTradingStrategy(BaseTradingStrategy):
     def get_required_config_fields(self) -> list:
         """Get required configuration fields."""
         return [
-            'trading_pair',
-            'base_amount',
-            'favor_levels',
-            'against_levels',
-            'level_spacing_percent',
-            'multiplier_factor',
-            'take_profit_percent',
-            'stop_loss_percent'
+            "trading_pair",
+            "base_amount",
+            "favor_levels",
+            "against_levels",
+            "level_spacing_percent",
+            "multiplier_factor",
+            "take_profit_percent",
+            "stop_loss_percent",
         ]
 
     def setup_risk_management(self):
         """Setup risk management parameters."""
         # Additional risk management setup
-        self.max_position_size = self.base_amount * (self.multiplier_factor ** self.favor_levels)
+        self.max_position_size = self.base_amount * (self.multiplier_factor**self.favor_levels)
         logger.info(f"Martingale max position size: {self.max_position_size}")
 
     def get_status(self) -> Dict[str, Any]:
         """Get detailed martingale status."""
         base_status = super().get_status()
-        base_status.update({
-            'current_level': self.current_level,
-            'max_level_reached': self.max_level_reached,
-            'consecutive_losses': self.consecutive_losses,
-            'current_position_size': float(self.current_position_size),
-            'last_side': self.last_side,
-            'entry_price': float(self.entry_price) if self.entry_price else None,
-            'take_profit_price': float(self.take_profit_price) if self.take_profit_price else None,
-            'stop_loss_price': float(self.stop_loss_price) if self.stop_loss_price else None,
-        })
+        base_status.update(
+            {
+                "current_level": self.current_level,
+                "max_level_reached": self.max_level_reached,
+                "consecutive_losses": self.consecutive_losses,
+                "current_position_size": float(self.current_position_size),
+                "last_side": self.last_side,
+                "entry_price": float(self.entry_price) if self.entry_price else None,
+                "take_profit_price": (
+                    float(self.take_profit_price) if self.take_profit_price else None
+                ),
+                "stop_loss_price": float(self.stop_loss_price) if self.stop_loss_price else None,
+            }
+        )
         return base_status

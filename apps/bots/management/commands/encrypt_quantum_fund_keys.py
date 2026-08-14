@@ -10,8 +10,10 @@ that were created before the override was deployed may still have
 plaintext values. This command finds and re-saves every row so the
 save() override fires.
 """
-from django.core.management.base import BaseCommand, CommandError
+
 from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
+
 from core.utils import looks_encrypted
 
 
@@ -20,14 +22,15 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            '--dry-run',
-            action='store_true',
-            help='Show which funds would be affected without making changes',
+            "--dry-run",
+            action="store_true",
+            help="Show which funds would be affected without making changes",
         )
 
     def handle(self, *args, **options):
-        from apps.bots.models import QuantumAIFund
         from cryptography.fernet import Fernet
+
+        from apps.bots.models import QuantumAIFund
 
         if not settings.FERNET_KEY:
             raise CommandError("FERNET_KEY is not configured — cannot encrypt")
@@ -37,7 +40,7 @@ class Command(BaseCommand):
         except Exception as e:
             raise CommandError(f"FERNET_KEY is invalid: {e}")
 
-        dry_run = options['dry-run']
+        dry_run = options["dry-run"]
         affected = 0
         plaintext_fields = 0
 
@@ -45,9 +48,9 @@ class Command(BaseCommand):
             # Check all three key fields: look for values that aren't empty
             # and don't already look Fernet-encrypted.
             fields_to_check = {
-                'master_api_key': fund.master_api_key,
-                'master_secret_key': fund.master_secret_key,
-                'master_passphrase': fund.master_passphrase,
+                "master_api_key": fund.master_api_key,
+                "master_secret_key": fund.master_secret_key,
+                "master_passphrase": fund.master_passphrase,
             }
 
             dirty = False
@@ -56,8 +59,7 @@ class Command(BaseCommand):
                     dirty = True
                     plaintext_fields += 1
                     self.stdout.write(
-                        f"  [plaintext] {fund.name}.{field_name} "
-                        f"(length={len(value)})"
+                        f"  [plaintext] {fund.name}.{field_name} " f"(length={len(value)})"
                     )
 
             if dirty:
@@ -68,9 +70,7 @@ class Command(BaseCommand):
                     # on each key field before writing to the database.
                     fund.save()
 
-        summary = (
-            f"Found {affected} fund(s) with {plaintext_fields} plaintext field(s)"
-        )
+        summary = f"Found {affected} fund(s) with {plaintext_fields} plaintext field(s)"
         if dry_run and affected > 0:
             summary += " — use without --dry-run to encrypt"
         elif affected == 0:

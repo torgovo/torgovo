@@ -1,40 +1,42 @@
 import os
+
 from cryptography.fernet import Fernet
-os.environ['FERNET_KEY'] = Fernet.generate_key().decode()
 
-from .base import *
+os.environ["FERNET_KEY"] = Fernet.generate_key().decode()
 
-SECRET_KEY = 'test-secret-key-not-for-production'
+from .base import *  # noqa: E402, F403  (requires FERNET_KEY set above)
+
+SECRET_KEY = "test-secret-key-not-for-production"
 DEBUG = False
-ALLOWED_HOSTS = ['testserver']
+ALLOWED_HOSTS = ["testserver"]
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': ':memory:',
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": ":memory:",
     }
 }
 
 CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
     }
 }
 
 PASSWORD_HASHERS = [
-    'django.contrib.auth.hashers.MD5PasswordHasher',
+    "django.contrib.auth.hashers.MD5PasswordHasher",
 ]
 
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
 
-EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
+EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 
-MEDIA_ROOT = '/tmp/torgovo-test-media'
+MEDIA_ROOT = "/tmp/torgovo-test-media"
 
 CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels.layers.InMemoryChannelLayer',
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
     },
 }
 
@@ -43,6 +45,9 @@ SECURE_HSTS_SECONDS = 0
 SECURE_HSTS_INCLUDE_SUBDOMAINS = False
 SECURE_HSTS_PRELOAD = False
 
-FERNET_KEY = os.environ['FERNET_KEY']
+FERNET_KEY = os.environ["FERNET_KEY"]
 
-REST_FRAMEWORK['DEFAULT_SCHEMA_CLASS'] = 'rest_framework.schemas.openapi.AutoSchema'
+REST_FRAMEWORK["DEFAULT_SCHEMA_CLASS"] = "rest_framework.schemas.openapi.AutoSchema"  # noqa: F405
+
+FRONTEND_URL = "http://localhost:3000"
+SITE_URL = "http://localhost:8000"

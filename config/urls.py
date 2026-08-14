@@ -1,35 +1,42 @@
 """
 Main URL configuration for Torgovo Trading Platform
 """
-from django.contrib import admin
-from django.urls import path, include
+
 from django.conf import settings
 from django.conf.urls.static import static
+from django.urls import include, path
 from rest_framework.routers import DefaultRouter
+
+from apps.users.admin_site import admin_site
 
 # API Router for main endpoints
 router = DefaultRouter()
 
 urlpatterns = [
+    # Prometheus metrics
+    path("", include("django_prometheus.urls")),
+    # Health check
+    path("ht/", include("health_check.urls")),
     # Django Admin
-    path('admin/', admin.site.urls),
-
+    path("admin/", admin_site.urls),
     # API Root
-    path('api/', include(router.urls)),
-
+    path("api/", include(router.urls)),
     # App-specific URLs
-    path('api/bots/', include('apps.bots.urls', namespace='bots')),
-    path('api/payments/', include('apps.payments.urls', namespace='payments')),
-    path('api/auth/', include('apps.authentication.urls', namespace='auth')),
-    path('api/users/', include('apps.users.urls', namespace='users')),
-    path('api/trading/', include('apps.trading.urls', namespace='trading')),  # New unified trading API
-    path('api/exchanges/', include('apps.exchanges.urls', namespace='exchanges')),  # Legacy, will be removed
-    path('api/subscriptions/', include('apps.subscriptions.urls', namespace='subscriptions')),
-    path('api/investments/', include('apps.investments.urls', namespace='investments')),
-    path('api/referrals/', include('apps.referrals.urls', namespace='referrals')),
-
+    path("api/bots/", include("apps.bots.urls", namespace="bots")),
+    path("api/payments/", include("apps.payments.urls", namespace="payments")),
+    path("api/auth/", include("apps.authentication.urls", namespace="auth")),
+    path("api/users/", include("apps.users.urls", namespace="users")),
+    path(
+        "api/trading/", include("apps.trading.urls", namespace="trading")
+    ),  # New unified trading API
+    path(
+        "api/exchanges/", include("apps.exchanges.urls", namespace="exchanges")
+    ),  # Legacy, will be removed
+    path("api/subscriptions/", include("apps.subscriptions.urls", namespace="subscriptions")),
+    path("api/investments/", include("apps.investments.urls", namespace="investments")),
+    path("api/referrals/", include("apps.referrals.urls", namespace="referrals")),
     # Custom Bot Webhook (global URL, secret in JSON payload)
-    path('api/webhooks/custombot/', include('apps.webhooks.urls', namespace='custombot_webhooks')),
+    path("api/webhooks/custombot/", include("apps.webhooks.urls", namespace="custombot_webhooks")),
 ]
 
 if settings.DEBUG:
@@ -37,15 +44,15 @@ if settings.DEBUG:
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
 
 # Debug toolbar (optional)
-if 'debug_toolbar' in settings.INSTALLED_APPS:
+if "debug_toolbar" in settings.INSTALLED_APPS:
     import debug_toolbar
 
     urlpatterns = [
-                      path('__debug__/', include(debug_toolbar.urls)),
-                  ] + urlpatterns
+        path("__debug__/", include(debug_toolbar.urls)),
+    ] + urlpatterns
 
 # Django Silk profiler (optional)
-if 'silk' in settings.INSTALLED_APPS:
+if "silk" in settings.INSTALLED_APPS:
     urlpatterns = [
-                      path('silk/', include('silk.urls', namespace='silk')),
-                  ] + urlpatterns
+        path("silk/", include("silk.urls", namespace="silk")),
+    ] + urlpatterns

@@ -1,300 +1,196 @@
 """
 Investment App Models for Torgovo Crypto Trading Platform
 
-Self-contained model definitions for the investments API layer.
-These models have the exact field shapes that the investments serializers
-and views expect.  They live in their own DB tables (prefixed investments_)
-and do NOT interfere with models in apps.bots or apps.exchanges.
+Portfolio/display models — tracks orders, positions, balances, exchange rates,
+and exchange health for the user-facing investments API.
+Bot models (GridBot, MartingaleBot, SignalBot) belong in apps.bots.
 """
-import uuid
+
 from decimal import Decimal
-from django.db import models
+
 from django.conf import settings
-from core.models import TimeStampedModel, SoftDeleteModel
+from django.db import models
 
+from apps.exchanges.models import Exchange, TradingPair
+from core.models import TimeStampedModel
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Exchange
+# ExchangeStatus — exchange health display
 # ──────────────────────────────────────────────────────────────────────────────
 
-class Exchange(TimeStampedModel):
-    """Supported cryptocurrency exchange."""
-    STATUS_CHOICES = [
-        ('active', 'Active'),
-        ('maintenance', 'Maintenance'),
-        ('inactive', 'Inactive'),
-    ]
 
-    name = models.CharField(max_length=20, unique=True)
-    display_name = models.CharField(max_length=50)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
-    api_base_url = models.URLField(blank=True)
-    websocket_url = models.URLField(blank=True)
-    supported_features = models.JSONField(default=list)
-    requires_passphrase = models.BooleanField(default=False)
+class ExchangeStatus(TimeStampedModel):
+    """Track exchange API status and health (displayed in investments UI)."""
+
+    exchange_name = models.CharField(max_length=20)
+    status = models.CharField(
+        max_length=20,
+        choices=[
+            ("online", "Online"),
+            ("degraded", "Degraded Performance"),
+            ("offline", "Offline"),
+            ("maintenance", "Maintenance"),
+        ],
+        default="online",
+    )
+    response_time_ms = models.IntegerField(null=True, blank=True)
+    last_check = models.DateTimeField(auto_now=True)
+    error_message = models.TextField(blank=True)
+    api_limits = models.JSONField(default=dict, help_text="Current API usage and limits")
 
     class Meta:
-        db_table = 'investments_exchange'
+        db_table = "investments_exchange_status"
+        indexes = [
+            models.Index(fields=["exchange_name"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["last_check"]),
+        ]
 
     def __str__(self):
-        return self.display_name
+        return f"{self.exchange_name} - {self.status}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# TradingPair
+# SupportedBlockchain — deposit blockchain options
 # ──────────────────────────────────────────────────────────────────────────────
 
-class TradingPair(TimeStampedModel):
-    """Available trading pairs on each exchange."""
-    exchange = models.ForeignKey(Exchange, on_delete=models.CASCADE, related_name='trading_pairs')
-    symbol = models.CharField(max_length=20)
-    base_asset = models.CharField(max_length=10)
-    quote_asset = models.CharField(max_length=10)
-    is_active = models.BooleanField(default=True)
-    current_price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
-    price_change_24h = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-    price_change_percent_24h = models.DecimalField(max_digits=10, decimal_places=4, default=Decimal('0'))
-    volume_24h = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-    last_updated = models.DateTimeField(auto_now=True)
 
-    class Meta:
-        db_table = 'investments_trading_pair'
-        unique_together = ['exchange', 'symbol']
+class SupportedBlockchain(TimeStampedModel):
+    """
+    Supported blockchains for cryptocurrency deposits.
+    Used by the investments UI to show users which chains are accepted.
+    """
 
-    def __str__(self):
-        return f"{self.symbol} on {self.exchange.name}"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ExchangeCredential
-# ──────────────────────────────────────────────────────────────────────────────
-
-class ExchangeCredential(SoftDeleteModel):
-    """User API credentials for an exchange."""
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
-        related_name='investment_credentials',
-    )
-    exchange = models.ForeignKey(
-        Exchange, on_delete=models.CASCADE,
-        related_name='investment_credentials',
-    )
-    api_key = models.TextField(help_text="Encrypted API key")
-    secret_key = models.TextField(help_text="Encrypted secret key")
-    passphrase = models.TextField(blank=True, null=True)
-    is_testnet = models.BooleanField(default=True)
-    is_connected = models.BooleanField(default=False)
-    last_connected = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = 'investments_exchange_credential'
-        unique_together = ['user', 'exchange']
-
-    def __str__(self):
-        return f"{self.user} — {self.exchange.name}"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# BotBase — common fields for all bot types
-# ──────────────────────────────────────────────────────────────────────────────
-
-class BotBase(SoftDeleteModel):
-    """Common fields shared by all trading bot types."""
-    BOT_STATUS_CHOICES = [
-        ('idle', 'Idle'),
-        ('running', 'Running'),
-        ('paused', 'Paused'),
-        ('stopped', 'Stopped'),
-        ('error', 'Error'),
-    ]
-    CATEGORY_CHOICES = [
-        ('webhook', 'Webhook Alert'),
-        ('grid', 'Grid'),
-        ('martingale', 'Martingale'),
-        ('quantum_ai', 'Quantum AI'),
+    BLOCKCHAIN_CHOICES = [
+        ("BEP20", "Binance Smart Chain"),
+        ("ERC20", "Ethereum"),
+        ("TRC20", "TRON"),
+        ("SOL", "Solana"),
+        ("APTOS", "Aptos"),
+        ("POLYGON", "Polygon"),
+        ("ARBITRUM", "Arbitrum"),
+        ("OPTIMISM", "Optimism"),
+        ("AVALANCHE", "Avalanche"),
+        ("FANTOM", "Fantom"),
+        ("Bitcoin", "Bitcoin Network"),
     ]
 
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
-        related_name='%(class)s_bots',
+    name = models.CharField(max_length=50, unique=True)
+    blockchain_code = models.CharField(max_length=20, choices=BLOCKCHAIN_CHOICES, unique=True)
+    native_coin = models.CharField(max_length=10)
+    explorer_url = models.URLField(blank=True)
+    confirmation_blocks = models.PositiveIntegerField(default=12)
+    transaction_fee_type = models.CharField(
+        max_length=20,
+        choices=[
+            ("fixed", "Fixed Fee"),
+            ("percentage", "Percentage"),
+            ("dynamic", "Dynamic"),
+        ],
+        default="dynamic",
     )
-    bot_name = models.CharField(max_length=100)
-    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='webhook')
-    exchange = models.ForeignKey(
-        Exchange, on_delete=models.CASCADE, related_name='%(class)s_bots',
-    )
-    trading_pair = models.ForeignKey(
-        TradingPair, on_delete=models.CASCADE, related_name='%(class)s_bots',
-    )
-
-    status = models.CharField(max_length=20, choices=BOT_STATUS_CHOICES, default='idle')
+    average_fee = models.DecimalField(max_digits=10, decimal_places=8, null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
-    # Performance
-    total_trades = models.PositiveIntegerField(default=0)
-    successful_trades = models.PositiveIntegerField(default=0)
-    total_profit_loss = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-    total_volume = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-
-    # Risk parameters
-    take_profit_percent = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('2.0'))
-    stop_loss_percent = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('1.0'))
-    max_position_size = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('1000'))
-
-    # Timestamps
-    started_at = models.DateTimeField(null=True, blank=True)
-    stopped_at = models.DateTimeField(null=True, blank=True)
-
     class Meta:
-        db_table = 'investments_bot_base'
+        db_table = "investments_supported_blockchains"
+        indexes = [
+            models.Index(fields=["blockchain_code"]),
+            models.Index(fields=["is_active"]),
+        ]
 
     def __str__(self):
-        return f"{self.bot_name} ({self.category})"
+        return f"{self.name} ({self.blockchain_code})"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# WebhookAlertBot
+# ExchangeRate — rates for portfolio valuation
 # ──────────────────────────────────────────────────────────────────────────────
 
-class WebhookAlertBot(BotBase):
-    """A bot triggered by TradingView webhook alerts."""
-    webhook_id = models.UUIDField(default=uuid.uuid4, unique=True)
-    webhook_url = models.URLField(blank=True)
-    secret_key = models.CharField(max_length=64, blank=True)
-    default_amount = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('10'))
-    last_triggered = models.DateTimeField(null=True, blank=True)
+
+class ExchangeRate(TimeStampedModel):
+    """
+    Exchange rates between different cryptocurrencies.
+    Used by the investments UI for portfolio valuation display.
+    """
+
+    from_currency = models.CharField(max_length=10)
+    to_currency = models.CharField(max_length=10)
+    rate = models.DecimalField(max_digits=20, decimal_places=8)
+    exchange_name = models.CharField(max_length=20, default="aggregated")
+    source = models.CharField(max_length=50, default="api")
+    timestamp = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'investments_webhook_alert_bot'
+        db_table = "investments_exchange_rates"
+        unique_together = ["from_currency", "to_currency", "exchange_name"]
+        indexes = [
+            models.Index(fields=["from_currency", "to_currency"]),
+            models.Index(fields=["timestamp"]),
+        ]
 
     def __str__(self):
-        return f"Webhook Bot: {self.bot_name}"
+        return f"1 {self.from_currency} = {self.rate} {self.to_currency}"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# GridBot
-# ──────────────────────────────────────────────────────────────────────────────
-
-class GridBot(BotBase):
-    """Grid trading bot."""
-    base_amount = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('100'))
-    favor_levels = models.PositiveIntegerField(default=5)
-    against_levels = models.PositiveIntegerField(default=5)
-    level_spacing_percent = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('1.0'))
-    current_grid_level = models.IntegerField(default=0)
-    total_invested = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-
-    class Meta:
-        db_table = 'investments_grid_bot'
-
-    def __str__(self):
-        return f"Grid Bot: {self.bot_name}"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# MartingaleBot
-# ──────────────────────────────────────────────────────────────────────────────
-
-class MartingaleBot(BotBase):
-    """Martingale trading bot."""
-    base_amount = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('100'))
-    favor_levels = models.PositiveIntegerField(default=5)
-    against_levels = models.PositiveIntegerField(default=5)
-    level_spacing_percent = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('1.0'))
-    multiplier_factor = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('2.0'))
-    current_level = models.IntegerField(default=0)
-    consecutive_losses = models.PositiveIntegerField(default=0)
-
-    class Meta:
-        db_table = 'investments_martingale_bot'
-
-    def __str__(self):
-        return f"Martingale Bot: {self.bot_name}"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# QuantumAIBot
-# ──────────────────────────────────────────────────────────────────────────────
-
-class QuantumAIBot(BotBase):
-    """Quantum AI trading bot."""
-    RISK_LEVEL_CHOICES = [
-        ('low', 'Low'),
-        ('medium', 'Medium'),
-        ('high', 'High'),
-    ]
-    COMPOUND_FREQUENCY_CHOICES = [
-        ('daily', 'Daily'),
-        ('weekly', 'Weekly'),
-        ('monthly', 'Monthly'),
-    ]
-
-    auto_compound = models.BooleanField(default=False)
-    compound_frequency = models.CharField(
-        max_length=20, choices=COMPOUND_FREQUENCY_CHOICES, default='weekly',
-    )
-    risk_level = models.CharField(max_length=10, choices=RISK_LEVEL_CHOICES, default='medium')
-    blockchain_addresses = models.JSONField(default=dict, blank=True)
-    last_compound = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = 'investments_quantum_ai_bot'
-
-    def __str__(self):
-        return f"Quantum AI Bot: {self.bot_name}"
+# Bot models (GridBot, MartingaleBot, WebhookAlertBot) belong in apps.bots
+# where the real trading execution lives. This app only keeps display/portfolio models.
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Order
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class Order(TimeStampedModel):
     """Trade order execution and history."""
-    SIDE_CHOICES = [('buy', 'Buy'), ('sell', 'Sell')]
+
+    SIDE_CHOICES = [("buy", "Buy"), ("sell", "Sell")]
     STATUS_CHOICES = [
-        ('pending', 'Pending'),
-        ('filled', 'Filled'),
-        ('partially_filled', 'Partially Filled'),
-        ('cancelled', 'Cancelled'),
-        ('failed', 'Failed'),
+        ("pending", "Pending"),
+        ("filled", "Filled"),
+        ("partially_filled", "Partially Filled"),
+        ("cancelled", "Cancelled"),
+        ("failed", "Failed"),
     ]
     ORDER_TYPE_CHOICES = [
-        ('market', 'Market'),
-        ('limit', 'Limit'),
-        ('stop_limit', 'Stop Limit'),
+        ("market", "Market"),
+        ("limit", "Limit"),
+        ("stop_limit", "Stop Limit"),
     ]
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
-        related_name='investment_orders',
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="investment_orders",
     )
-    bot = models.ForeignKey(
-        BotBase, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='orders',
+    exchange = models.ForeignKey(
+        Exchange, on_delete=models.CASCADE, related_name="investment_orders"
     )
-    exchange = models.ForeignKey(Exchange, on_delete=models.CASCADE, related_name='investment_orders')
-    trading_pair = models.ForeignKey(TradingPair, on_delete=models.CASCADE, related_name='investment_orders')
+    trading_pair = models.ForeignKey(
+        TradingPair, on_delete=models.CASCADE, related_name="investment_orders"
+    )
 
     order_type = models.CharField(max_length=20, choices=ORDER_TYPE_CHOICES)
     side = models.CharField(max_length=5, choices=SIDE_CHOICES)
 
     quantity = models.DecimalField(max_digits=20, decimal_places=8)
-    price = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-    filled_quantity = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-    average_price = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
+    price = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal("0"))
+    filled_quantity = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal("0"))
+    average_price = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal("0"))
 
     take_profit = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     stop_loss = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
 
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
-    profit_loss = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-    description = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    profit_loss = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal("0"))
+    description = models.TextField(blank=True, default="")
 
     executed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        db_table = 'investments_order'
-        ordering = ['-created_at']
+        db_table = "investments_order"
+        ordering = ["-created_at"]
 
     def __str__(self):
         return f"{self.side} {self.quantity} @ {self.price}"
@@ -304,32 +200,41 @@ class Order(TimeStampedModel):
 # Position
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class Position(TimeStampedModel):
     """Represents an open trading position."""
-    SIDE_CHOICES = [('long', 'Long'), ('short', 'Short')]
+
+    SIDE_CHOICES = [("long", "Long"), ("short", "Short")]
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
-        related_name='investment_positions',
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="investment_positions",
     )
-    exchange = models.ForeignKey(Exchange, on_delete=models.CASCADE, related_name='investment_positions')
-    trading_pair = models.ForeignKey(TradingPair, on_delete=models.CASCADE, related_name='investment_positions')
-    bot = models.ForeignKey(BotBase, on_delete=models.SET_NULL, null=True, blank=True, related_name='positions')
+    exchange = models.ForeignKey(
+        Exchange, on_delete=models.CASCADE, related_name="investment_positions"
+    )
+    trading_pair = models.ForeignKey(
+        TradingPair, on_delete=models.CASCADE, related_name="investment_positions"
+    )
 
-    side = models.CharField(max_length=5, choices=SIDE_CHOICES, default='long')
+    side = models.CharField(max_length=5, choices=SIDE_CHOICES, default="long")
     entry_price = models.DecimalField(max_digits=20, decimal_places=8)
-    current_price = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
+    current_price = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal("0"))
     quantity = models.DecimalField(max_digits=20, decimal_places=8)
     leverage = models.PositiveIntegerField(default=1)
 
-    unrealized_pnl = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-    unrealized_pnl_percent = models.DecimalField(max_digits=10, decimal_places=4, default=Decimal('0'))
+    unrealized_pnl = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal("0"))
+    unrealized_pnl_percent = models.DecimalField(
+        max_digits=10, decimal_places=4, default=Decimal("0")
+    )
     liquidation_price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
 
     opened_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'investments_position'
+        db_table = "investments_position"
+        ordering = ["-created_at"]
 
     def __str__(self):
         return f"{self.side} {self.quantity} @ {self.entry_price}"
@@ -339,25 +244,35 @@ class Position(TimeStampedModel):
 # TechnicalIndicator
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TechnicalIndicator(TimeStampedModel):
     """Stores technical indicator data received from webhooks."""
+
     INDICATOR_CHOICES = [
-        ('EMA', 'Exponential Moving Average'),
-        ('RSI', 'Relative Strength Index'),
-        ('MACD', 'MACD'),
-        ('BB', 'Bollinger Bands'),
+        ("EMA", "Exponential Moving Average"),
+        ("RSI", "Relative Strength Index"),
+        ("MACD", "MACD"),
+        ("BB", "Bollinger Bands"),
     ]
 
     indicator_type = models.CharField(max_length=10, choices=INDICATOR_CHOICES)
-    trading_pair = models.ForeignKey(TradingPair, on_delete=models.CASCADE, related_name='investment_indicators')
-    exchange = models.ForeignKey(Exchange, on_delete=models.CASCADE, related_name='investment_indicators')
+    trading_pair = models.ForeignKey(
+        TradingPair, on_delete=models.CASCADE, related_name="investment_indicators"
+    )
+    exchange = models.ForeignKey(
+        Exchange, on_delete=models.CASCADE, related_name="investment_indicators"
+    )
     values = models.JSONField(default=dict)
     color = models.CharField(max_length=20, blank=True, null=True)
     prev_color = models.CharField(max_length=20, blank=True, null=True)
     triggered_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        db_table = 'investments_technical_indicator'
+        db_table = "investments_technical_indicator"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["trading_pair", "indicator_type", "-created_at"]),
+        ]
 
     def __str__(self):
         return f"{self.indicator_type} — {self.trading_pair}"
@@ -367,21 +282,26 @@ class TechnicalIndicator(TimeStampedModel):
 # UserBalance
 # ──────────────────────────────────────────────────────────────────────────────
 
-class UserBalance(TimeStampedModel):
+
+class InvestmentBalance(TimeStampedModel):
     """Tracks user wallet balances per exchange and currency."""
+
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
-        related_name='investment_balances',
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="investment_balances",
     )
-    exchange = models.ForeignKey(Exchange, on_delete=models.CASCADE, related_name='investment_balances')
-    currency = models.CharField(max_length=10, default='USDT')
-    available = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-    locked = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
-    total = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'))
+    exchange = models.ForeignKey(
+        Exchange, on_delete=models.CASCADE, related_name="investment_balances"
+    )
+    currency = models.CharField(max_length=10, default="USDT")
+    available = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal("0"))
+    locked = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal("0"))
+    total = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal("0"))
 
     class Meta:
-        db_table = 'investments_user_balance'
-        unique_together = ['user', 'exchange', 'currency']
+        db_table = "investments_user_balance"
+        unique_together = ["user", "exchange", "currency"]
 
     def __str__(self):
         return f"{self.user} — {self.currency}: {self.total}"

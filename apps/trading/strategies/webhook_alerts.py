@@ -6,11 +6,13 @@ like TradingView, custom scripts, or other trading platforms.
 
 PURE PYTHON - NO DJANGO IMPORTS
 """
+
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
+
 from .base import BaseStrategy, Signal
 
-logger = logging.getLogger('trading.strategies.webhook')
+logger = logging.getLogger("trading.strategies.webhook")
 
 
 class WebhookAlertStrategy(BaseStrategy):
@@ -31,20 +33,20 @@ class WebhookAlertStrategy(BaseStrategy):
 
     @property
     def name(self) -> str:
-        return 'Webhook Alert'
+        return "Webhook Alert"
 
     @property
     def required_parameters(self) -> List[str]:
-        return ['symbol']
+        return ["symbol"]
 
     def __init__(self, parameters: Dict[str, Any] = None):
         defaults = {
-            'default_amount': 0.01,
-            'use_percentage': False,
-            'percentage': 10,
-            'require_secret': True,
-            'stop_loss_percentage': 2,
-            'take_profit_percentage': 5,
+            "default_amount": 0.01,
+            "use_percentage": False,
+            "percentage": 10,
+            "require_secret": True,
+            "stop_loss_percentage": 2,
+            "take_profit_percentage": 5,
         }
         merged_params = {**defaults, **(parameters or {})}
         super().__init__(merged_params)
@@ -53,7 +55,7 @@ class WebhookAlertStrategy(BaseStrategy):
         self,
         market_data: Dict[str, Any],
         account_info: Dict[str, Any],
-        current_position: Optional[Dict[str, Any]] = None
+        current_position: Optional[Dict[str, Any]] = None,
     ) -> Optional[Signal]:
         """
         Execute webhook strategy.
@@ -63,7 +65,7 @@ class WebhookAlertStrategy(BaseStrategy):
 
         This implementation checks for pending webhooks in market_data.
         """
-        webhook_data = market_data.get('webhook_signal')
+        webhook_data = market_data.get("webhook_signal")
         if not webhook_data:
             return None
 
@@ -73,7 +75,7 @@ class WebhookAlertStrategy(BaseStrategy):
         self,
         webhook_data: Dict[str, Any],
         market_data: Dict[str, Any],
-        account_info: Dict[str, Any]
+        account_info: Dict[str, Any],
     ) -> Optional[Signal]:
         """
         Process an incoming webhook signal.
@@ -100,27 +102,27 @@ class WebhookAlertStrategy(BaseStrategy):
             Signal if valid, None if invalid
         """
         # Validate secret if required
-        if self.parameters.get('require_secret'):
-            provided_secret = webhook_data.get('secret', '')
-            expected_secret = self.parameters.get('secret', '')
+        if self.parameters.get("require_secret"):
+            provided_secret = webhook_data.get("secret", "")
+            expected_secret = self.parameters.get("secret", "")
             if provided_secret != expected_secret:
                 logger.warning("Webhook rejected: Invalid secret")
                 return None
 
         # Extract action (required)
-        action = webhook_data.get('action', '').lower()
-        if action not in ['buy', 'sell', 'close', 'long', 'short']:
+        action = webhook_data.get("action", "").lower()
+        if action not in ["buy", "sell", "close", "long", "short"]:
             logger.warning(f"Webhook rejected: Invalid action '{action}'")
             return None
 
         # Normalize action
-        if action == 'long':
-            action = 'buy'
-        elif action == 'short':
-            action = 'sell'
+        if action == "long":
+            action = "buy"
+        elif action == "short":
+            action = "sell"
 
         # Get symbol
-        symbol = webhook_data.get('symbol', self.parameters['symbol'])
+        symbol = webhook_data.get("symbol", self.parameters["symbol"])
 
         # Calculate amount
         amount = self._calculate_amount(webhook_data, market_data, account_info, symbol)
@@ -129,19 +131,19 @@ class WebhookAlertStrategy(BaseStrategy):
             return None
 
         # Get optional parameters
-        price = webhook_data.get('price')
-        order_type = webhook_data.get('type', 'market').lower()
-        stop_loss = webhook_data.get('stop_loss')
-        take_profit = webhook_data.get('take_profit')
-        comment = webhook_data.get('comment', 'Webhook signal')
+        price = webhook_data.get("price")
+        order_type = webhook_data.get("type", "market").lower()
+        stop_loss = webhook_data.get("stop_loss")
+        take_profit = webhook_data.get("take_profit")
+        comment = webhook_data.get("comment", "Webhook signal")
 
         # Calculate SL/TP if not provided
-        current_price = market_data.get('ticker', {}).get('last', price)
+        current_price = market_data.get("ticker", {}).get("last", price)
         if not stop_loss and current_price:
-            side = 'long' if action == 'buy' else 'short'
+            side = "long" if action == "buy" else "short"
             stop_loss = self.calculate_stop_loss(current_price, side)
         if not take_profit and current_price:
-            side = 'long' if action == 'buy' else 'short'
+            side = "long" if action == "buy" else "short"
             take_profit = self.calculate_take_profit(current_price, side)
 
         signal = Signal(
@@ -154,9 +156,9 @@ class WebhookAlertStrategy(BaseStrategy):
             take_profit=float(take_profit) if take_profit else None,
             reason=f"Webhook: {comment}",
             metadata={
-                'source': 'webhook',
-                'raw_data': webhook_data,
-            }
+                "source": "webhook",
+                "raw_data": webhook_data,
+            },
         )
 
         self.signals_generated += 1
@@ -170,25 +172,25 @@ class WebhookAlertStrategy(BaseStrategy):
         webhook_data: Dict[str, Any],
         market_data: Dict[str, Any],
         account_info: Dict[str, Any],
-        symbol: str
+        symbol: str,
     ) -> float:
         """Calculate position size from webhook data or parameters."""
         # If amount specified in webhook, use it
-        if 'amount' in webhook_data:
-            return float(webhook_data['amount'])
+        if "amount" in webhook_data:
+            return float(webhook_data["amount"])
 
         # If using percentage of balance
-        if self.parameters.get('use_percentage'):
-            percentage = self.parameters.get('percentage', 10) / 100
-            quote_currency = symbol.split('/')[-1] if '/' in symbol else 'USDT'
-            free_balance = account_info.get('balance', {}).get('free', {}).get(quote_currency, 0)
-            current_price = market_data.get('ticker', {}).get('last', 1)
+        if self.parameters.get("use_percentage"):
+            percentage = self.parameters.get("percentage", 10) / 100
+            quote_currency = symbol.split("/")[-1] if "/" in symbol else "USDT"
+            free_balance = account_info.get("balance", {}).get("free", {}).get(quote_currency, 0)
+            current_price = market_data.get("ticker", {}).get("last", 1)
 
             if current_price > 0:
                 return (float(free_balance) * percentage) / current_price
 
         # Default amount
-        return self.parameters.get('default_amount', 0.01)
+        return self.parameters.get("default_amount", 0.01)
 
     def validate_webhook(self, webhook_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -200,30 +202,32 @@ class WebhookAlertStrategy(BaseStrategy):
         errors = []
 
         # Check secret
-        if self.parameters.get('require_secret'):
-            if webhook_data.get('secret') != self.parameters.get('secret'):
+        if self.parameters.get("require_secret"):
+            if webhook_data.get("secret") != self.parameters.get("secret"):
                 errors.append("Invalid or missing secret")
 
         # Check action
-        action = webhook_data.get('action', '').lower()
-        if action not in ['buy', 'sell', 'close', 'long', 'short']:
+        action = webhook_data.get("action", "").lower()
+        if action not in ["buy", "sell", "close", "long", "short"]:
             errors.append(f"Invalid action: {action}")
 
         # Check symbol if provided
-        symbol = webhook_data.get('symbol')
-        if symbol and '/' not in symbol:
+        symbol = webhook_data.get("symbol")
+        if symbol and "/" not in symbol:
             errors.append(f"Invalid symbol format: {symbol}")
 
         return {
-            'valid': len(errors) == 0,
-            'errors': errors,
+            "valid": len(errors) == 0,
+            "errors": errors,
         }
 
     def get_status(self) -> Dict[str, Any]:
         """Get webhook strategy status."""
         status = super().get_status()
-        status.update({
-            'require_secret': self.parameters.get('require_secret', True),
-            'use_percentage': self.parameters.get('use_percentage', False),
-        })
+        status.update(
+            {
+                "require_secret": self.parameters.get("require_secret", True),
+                "use_percentage": self.parameters.get("use_percentage", False),
+            }
+        )
         return status

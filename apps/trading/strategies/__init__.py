@@ -5,18 +5,19 @@ This module provides trading strategies that are completely exchange-agnostic.
 Strategies receive market data and account info, return signals.
 They never directly call exchange APIs.
 """
+
 from .base import BaseStrategy
-from .quantum_ai import QuantumAIStrategy
 from .grid_trading import GridTradingStrategy
 from .martingale import MartingaleStrategy
+from .quantum_ai import QuantumAIStrategy
 from .webhook_alerts import WebhookAlertStrategy
 
 __all__ = [
-    'BaseStrategy',
-    'QuantumAIStrategy',
-    'GridTradingStrategy',
-    'MartingaleStrategy',
-    'WebhookAlertStrategy',
+    "BaseStrategy",
+    "QuantumAIStrategy",
+    "GridTradingStrategy",
+    "MartingaleStrategy",
+    "WebhookAlertStrategy",
 ]
 
 
@@ -35,10 +36,10 @@ def get_strategy(strategy_name: str, parameters: dict = None):
         ValueError: If strategy is not supported
     """
     strategies = {
-        'quantum_ai': QuantumAIStrategy,
-        'grid': GridTradingStrategy,
-        'martingale': MartingaleStrategy,
-        'webhook': WebhookAlertStrategy,
+        "quantum_ai": QuantumAIStrategy,
+        "grid": GridTradingStrategy,
+        "martingale": MartingaleStrategy,
+        "webhook": WebhookAlertStrategy,
     }
 
     strategy_class = strategies.get(strategy_name.lower())

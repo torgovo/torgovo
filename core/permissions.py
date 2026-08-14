@@ -1,8 +1,8 @@
 """
 Custom permissions for Torgovo Crypto Trading Platform
 """
+
 from rest_framework import permissions
-from django.conf import settings
 
 
 class IsOwnerOrReadOnly(permissions.BasePermission):
@@ -31,7 +31,7 @@ class IsOwnerOrAdmin(permissions.BasePermission):
             return True
 
         # Owner can access their own objects
-        return hasattr(obj, 'user') and obj.user == request.user
+        return hasattr(obj, "user") and obj.user == request.user
 
 
 class IsAdminOrReadOnly(permissions.BasePermission):
@@ -82,12 +82,7 @@ class HasValidSubscription(permissions.BasePermission):
         if request.user.is_staff or request.user.is_superuser:
             return True
 
-        # Check user's subscription status
-        user_profile = getattr(request.user, 'profile', None)
-        if user_profile:
-            return user_profile.has_active_subscription()
-
-        return False
+        return request.user.has_active_subscription()
 
 
 class CanCreateBots(permissions.BasePermission):
@@ -96,7 +91,7 @@ class CanCreateBots(permissions.BasePermission):
     """
 
     def has_permission(self, request, view):
-        if request.method != 'POST':
+        if request.method != "POST":
             return True
 
         if not request.user.is_authenticated:
@@ -106,11 +101,7 @@ class CanCreateBots(permissions.BasePermission):
         if request.user.is_staff or request.user.is_superuser:
             return True
 
-        user_profile = getattr(request.user, 'profile', None)
-        if user_profile:
-            return user_profile.can_create_more_bots()
-
-        return False
+        return request.user.can_create_more_bots()
 
 
 class HasExchangeCredentials(permissions.BasePermission):
@@ -127,15 +118,14 @@ class HasExchangeCredentials(permissions.BasePermission):
             return True
 
         # For POST/PUT/DELETE requests, check exchange credentials
-        exchange_name = request.data.get('exchange_name')
+        exchange_name = request.data.get("exchange_name")
         if not exchange_name:
             return True  # Will be validated in serializer
 
         from apps.exchanges.models import ExchangeCredentials
+
         return ExchangeCredentials.objects.filter(
-            user=request.user,
-            exchange_name=exchange_name,
-            is_active=True
+            user=request.user, exchange_name=exchange_name, is_active=True
         ).exists()
 
 
@@ -150,7 +140,7 @@ class IsQuantumAIDepositOwner(permissions.BasePermission):
             return True
 
         # User can access their own deposits
-        return hasattr(obj, 'user') and obj.user == request.user
+        return hasattr(obj, "user") and obj.user == request.user
 
 
 class CanApproveDeposits(permissions.BasePermission):
@@ -159,23 +149,17 @@ class CanApproveDeposits(permissions.BasePermission):
     """
 
     def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated and
-            (request.user.is_staff or request.user.is_superuser)
+        return request.user.is_authenticated and (
+            request.user.is_staff or request.user.is_superuser
         )
 
 
 class IsWebhookOwner(permissions.BasePermission):
     """
     Custom permission for webhook access.
-    Webhook endpoints are publicly accessible but only process valid secrets.
+    Requires authentication for all methods.
+    Webhook secret validation is handled separately in view logic.
     """
 
     def has_permission(self, request, view):
-        # POST requests for webhook processing don't require authentication
-        # but will be validated via secret key
-        if request.method == 'POST':
-            return True
-
-        # GET requests require authentication (for webhook management)
         return request.user.is_authenticated

@@ -3,183 +3,22 @@ Authentication models for Torgovo Crypto Trading Platform
 Compatible with users.CustomUser as AUTH_USER_MODEL
 """
 
-from django.db import models
 from django.conf import settings
+from django.db import models
 from django.utils import timezone
-from core.models import TimeStampedModel, SoftDeleteModel
-from core.utils import encrypt_api_key, decrypt_api_key
 
-# NOTE: CustomUser model is defined in apps.users.models
-# This file contains authentication-related models only
-
-
-class UserProfile(TimeStampedModel):
-    """
-    Extended user profile with trading preferences.
-    """
-    SUBSCRIPTION_PLANS = [
-        ('free', 'Free'),
-        ('basic', 'Basic'),
-        ('premium', 'Premium'),
-        ('enterprise', 'Enterprise'),
-    ]
-
-    user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,  # FIXED: Restored proper reference
-        on_delete=models.CASCADE,
-        related_name='profile'
-    )
-    subscription_plan = models.CharField(
-        max_length=20,
-        choices=SUBSCRIPTION_PLANS,
-        default='free'
-    )
-    max_bots_allowed = models.PositiveIntegerField(default=3)
-    timezone = models.CharField(max_length=50, default='UTC')
-    trading_preferences = models.JSONField(default=dict)
-    api_keys_encrypted = models.JSONField(default=dict)
-    demo_trading_enabled = models.BooleanField(default=True)
-    email_notifications = models.BooleanField(default=True)
-    sms_notifications = models.BooleanField(default=False)
-    push_notifications = models.BooleanField(default=True)
-
-    # Subscription management
-    subscription_start_date = models.DateTimeField(null=True, blank=True)
-    subscription_end_date = models.DateTimeField(null=True, blank=True)
-    is_subscription_active = models.BooleanField(default=False)
-
-    # Usage tracking
-    total_trades_executed = models.PositiveIntegerField(default=0)
-    total_volume_traded = models.DecimalField(
-        max_digits=20,
-        decimal_places=8,
-        default=0
-    )
-
-    # Referral system
-    referral_code = models.CharField(max_length=20, unique=True, blank=True)
-    referred_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,  # FIXED: Restored proper reference
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='referrals'
-    )
-
-    class Meta:
-        db_table = 'auth_user_profiles'
-        indexes = [
-            models.Index(fields=['user']),
-            models.Index(fields=['subscription_plan']),
-            models.Index(fields=['is_subscription_active']),
-        ]
-
-    def __str__(self):
-        return f"{self.user.email} - {self.subscription_plan}"
-
-    def save(self, *args, **kwargs):
-        """Generate referral code if not exists."""
-        if not self.referral_code:
-            self.referral_code = self.generate_referral_code()
-
-        # Update max_bots_allowed based on subscription plan
-        self.update_bot_limits()
-
-        super().save(*args, **kwargs)
-
-    def generate_referral_code(self):
-        """Generate unique referral code.
-
-        SECURITY (HIGH-5): Use secrets module (CSPRNG) instead of random.choices()
-        (Mersenne Twister). Referral codes have financial value (unlock bonuses,
-        commissions) and must not be predictable.
-        """
-        import secrets
-        import string
-
-        alphabet = string.ascii_uppercase + string.digits
-        while True:
-            code = ''.join(secrets.choice(alphabet) for _ in range(8))
-            if not UserProfile.objects.filter(referral_code=code).exists():
-                return code
-
-    def update_bot_limits(self):
-        """Update bot limits based on subscription plan."""
-        limits = {
-            'free': 3,
-            'basic': 5,
-            'premium': 15,
-            'enterprise': 50,
-        }
-        self.max_bots_allowed = limits.get(self.subscription_plan, 3)
-
-    def has_active_subscription(self):
-        """Check if user has active subscription."""
-        if self.subscription_plan == 'free':
-            return False
-
-        if not self.is_subscription_active:
-            return False
-
-        if self.subscription_end_date and self.subscription_end_date < timezone.now():
-            return False
-
-        return True
-
-    def can_create_more_bots(self):
-        """Check if user can create more bots."""
-        from django.apps import apps
-
-        WebhookAlert = apps.get_model('bots', 'SignalBot')
-        GridBot = apps.get_model('bots', 'GridBot')
-        MartingaleBot = apps.get_model('bots', 'MartingaleBot')
-        QuantumAIBot = apps.get_model('bots', 'QuantumAIBot')
-
-        current_bot_count = (
-            WebhookAlert.objects.filter(user=self.user, is_deleted=False).count() +
-            GridBot.objects.filter(user=self.user, is_deleted=False).count() +
-            MartingaleBot.objects.filter(user=self.user, is_deleted=False).count() +
-            QuantumAIBot.objects.filter(user=self.user, is_deleted=False).count()
-        )
-
-        return current_bot_count < self.max_bots_allowed
-
-    def get_exchange_credential(self, exchange_name):
-        """Get decrypted exchange credentials."""
-        from django.apps import apps
-        ExchangeCredentials = apps.get_model('exchanges', 'ExchangeCredentials')
-
-        try:
-            cred = ExchangeCredentials.objects.get(
-                user=self.user,
-                exchange_name=exchange_name,
-                is_active=True,
-                is_deleted=False
-            )
-
-            # Decrypt credentials
-            api_key = decrypt_api_key(cred.api_key)
-            secret_key = decrypt_api_key(cred.secret_key)
-            passphrase = decrypt_api_key(cred.passphrase) if cred.passphrase else None
-
-            return {
-                'api_key': api_key,
-                'secret_key': secret_key,
-                'passphrase': passphrase,
-                'is_testnet': cred.is_testnet,
-            }
-        except ExchangeCredentials.DoesNotExist:
-            return None
+from core.models import TimeStampedModel
 
 
 class EmailVerification(TimeStampedModel):
     """
     Email verification tokens.
     """
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,  # FIXED: Restored proper reference
         on_delete=models.CASCADE,
-        related_name='email_verifications'
+        related_name="email_verifications",
     )
     token = models.CharField(max_length=64, unique=True)
     is_verified = models.BooleanField(default=False)
@@ -187,10 +26,10 @@ class EmailVerification(TimeStampedModel):
     expires_at = models.DateTimeField()
 
     class Meta:
-        db_table = 'auth_email_verifications'
+        db_table = "auth_email_verifications"
         indexes = [
-            models.Index(fields=['user', 'token']),
-            models.Index(fields=['expires_at']),
+            models.Index(fields=["user", "token"]),
+            models.Index(fields=["expires_at"]),
         ]
 
     def __str__(self):
@@ -214,10 +53,11 @@ class PhoneVerification(TimeStampedModel):
     """
     Phone verification codes.
     """
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,  # FIXED: Restored proper reference
         on_delete=models.CASCADE,
-        related_name='phone_verifications'
+        related_name="phone_verifications",
     )
     code = models.CharField(max_length=6)
     phone_number = models.CharField(max_length=20)
@@ -228,10 +68,10 @@ class PhoneVerification(TimeStampedModel):
     expires_at = models.DateTimeField()
 
     class Meta:
-        db_table = 'auth_phone_verifications'
+        db_table = "auth_phone_verifications"
         indexes = [
-            models.Index(fields=['user', 'phone_number']),
-            models.Index(fields=['expires_at']),
+            models.Index(fields=["user", "phone_number"]),
+            models.Index(fields=["expires_at"]),
         ]
 
     def __str__(self):
@@ -265,10 +105,11 @@ class PasswordResetToken(TimeStampedModel):
     """
     Password reset tokens.
     """
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,  # FIXED: Restored proper reference
         on_delete=models.CASCADE,
-        related_name='password_reset_tokens'
+        related_name="password_reset_tokens",
     )
     token = models.CharField(max_length=64, unique=True)
     is_used = models.BooleanField(default=False)
@@ -276,10 +117,10 @@ class PasswordResetToken(TimeStampedModel):
     expires_at = models.DateTimeField()
 
     class Meta:
-        db_table = 'auth_password_reset_tokens'
+        db_table = "auth_password_reset_tokens"
         indexes = [
-            models.Index(fields=['user', 'token']),
-            models.Index(fields=['expires_at']),
+            models.Index(fields=["user", "token"]),
+            models.Index(fields=["expires_at"]),
         ]
 
     def __str__(self):
@@ -300,6 +141,7 @@ class LoginAttempt(TimeStampedModel):
     """
     Track login attempts for security monitoring.
     """
+
     username = models.CharField(max_length=254)
     ip_address = models.GenericIPAddressField()
     user_agent = models.TextField(blank=True)
@@ -307,12 +149,13 @@ class LoginAttempt(TimeStampedModel):
     failure_reason = models.CharField(max_length=100, blank=True)
 
     class Meta:
-        db_table = 'auth_login_attempts'
+        db_table = "auth_login_attempts"
         indexes = [
-            models.Index(fields=['username', 'created_at']),
-            models.Index(fields=['ip_address', 'created_at']),
-            models.Index(fields=['was_successful']),
+            models.Index(fields=["username", "created_at"]),
+            models.Index(fields=["ip_address", "created_at"]),
+            models.Index(fields=["was_successful"]),
         ]
 
     def __str__(self):
-        return f"{self.username} - {self.ip_address} - {'Success' if self.was_successful else 'Failed'}"
+        outcome = "Success" if self.was_successful else "Failed"
+        return f"{self.username} - {self.ip_address} - {outcome}"

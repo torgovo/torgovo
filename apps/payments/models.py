@@ -1,16 +1,18 @@
 """
 Payment and deposit models for Quantum AI system
 """
+
 import logging
 import uuid
-import pytz
 from decimal import Decimal
-from django.db import models
+
 from django.conf import settings
-from django.core.validators import MinValueValidator, MaxValueValidator
+from django.core.validators import MinValueValidator
+from django.db import models
 from django.utils import timezone
-from core.models import TimeStampedModel, SoftDeleteModel
+
 from apps.exchanges.models import ExchangeCredentials
+from core.models import SoftDeleteModel, TimeStampedModel
 
 User = settings.AUTH_USER_MODEL
 
@@ -21,17 +23,14 @@ class SubscriptionPlan(TimeStampedModel):
     """
     Subscription plans for different service tiers.
     """
+
     name = models.CharField(max_length=50, unique=True)
     slug = models.SlugField(unique=True)
     price_monthly = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        validators=[MinValueValidator(0)]
+        max_digits=10, decimal_places=2, validators=[MinValueValidator(0)]
     )
     price_yearly = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        validators=[MinValueValidator(0)]
+        max_digits=10, decimal_places=2, validators=[MinValueValidator(0)]
     )
     max_bots_allowed = models.PositiveIntegerField()
     max_webhooks_allowed = models.PositiveIntegerField(default=10)
@@ -41,10 +40,10 @@ class SubscriptionPlan(TimeStampedModel):
     trial_days = models.PositiveIntegerField(default=0)
 
     class Meta:
-        db_table = 'payments_subscription_plans'
+        db_table = "payments_subscription_plans"
         indexes = [
-            models.Index(fields=['slug']),
-            models.Index(fields=['is_active']),
+            models.Index(fields=["slug"]),
+            models.Index(fields=["is_active"]),
         ]
 
     def __str__(self):
@@ -56,12 +55,12 @@ class SubscriptionPlan(TimeStampedModel):
         if isinstance(self.features, dict):
             return self.features
         return {
-            'max_bots': self.max_bots_allowed,
-            'webhook_alerts': self.max_webhooks_allowed,
-            'include_quantum_ai': False,
-            'priority_support': False,
-            'advanced_analytics': False,
-            'max_positions': 50,
+            "max_bots": self.max_bots_allowed,
+            "webhook_alerts": self.max_webhooks_allowed,
+            "include_quantum_ai": False,
+            "priority_support": False,
+            "advanced_analytics": False,
+            "max_positions": 50,
         }
 
 
@@ -69,37 +68,34 @@ class QuantumAIDeposit(SoftDeleteModel):
     """
     Enhanced deposit model for Quantum AI bot funding.
     """
+
     STATUS_CHOICES = [
-        ('pending', 'Pending Verification'),
-        ('processing', 'Processing'),
-        ('approved', 'Approved'),
-        ('rejected', 'Rejected'),
-        ('expired', 'Expired'),
+        ("pending", "Pending Verification"),
+        ("processing", "Processing"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+        ("expired", "Expired"),
     ]
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='payments_quantum_deposits'
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="payments_quantum_deposits"
     )
     quantum_bot = models.ForeignKey(
-        'bots.QuantumAIBot',
+        "bots.QuantumAIBot",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='quantum_deposits'
+        related_name="quantum_deposits",
     )
     fund = models.ForeignKey(
-        'bots.QuantumAIFund',
+        "bots.QuantumAIFund",
         on_delete=models.CASCADE,
         null=True,
         blank=True,
-        related_name='payment_deposits'
+        related_name="payment_deposits",
     )
     amount = models.DecimalField(
-        max_digits=20,
-        decimal_places=8,
-        validators=[MinValueValidator(Decimal('0.00000001'))]
+        max_digits=20, decimal_places=8, validators=[MinValueValidator(Decimal("0.00000001"))]
     )
     currency = models.CharField(max_length=10)
     blockchain = models.CharField(max_length=20)
@@ -111,18 +107,16 @@ class QuantumAIDeposit(SoftDeleteModel):
 
     # File attachments
     transaction_screenshot = models.ImageField(
-        upload_to='quantum_deposits/screenshots/%Y/%m/%d/',
-        blank=True,
-        null=True
+        upload_to="quantum_deposits/screenshots/%Y/%m/%d/", blank=True, null=True
     )
     transaction_proof = models.FileField(
-        upload_to='quantum_deposits/proofs/%Y/%m/%d/',
-        blank=True,
-        null=True
+        upload_to="quantum_deposits/proofs/%Y/%m/%d/", blank=True, null=True
     )
 
     # Status and verification
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True
+    )
     admin_notes = models.TextField(blank=True)
 
     # Verification tracking
@@ -131,17 +125,17 @@ class QuantumAIDeposit(SoftDeleteModel):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='verified_deposits'
+        related_name="verified_deposits",
     )
     verified_at = models.DateTimeField(null=True, blank=True)
     verification_method = models.CharField(
         max_length=20,
         choices=[
-            ('manual', 'Manual Review'),
-            ('automatic', 'Automatic'),
-            ('blockchain', 'Blockchain API'),
+            ("manual", "Manual Review"),
+            ("automatic", "Automatic"),
+            ("blockchain", "Blockchain API"),
         ],
-        default='manual'
+        default="manual",
     )
 
     # Amount after conversion (if currency != USDT)
@@ -153,13 +147,13 @@ class QuantumAIDeposit(SoftDeleteModel):
     flagged_for_review = models.BooleanField(default=False)
 
     class Meta:
-        db_table = 'payments_quantum_deposits'
+        db_table = "payments_quantum_deposits"
         indexes = [
-            models.Index(fields=['user', 'status']),
-            models.Index(fields=['fund', 'status']),
-            models.Index(fields=['transaction_hash']),
-            models.Index(fields=['status', 'created_at']),
-            models.Index(fields=['flagged_for_review']),
+            models.Index(fields=["user", "status"]),
+            models.Index(fields=["fund", "status"]),
+            models.Index(fields=["transaction_hash"]),
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["flagged_for_review"]),
         ]
 
     def __str__(self):
@@ -169,6 +163,7 @@ class QuantumAIDeposit(SoftDeleteModel):
     def is_expired(self):
         """Check if deposit has expired (48 hours)."""
         from django.utils import timezone
+
         expiry_time = self.created_at + timezone.timedelta(hours=48)
         return timezone.now() > expiry_time
 
@@ -176,7 +171,7 @@ class QuantumAIDeposit(SoftDeleteModel):
         """Approve the deposit."""
         from django.utils import timezone
 
-        self.status = 'approved'
+        self.status = "approved"
         self.verified_by = verified_by_user
         self.verified_at = timezone.now()
         self.admin_notes = notes
@@ -184,7 +179,7 @@ class QuantumAIDeposit(SoftDeleteModel):
 
         # Update quantum bot total deposited
         try:
-            if hasattr(self, 'quantum_bot'):
+            if hasattr(self, "quantum_bot"):
                 self.quantum_bot.total_deposited += self.usdt_amount or self.amount
                 self.quantum_bot.save()
         except Exception as e:
@@ -194,20 +189,21 @@ class QuantumAIDeposit(SoftDeleteModel):
 
         # Log the approval
         from core.models import AuditLog
+
         AuditLog.objects.create(
             user=verified_by_user,
-            action='deposit_approved',
-            resource_type='QuantumAIDeposit',
+            action="deposit_approved",
+            resource_type="QuantumAIDeposit",
             resource_id=str(self.id),
-            new_values={'status': 'approved', 'usdt_amount': str(self.usdt_amount)},
-            description=f"Approved deposit of {self.amount} {self.currency} from {self.user.email}"
+            new_values={"status": "approved", "usdt_amount": str(self.usdt_amount)},
+            description=f"Approved deposit of {self.amount} {self.currency} from {self.user.email}",
         )
 
     def reject(self, verified_by_user, reason=""):
         """Reject the deposit."""
         from django.utils import timezone
 
-        self.status = 'rejected'
+        self.status = "rejected"
         self.verified_by = verified_by_user
         self.verified_at = timezone.now()
         self.admin_notes = reason
@@ -215,13 +211,17 @@ class QuantumAIDeposit(SoftDeleteModel):
 
         # Log the rejection
         from core.models import AuditLog
+
         AuditLog.objects.create(
             user=verified_by_user,
-            action='deposit_rejected',
-            resource_type='QuantumAIDeposit',
+            action="deposit_rejected",
+            resource_type="QuantumAIDeposit",
             resource_id=str(self.id),
-            new_values={'status': 'rejected', 'reason': reason},
-            description=f"Rejected deposit of {self.amount} {self.currency} from {self.user.email}: {reason}"
+            new_values={"status": "rejected", "reason": reason},
+            description=(
+                f"Rejected deposit of {self.amount} {self.currency} "
+                f"from {self.user.email}: {reason}"
+            ),
         )
 
 
@@ -229,16 +229,17 @@ class BlockchainAddress(TimeStampedModel):
     """
     Blockchain addresses for receiving cryptocurrency deposits.
     """
+
     COIN_TYPES = [
-        ('USDT', 'Tether'),
-        ('USDC', 'USD Coin'),
-        ('BTC', 'Bitcoin'),
-        ('ETH', 'Ethereum'),
-        ('BNB', 'Binance Coin'),
-        ('MATIC', 'Polygon'),
-        ('SOL', 'Solana'),
-        ('ADA', 'Cardano'),
-        ('DOT', 'Polkadot'),
+        ("USDT", "Tether"),
+        ("USDC", "USD Coin"),
+        ("BTC", "Bitcoin"),
+        ("ETH", "Ethereum"),
+        ("BNB", "Binance Coin"),
+        ("MATIC", "Polygon"),
+        ("SOL", "Solana"),
+        ("ADA", "Cardano"),
+        ("DOT", "Polkadot"),
     ]
 
     coin_type = models.CharField(max_length=10, choices=COIN_TYPES)
@@ -246,7 +247,9 @@ class BlockchainAddress(TimeStampedModel):
     address = models.CharField(max_length=255)
     label = models.CharField(max_length=100, blank=True)
     is_active = models.BooleanField(default=True)
-    is_hot_wallet = models.BooleanField(default=False, help_text="Hot wallet for frequent withdrawals")
+    is_hot_wallet = models.BooleanField(
+        default=False, help_text="Hot wallet for frequent withdrawals"
+    )
     balance = models.DecimalField(max_digits=20, decimal_places=8, default=0)
     last_used = models.DateTimeField(null=True, blank=True)
     usage_count = models.PositiveIntegerField(default=0)
@@ -257,12 +260,12 @@ class BlockchainAddress(TimeStampedModel):
     max_daily_limit = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
 
     class Meta:
-        db_table = 'payments_blockchain_addresses'
-        unique_together = ['coin_type', 'blockchain', 'address']
+        db_table = "payments_blockchain_addresses"
+        unique_together = ["coin_type", "blockchain", "address"]
         indexes = [
-            models.Index(fields=['coin_type', 'blockchain']),
-            models.Index(fields=['is_active']),
-            models.Index(fields=['is_hot_wallet']),
+            models.Index(fields=["coin_type", "blockchain"]),
+            models.Index(fields=["is_active"]),
+            models.Index(fields=["is_hot_wallet"]),
         ]
 
     def __str__(self):
@@ -273,29 +276,28 @@ class WithdrawalRequest(SoftDeleteModel):
     """
     Withdrawal requests for user funds.
     """
+
     STATUS_CHOICES = [
-        ('pending', 'Pending'),
-        ('processing', 'Processing'),
-        ('completed', 'Completed'),
-        ('rejected', 'Rejected'),
-        ('failed', 'Failed'),
+        ("pending", "Pending"),
+        ("processing", "Processing"),
+        ("completed", "Completed"),
+        ("rejected", "Rejected"),
+        ("failed", "Failed"),
     ]
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='withdrawal_requests'
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="withdrawal_requests"
     )
     amount = models.DecimalField(
-        max_digits=20,
-        decimal_places=8,
-        validators=[MinValueValidator(Decimal('0.00000001'))]
+        max_digits=20, decimal_places=8, validators=[MinValueValidator(Decimal("0.00000001"))]
     )
     currency = models.CharField(max_length=10)
     blockchain = models.CharField(max_length=20)
     to_address = models.CharField(max_length=255)
     transaction_hash = models.CharField(max_length=255, blank=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True
+    )
 
     # Fees and processing
     network_fee = models.DecimalField(max_digits=10, decimal_places=8, default=0)
@@ -310,7 +312,7 @@ class WithdrawalRequest(SoftDeleteModel):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='approved_withdrawals'
+        related_name="approved_withdrawals",
     )
     admin_notes = models.TextField(blank=True)
 
@@ -321,12 +323,12 @@ class WithdrawalRequest(SoftDeleteModel):
     user_agent = models.TextField(blank=True)
 
     class Meta:
-        db_table = 'payments_withdrawal_requests'
+        db_table = "payments_withdrawal_requests"
         indexes = [
-            models.Index(fields=['user', 'status']),
-            models.Index(fields=['status', 'created_at']),
-            models.Index(fields=['currency']),
-            models.Index(fields=['flagged_for_review']),
+            models.Index(fields=["user", "status"]),
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["currency"]),
+            models.Index(fields=["flagged_for_review"]),
         ]
 
     def __str__(self):
@@ -337,35 +339,34 @@ class PaymentTransaction(TimeStampedModel):
     """
     General payment transaction records.
     """
+
     TRANSACTION_TYPES = [
-        ('deposit', 'Deposit'),
-        ('withdrawal', 'Withdrawal'),
-        ('subscription', 'Subscription'),
-        ('refund', 'Refund'),
-        ('fee', 'Fee'),
+        ("deposit", "Deposit"),
+        ("withdrawal", "Withdrawal"),
+        ("subscription", "Subscription"),
+        ("refund", "Refund"),
+        ("fee", "Fee"),
     ]
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='payment_transactions'
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="payment_transactions"
     )
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
     amount = models.DecimalField(max_digits=20, decimal_places=8)
     currency = models.CharField(max_length=10)
     reference_id = models.CharField(max_length=100, blank=True)
     external_id = models.CharField(max_length=100, blank=True)
-    gateway = models.CharField(max_length=50, default='system')
-    status = models.CharField(max_length=20, default='pending')
+    gateway = models.CharField(max_length=50, default="system")
+    status = models.CharField(max_length=20, default="pending")
     description = models.TextField(blank=True)
     metadata = models.JSONField(default=dict)
 
     class Meta:
-        db_table = 'payment_transactions'
+        db_table = "payment_transactions"
         indexes = [
-            models.Index(fields=['user', 'transaction_type']),
-            models.Index(fields=['status']),
-            models.Index(fields=['created_at']),
+            models.Index(fields=["user", "transaction_type"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["created_at"]),
         ]
 
     def __str__(self):
@@ -373,44 +374,38 @@ class PaymentTransaction(TimeStampedModel):
 
 
 class ReferralPayout(SoftDeleteModel):
-    """"
+    """ "
     Referral commission payouts.
     """
+
     referrer = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='referral_payouts'
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="referral_payouts"
     )
     referred_user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='referred_payouts'
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="referred_payouts"
     )
     amount = models.DecimalField(max_digits=20, decimal_places=8)
     percentage = models.DecimalField(max_digits=5, decimal_places=2)
     source_transaction = models.ForeignKey(
-        PaymentTransaction,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True
+        PaymentTransaction, on_delete=models.SET_NULL, null=True, blank=True
     )
     status = models.CharField(
         max_length=20,
         choices=[
-            ('pending', 'Pending'),
-            ('paid', 'Paid'),
-            ('cancelled', 'Cancelled'),
+            ("pending", "Pending"),
+            ("paid", "Paid"),
+            ("cancelled", "Cancelled"),
         ],
-        default='pending'
+        default="pending",
     )
     paid_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        db_table = 'payments_referral_payouts'
+        db_table = "payments_referral_payouts"
         indexes = [
-            models.Index(fields=['referrer', 'status']),
-            models.Index(fields=['referred_user']),
-            models.Index(fields=['status']),
+            models.Index(fields=["referrer", "status"]),
+            models.Index(fields=["referred_user"]),
+            models.Index(fields=["status"]),
         ]
 
     def __str__(self):
@@ -419,24 +414,25 @@ class ReferralPayout(SoftDeleteModel):
 
 # ==================== NEW BOT SUBSCRIPTION MODELS ====================
 
+
 class BotSubscriptionPlan(SoftDeleteModel):
-    """"
+    """ "
     Subscription plans for bot types (custom, grid, martingale, quantum_ai).
     Separate from general SubscriptionPlan.
     """
 
     BOT_TYPE_CHOICES = [
-        ('custom', 'Custom Bot (TradingView)'),
-        ('grid', 'Grid Trading Bot'),
-        ('martingale', 'Martingale Bot'),
-        ('quantum_ai', 'Quantum AI Fund'),
+        ("custom", "Custom Bot (TradingView)"),
+        ("grid", "Grid Trading Bot"),
+        ("martingale", "Martingale Bot"),
+        ("quantum_ai", "Quantum AI Fund"),
     ]
 
     DURATION_CHOICES = [
-        (30, '30 Days'),
-        (90, '90 Days'),
-        (180, '180 Days'),
-        (365, '365 Days'),
+        (30, "30 Days"),
+        (90, "90 Days"),
+        (180, "180 Days"),
+        (365, "365 Days"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -453,10 +449,10 @@ class BotSubscriptionPlan(SoftDeleteModel):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'payments_bot_subscription_plans'
+        db_table = "payments_bot_subscription_plans"
         indexes = [
-            models.Index(fields=['bot_type']),
-            models.Index(fields=['is_active']),
+            models.Index(fields=["bot_type"]),
+            models.Index(fields=["is_active"]),
         ]
 
     def __str__(self):
@@ -464,37 +460,61 @@ class BotSubscriptionPlan(SoftDeleteModel):
 
 
 class BotSubscription(SoftDeleteModel):
-    """"
+    """ "
     User's subscription to a bot service.
     Two-step flow: 1) Subscribe 2) Create bot after approval
     """
 
     STATUS_CHOICES = [
-        ('pending_payment', 'Pending Payment Upload'),
-        ('pending_approval', 'Pending Admin Approval'),
-        ('active', 'Active'),
-        ('expired', 'Expired'),
-        ('cancelled', 'Cancelled'),
-        ('rejected', 'Rejected'),
+        ("pending_payment", "Pending Payment Upload"),
+        ("pending_approval", "Pending Admin Approval"),
+        ("active", "Active"),
+        ("expired", "Expired"),
+        ("cancelled", "Cancelled"),
+        ("rejected", "Rejected"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bot_subscriptions')
-    plan = models.ForeignKey(BotSubscriptionPlan, on_delete=models.CASCADE, related_name='subscriptions')
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending_payment', db_index=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="bot_subscriptions")
+    plan = models.ForeignKey(
+        BotSubscriptionPlan, on_delete=models.CASCADE, related_name="subscriptions"
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="pending_payment", db_index=True
+    )
 
     # Payment proof
-    payment_screenshot = models.ImageField(upload_to='subscriptions/payments/%Y/%m/%d/', blank=True, null=True)
-    payment_transaction_hash = models.CharField(max_length=255, blank=True, help_text="For crypto payments")
-    payment_blockchain = models.CharField(max_length=20, blank=True, help_text="e.g., BEP20, ERC20, TRC20")
+    payment_screenshot = models.ImageField(
+        upload_to="subscriptions/payments/%Y/%m/%d/", blank=True, null=True
+    )
+    payment_transaction_hash = models.CharField(
+        max_length=255, blank=True, help_text="For crypto payments"
+    )
+    payment_blockchain = models.CharField(
+        max_length=20, blank=True, help_text="e.g., BEP20, ERC20, TRC20"
+    )
 
     # Exchange selection (for custom/grid/martingale bots)
-    exchange_name = models.CharField(max_length=20, choices=ExchangeCredentials.EXCHANGE_CHOICES, blank=True)
+    exchange_name = models.CharField(
+        max_length=20, choices=ExchangeCredentials.EXCHANGE_CHOICES, blank=True
+    )
 
     # Admin approval fields
-    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_bot_subscriptions')
+    approved_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_bot_subscriptions",
+    )
     approved_at = models.DateTimeField(null=True, blank=True)
-    rejected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='rejected_bot_subscriptions')
+    rejected_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="rejected_bot_subscriptions",
+    )
     rejected_at = models.DateTimeField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True)
     notes = models.TextField(blank=True, help_text="Admin notes")
@@ -504,19 +524,21 @@ class BotSubscription(SoftDeleteModel):
     expires_at = models.DateTimeField(null=True, blank=True)
 
     # Bot-specific fields
-    webhook_secret = models.CharField(max_length=64, unique=True, blank=True, null=True, help_text="For custom bots")
+    webhook_secret = models.CharField(
+        max_length=64, unique=True, blank=True, null=True, help_text="For custom bots"
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = 'payments_bot_subscriptions'
-        unique_together = ['user', 'plan']
+        db_table = "payments_bot_subscriptions"
+        unique_together = ["user", "plan"]
         indexes = [
-            models.Index(fields=['user', 'status']),
-            models.Index(fields=['status', 'created_at']),
-            models.Index(fields=['approved_at']),
-            models.Index(fields=['expires_at']),
+            models.Index(fields=["user", "status"]),
+            models.Index(fields=["status", "created_at"]),
+            models.Index(fields=["approved_at"]),
+            models.Index(fields=["expires_at"]),
         ]
 
     def __str__(self):
@@ -524,10 +546,17 @@ class BotSubscription(SoftDeleteModel):
 
     def approve(self, approved_by, notes=""):
         """Approve the subscription (manual admin approval)."""
-        self.status = 'active'
+        self.status = "active"
         self.approved_by = approved_by
         self.approved_at = timezone.now()
         self.notes = notes
+        self.save()
+
+    def reject(self, admin_user, reason):
+        self.status = "rejected"
+        self.rejection_reason = reason
+        self.rejected_by = admin_user
+        self.rejected_at = timezone.now()
         self.save()
 
     @property
@@ -536,3 +565,17 @@ class BotSubscription(SoftDeleteModel):
         if not self.expires_at:
             return False
         return timezone.now() > self.expires_at
+
+    def get_webhook_json_template(self):
+        """Return TradingView-compatible webhook JSON template."""
+        return {
+            "subscription_id": str(self.id),
+            "secret": self.webhook_secret or "",
+            "Pair": "{{syminfo.basecurrency}}/{{syminfo.currency}}",
+            "position_size": "{{strategy.position_size}}",
+            "exchange": self.exchange_name or "binance",
+            "timestamp": "{{timenow}}",
+            "side": "{{strategy.order.action}}",
+            "order_id": "{{strategy.order.id}}",
+            "price": "{{close}}",
+        }

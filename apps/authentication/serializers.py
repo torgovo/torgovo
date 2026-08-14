@@ -1,34 +1,44 @@
 """
 Serializers for authentication app
 """
-import uuid
-import secrets
+
 from datetime import timedelta
+
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import (
-    UserProfile, EmailVerification,
-    PhoneVerification, PasswordResetToken
-)
+
+from apps.referrals.models import Referral
+
 # Import CustomUser from users app (AUTH_USER_MODEL = 'users.CustomUser')
 from apps.users.models import CustomUser
 from core.utils import generate_secret_key
 
+from .models import EmailVerification, PasswordResetToken, PhoneVerification
+
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     """Serializer for user registration."""
+
     password = serializers.CharField(write_only=True, validators=[validate_password])
     password_confirm = serializers.CharField(write_only=True)
+    referral_code = serializers.CharField(
+        required=False, allow_blank=True, max_length=20, write_only=True
+    )
 
     class Meta:
         model = CustomUser
         fields = (
-            'username', 'email', 'password', 'password_confirm',
-            'first_name', 'last_name', 'phone_number'
+            "username",
+            "email",
+            "password",
+            "password_confirm",
+            "first_name",
+            "last_name",
+            "phone_number",
+            "referral_code",
         )
 
     def validate_email(self, value):
@@ -49,136 +59,131 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("A user with this phone number already exists.")
         return value
 
+    def validate_referral_code(self, value):
+        """Validate that the referral code exists in the system."""
+        if not value:
+            return value
+        normalized = value.upper().strip()
+        if not Referral.objects.filter(code=normalized).exists():
+            raise serializers.ValidationError("Invalid referral code.")
+        return normalized
+
     def validate(self, attrs):
         """Validate password confirmation."""
-        if attrs['password'] != attrs['password_confirm']:
+        if attrs["password"] != attrs["password_confirm"]:
             raise serializers.ValidationError("Passwords don't match.")
         return attrs
 
     def create(self, validated_data):
         """Create user and profile."""
-        validated_data.pop('password_confirm')
-        password = validated_data.pop('password')
+        validated_data.pop("password_confirm")
+        password = validated_data.pop("password")
+        referral_code = validated_data.pop("referral_code", "")
 
-        user = CustomUser.objects.create_user(
-            password=password,
-            **validated_data
-        )
+        user = CustomUser.objects.create_user(password=password, **validated_data)
 
-        # Create user profile (signal may already have created one)
-        UserProfile.objects.get_or_create(user=user)
+        # Store referral_code on instance for the view to process after save
+        self._referral_code = referral_code
 
         return user
 
 
 class UserLoginSerializer(serializers.Serializer):
     """Serializer for user login."""
+
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
         """Validate credentials."""
-        email = attrs.get('email')
-        password = attrs.get('password')
+        email = attrs.get("email")
+        password = attrs.get("password")
 
         if email and password:
             user = authenticate(
-                request=self.context.get('request'),
-                username=email,
-                password=password
+                request=self.context.get("request"), username=email, password=password
             )
 
             if not user:
-                raise serializers.ValidationError('Invalid credentials.')
+                raise serializers.ValidationError("Invalid credentials.")
 
             if not user.is_active:
-                raise serializers.ValidationError('User account is disabled.')
+                raise serializers.ValidationError("User account is disabled.")
 
-            attrs['user'] = user
+            attrs["user"] = user
             return attrs
         else:
-            raise serializers.ValidationError('Must include email and password.')
-
-
-class UserProfileSerializer(serializers.ModelSerializer):
-    """Serializer for user profile."""
-    user_email = serializers.EmailField(source='user.email', read_only=True)
-    user_full_name = serializers.CharField(source='user.full_name', read_only=True)
-    subscription_plan_display = serializers.CharField(source='get_subscription_plan_display', read_only=True)
-
-    class Meta:
-        model = UserProfile
-        fields = (
-            'id', 'user_email', 'user_full_name', 'subscription_plan',
-            'subscription_plan_display', 'max_bots_allowed', 'timezone',
-            'trading_preferences', 'demo_trading_enabled', 'email_notifications',
-            'sms_notifications', 'push_notifications',
-            'subscription_start_date', 'subscription_end_date',
-            'is_subscription_active', 'referral_code',
-            'total_trades_executed', 'total_volume_traded',
-            'created_at', 'updated_at'
-        )
-        read_only_fields = (
-            'id', 'max_bots_allowed', 'subscription_plan',
-            'subscription_start_date', 'subscription_end_date',
-            'is_subscription_active', 'referral_code',
-            'total_trades_executed', 'total_volume_traded',
-            'created_at', 'updated_at'
-        )
+            raise serializers.ValidationError("Must include email and password.")
 
 
 class UserSerializer(serializers.ModelSerializer):
     """Serializer for user data."""
-    profile = UserProfileSerializer(read_only=True)
+
     full_name = serializers.ReadOnlyField()
 
     class Meta:
         model = CustomUser
         fields = (
-            'id', 'email', 'username', 'first_name', 'last_name',
-            'full_name', 'phone_number', 'is_email_verified',
-            'is_phone_verified', 'date_joined', 'last_login',
-            'timezone', 'two_factor_enabled', 'profile'
+            "id",
+            "email",
+            "username",
+            "first_name",
+            "last_name",
+            "full_name",
+            "phone_number",
+            "is_email_verified",
+            "is_phone_verified",
+            "date_joined",
+            "last_login",
+            "timezone",
+            "two_factor_enabled",
+            "subscription_plan",
+            "max_bots_allowed",
+            "is_subscription_active",
+            "referral_code",
+            "total_trades_executed",
+            "total_volume_traded",
         )
         read_only_fields = (
-            'id', 'is_email_verified', 'is_phone_verified',
-            'date_joined', 'last_login', 'two_factor_enabled'
+            "id",
+            "is_email_verified",
+            "is_phone_verified",
+            "date_joined",
+            "last_login",
+            "two_factor_enabled",
         )
 
 
 class EmailVerificationSerializer(serializers.ModelSerializer):
     """Serializer for email verification."""
+
     class Meta:
         model = EmailVerification
-        fields = ('user', 'token', 'expires_at')
-        read_only_fields = ('token', 'expires_at')
+        fields = ("user", "token", "expires_at")
+        read_only_fields = ("token", "expires_at")
 
     def create(self, validated_data):
         """Create email verification token."""
-        user = validated_data['user']
+        user = validated_data["user"]
         token = generate_secret_key(64)
         expires_at = timezone.now() + timedelta(hours=24)
 
         # Invalidate existing tokens
-        EmailVerification.objects.filter(user=user, is_verified=False).update(
-            is_verified=True
-        )
+        EmailVerification.objects.filter(user=user, is_verified=False).update(is_verified=True)
 
-        return EmailVerification.objects.create(
-            user=user,
-            token=token,
-            expires_at=expires_at
-        )
+        return EmailVerification.objects.create(user=user, token=token, expires_at=expires_at)
 
 
 class PhoneVerificationSerializer(serializers.Serializer):
     """Serializer for phone verification."""
+
     phone_number = serializers.CharField(max_length=20)
 
     def validate_phone_number(self, value):
         """Validate phone number format."""
         import re
-        if not re.match(r'^\+?1?\d{9,15}$', value):
+
+        if not re.match(r"^\+?1?\d{9,15}$", value):
             raise serializers.ValidationError("Invalid phone number format.")
         return value
 
@@ -186,42 +191,37 @@ class PhoneVerificationSerializer(serializers.Serializer):
         """Create phone verification code."""
         from apps.authentication.signals import generate_otp_code
 
-        user = self.context['request'].user
-        phone_number = validated_data['phone_number']
+        user = self.context["request"].user
+        phone_number = validated_data["phone_number"]
         code = generate_otp_code()
         expires_at = timezone.now() + timedelta(minutes=10)
 
         # Invalidate existing codes
-        PhoneVerification.objects.filter(
-            user=user,
-            is_verified=False
-        ).update(is_verified=True)
+        PhoneVerification.objects.filter(user=user, is_verified=False).update(is_verified=True)
 
         return PhoneVerification.objects.create(
-            user=user,
-            code=code,
-            phone_number=phone_number,
-            expires_at=expires_at
+            user=user, code=code, phone_number=phone_number, expires_at=expires_at
         )
 
 
 class PhoneVerificationConfirmSerializer(serializers.Serializer):
     """Serializer for confirming phone verification."""
+
     code = serializers.CharField(max_length=6)
     phone_number = serializers.CharField(max_length=20)
 
     def validate(self, attrs):
         """Validate verification code."""
-        code = attrs.get('code')
-        phone_number = attrs.get('phone_number')
-        user = self.context['request'].user
+        code = attrs.get("code")
+        phone_number = attrs.get("phone_number")
+        user = self.context["request"].user
 
         try:
             verification = PhoneVerification.objects.get(
                 user=user,
                 phone_number=phone_number,
                 is_verified=False,
-                expires_at__gt=timezone.now()
+                expires_at__gt=timezone.now(),
             )
 
             if verification.attempts >= verification.max_attempts:
@@ -234,7 +234,7 @@ class PhoneVerificationConfirmSerializer(serializers.Serializer):
             if verification.is_expired():
                 raise serializers.ValidationError("Verification code has expired.")
 
-            attrs['verification'] = verification
+            attrs["verification"] = verification
             return attrs
 
         except PhoneVerification.DoesNotExist:
@@ -248,16 +248,18 @@ class PasswordResetRequestSerializer(serializers.Serializer):
     email format here; the view performs the (best-effort) token creation
     and always returns the same generic response.
     """
+
     email = serializers.EmailField()
 
     class _NoOp:
         """Sentinel returned from ``save()`` to satisfy DRF's expectation
         that the serializer instance is non-None."""
+
         user = None
         expires_at = None
 
     def create(self, validated_data):
-        email = validated_data['email']
+        email = validated_data["email"]
         try:
             user = CustomUser.objects.get(email=email)
         except CustomUser.DoesNotExist:
@@ -266,19 +268,14 @@ class PasswordResetRequestSerializer(serializers.Serializer):
         expires_at = timezone.now() + timedelta(hours=2)
 
         # Invalidate existing tokens
-        PasswordResetToken.objects.filter(user=user, is_used=False).update(
-            is_used=True
-        )
+        PasswordResetToken.objects.filter(user=user, is_used=False).update(is_used=True)
 
-        return PasswordResetToken.objects.create(
-            user=user,
-            token=token,
-            expires_at=expires_at
-        )
+        return PasswordResetToken.objects.create(user=user, token=token, expires_at=expires_at)
 
 
 class PasswordResetConfirmSerializer(serializers.Serializer):
     """Serializer for password reset confirmation."""
+
     token = serializers.CharField()
     new_password = serializers.CharField(write_only=True, validators=[validate_password])
     new_password_confirm = serializers.CharField(write_only=True)
@@ -303,7 +300,7 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         """Validate password confirmation."""
-        if attrs['new_password'] != attrs['new_password_confirm']:
+        if attrs["new_password"] != attrs["new_password_confirm"]:
             raise serializers.ValidationError("Passwords don't match.")
         return attrs
 
@@ -316,8 +313,8 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
         """
         from django.db import transaction
 
-        token_value = self.validated_data['token']
-        new_password = self.validated_data['new_password']
+        token_value = self.validated_data["token"]
+        new_password = self.validated_data["new_password"]
 
         with transaction.atomic():
             try:
@@ -331,13 +328,11 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
                 )
 
             if token.is_expired():
-                raise serializers.ValidationError(
-                    {"token": "Reset token has expired."}
-                )
+                raise serializers.ValidationError({"token": "Reset token has expired."})
 
             user = token.user
             user.set_password(new_password)
-            user.save(update_fields=['password'])
+            user.save(update_fields=["password"])
 
             # Atomically mark as used inside the same transaction
             token.use()
@@ -347,6 +342,7 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
 
 class GoogleAuthSerializer(serializers.Serializer):
     """Serializer for Google OAuth authentication."""
+
     access_token = serializers.CharField()
 
     def validate_access_token(self, value):
@@ -359,14 +355,15 @@ class GoogleAuthSerializer(serializers.Serializer):
         import requests
         from django.conf import settings
 
-        google_client_id = getattr(settings, 'GOOGLE_CLIENT_ID', '') or \
-            settings.SOCIALACCOUNT_PROVIDERS.get('google', {}).get('APP', {}).get('client_id', '')
+        google_client_id = getattr(
+            settings, "GOOGLE_CLIENT_ID", ""
+        ) or settings.SOCIALACCOUNT_PROVIDERS.get("google", {}).get("APP", {}).get("client_id", "")
 
         try:
             # Step 1: Verify token audience with Google tokeninfo
             tokeninfo_resp = requests.get(
-                'https://oauth2.googleapis.com/tokeninfo',
-                params={'access_token': value},
+                "https://oauth2.googleapis.com/tokeninfo",
+                params={"access_token": value},
                 timeout=10,
             )
             if tokeninfo_resp.status_code != 200:
@@ -375,22 +372,22 @@ class GoogleAuthSerializer(serializers.Serializer):
             tokeninfo = tokeninfo_resp.json()
 
             # Audience check — reject tokens issued for other applications
-            if google_client_id and tokeninfo.get('aud') != google_client_id:
+            if google_client_id and tokeninfo.get("aud") != google_client_id:
                 raise serializers.ValidationError(
                     "Token audience mismatch — token was not issued for this application."
                 )
 
             # Step 2: Fetch user profile info
             userinfo_resp = requests.get(
-                'https://www.googleapis.com/oauth2/v2/userinfo',
-                params={'access_token': value},
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                params={"access_token": value},
                 timeout=10,
             )
             if userinfo_resp.status_code != 200:
                 raise serializers.ValidationError("Failed to fetch user info from Google.")
 
             user_data = userinfo_resp.json()
-            if not user_data.get('email'):
+            if not user_data.get("email"):
                 raise serializers.ValidationError("Google account has no email.")
 
             return user_data
@@ -401,52 +398,36 @@ class GoogleAuthSerializer(serializers.Serializer):
 
 class ChangePasswordSerializer(serializers.Serializer):
     """Serializer for changing password."""
+
     old_password = serializers.CharField(write_only=True)
     new_password = serializers.CharField(write_only=True, validators=[validate_password])
     new_password_confirm = serializers.CharField(write_only=True)
 
     def validate_old_password(self, value):
         """Validate old password."""
-        user = self.context['request'].user
+        user = self.context["request"].user
         if not user.check_password(value):
             raise serializers.ValidationError("Old password is incorrect.")
         return value
 
     def validate(self, attrs):
         """Validate password confirmation."""
-        if attrs['new_password'] != attrs['new_password_confirm']:
+        if attrs["new_password"] != attrs["new_password_confirm"]:
             raise serializers.ValidationError("Passwords don't match.")
         return attrs
 
     def save(self):
         """Change user password."""
-        user = self.context['request'].user
-        new_password = self.validated_data['new_password']
+        user = self.context["request"].user
+        new_password = self.validated_data["new_password"]
         user.set_password(new_password)
         user.save()
         return user
 
 
-class UpdateProfileSerializer(serializers.ModelSerializer):
-    """Serializer for updating user profile."""
-
-    class Meta:
-        model = UserProfile
-        fields = (
-            'timezone', 'demo_trading_enabled',
-            'email_notifications', 'sms_notifications',
-            'push_notifications', 'trading_preferences'
-        )
-
-    def validate_trading_preferences(self, value):
-        """Validate trading preferences JSON."""
-        if not isinstance(value, dict):
-            raise serializers.ValidationError("Trading preferences must be a valid JSON object.")
-        return value
-
-
 class RefreshTokenSerializer(serializers.Serializer):
     """Serializer for refreshing JWT tokens."""
+
     refresh_token = serializers.CharField()
 
     def validate_refresh_token(self, value):

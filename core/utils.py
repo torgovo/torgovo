@@ -1,19 +1,21 @@
 """
 Utility functions for Torgovo Crypto Trading Platform
 """
-import uuid
+
 import hashlib
 import hmac
-import json
-from decimal import Decimal, ROUND_DOWN
-from datetime import datetime, timedelta
-from django.conf import settings
-from django.utils import timezone
-from django.core.files.storage import default_storage
-from cryptography.fernet import Fernet
 import logging
+import uuid
+from datetime import datetime
+from datetime import timezone as dt_timezone
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
-logger = logging.getLogger('apps')
+from cryptography.fernet import Fernet
+from django.conf import settings
+from django.core.files.storage import default_storage
+from django.utils import timezone
+
+logger = logging.getLogger("apps")
 
 
 def generate_uuid():
@@ -24,6 +26,7 @@ def generate_uuid():
 def generate_secret_key(length=32):
     """Generate a random secret key."""
     import secrets
+
     return secrets.token_urlsafe(length)
 
 
@@ -61,16 +64,23 @@ def looks_encrypted(value):
     successfully under the current FERNET_KEY. Returns False for values
     that appear to be plaintext and need encryption.
 
-    WARNING — key rotation hazard: This function attempts decryption
-    under the *current* FERNET_KEY.  If the key is ever rotated, values
-    encrypted under the old key will fail decryption here, and
-    looks_encrypted() will return False.  The caller will then
-    double-encrypt the old ciphertext under the new key, producing
-    garbage on the next read.  Never rotate FERNET_KEY without writing
-    a dedicated re-encryption migration first.
+    Safeguard: Fernet tokens always start with ``gAAAAA`` (version + timestamp).
+    We check the structure first — if it doesn't look like a Fernet token,
+    it's definitely plaintext.  This prevents double-encryption on key
+    rotation: old ciphertext still has valid Fernet structure even if the
+    key has changed.
+
+    WARNING — key rotation hazard: If the key is rotated, values encrypted
+    under the old key will fail decryption here, and looks_encrypted()
+    will return False. The caller will then double-encrypt the old ciphertext
+    under the new key, producing garbage on the next read.
+    Never rotate FERNET_KEY without writing a dedicated re-encryption migration.
     """
     if not value:
         return True
+    # Fernet tokens are base64-encoded with a fixed prefix
+    if not value.startswith("gAAAAA"):
+        return False
     try:
         Fernet(settings.FERNET_KEY.encode()).decrypt(value.encode())
         return True
@@ -83,11 +93,7 @@ def validate_webhook_signature(payload, signature, secret):
     Validate webhook signature for security.
     """
     try:
-        expected_signature = hmac.new(
-            secret.encode(),
-            payload.encode(),
-            hashlib.sha256
-        ).hexdigest()
+        expected_signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
         return hmac.compare_digest(expected_signature, signature)
     except Exception as e:
@@ -99,14 +105,16 @@ def format_decimal(value, decimal_places=8):
     """
     Format decimal value with specified precision.
     """
-    if isinstance(value, (int, float)):
-        value = Decimal(str(value))
+    try:
+        if isinstance(value, str):
+            value = Decimal(value)
+        elif not isinstance(value, Decimal):
+            value = Decimal(str(value))
 
-    if isinstance(value, Decimal):
-        quantize_str = '1.' + '0' * decimal_places
+        quantize_str = "1." + "0" * decimal_places
         return value.quantize(Decimal(quantize_str), rounding=ROUND_DOWN)
-
-    return Decimal('0')
+    except (ValueError, TypeError, InvalidOperation):
+        return Decimal("0")
 
 
 def calculate_percentage_change(old_value, new_value):
@@ -118,12 +126,12 @@ def calculate_percentage_change(old_value, new_value):
         new_value = Decimal(str(new_value))
 
         if old_value == 0:
-            return Decimal('0')
+            return Decimal("0")
 
         change = ((new_value - old_value) / old_value) * 100
-        return change.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
-    except (ValueError, TypeError, ZeroDivisionError):
-        return Decimal('0')
+        return change.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    except (ValueError, TypeError, InvalidOperation, ZeroDivisionError):
+        return Decimal("0")
 
 
 def validate_trading_pair(pair):
@@ -133,7 +141,7 @@ def validate_trading_pair(pair):
     if not pair or not isinstance(pair, str):
         return False
 
-    parts = pair.split('/')
+    parts = pair.split("/")
     if len(parts) != 2:
         return False
 
@@ -151,13 +159,13 @@ def parse_float(value, default=0.0):
         return float(default)
 
 
-def parse_decimal(value, default='0'):
+def parse_decimal(value, default="0"):
     """
     Safely parse value to Decimal with default fallback.
     """
     try:
         return Decimal(str(value))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, InvalidOperation):
         return Decimal(str(default))
 
 
@@ -166,14 +174,14 @@ def get_timeframe_minutes(timeframe):
     Convert timeframe string to minutes.
     """
     timeframe_map = {
-        '1m': 1,
-        '5m': 5,
-        '15m': 15,
-        '30m': 30,
-        '1h': 60,
-        '4h': 240,
-        '1d': 1440,
-        '1w': 10080,
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "4h": 240,
+        "1d": 1440,
+        "1w": 10080,
     }
 
     return timeframe_map.get(timeframe.lower(), 1)
@@ -220,7 +228,7 @@ def calculate_martingale_levels(base_amount, levels, multiplier=2.0):
 
         position_sizes = []
         for i in range(levels + 1):
-            amount = base_amount * (multiplier ** i)
+            amount = base_amount * (multiplier**i)
             position_sizes.append(amount)
 
         return position_sizes
@@ -246,23 +254,23 @@ def validate_deposit_amount(amount, min_amount=None, max_amount=None):
                 return False, f"Maximum deposit amount is {max_amount}"
 
         return True, "Valid amount"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, InvalidOperation):
         return False, "Invalid amount format"
 
 
-def format_currency(amount, currency='USDT', decimal_places=2):
+def format_currency(amount, currency="USDT", decimal_places=2):
     """
     Format amount as currency string.
     """
     try:
         amount = Decimal(str(amount))
 
-        if currency in ['BTC', 'ETH']:
+        if currency in ["BTC", "ETH"]:
             decimal_places = 8
 
         formatted_amount = format_decimal(amount, decimal_places)
         return f"{formatted_amount} {currency}"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, InvalidOperation):
         return f"0.00 {currency}"
 
 
@@ -278,13 +286,13 @@ def validate_exchange_credentials(exchange_name, api_key, secret_key, passphrase
         return False, "Invalid credential format"
 
     # Exchange-specific validation
-    if exchange_name.lower() in ['coinbase', 'kraken'] and not passphrase:
+    if exchange_name.lower() in ["coinbase", "kraken"] and not passphrase:
         return False, "Passphrase required for this exchange"
 
     return True, "Credentials format valid"
 
 
-def save_uploaded_file(file, subfolder='uploads'):
+def save_uploaded_file(file, subfolder="uploads"):
     """
     Save uploaded file and return the path.
     """
@@ -322,13 +330,13 @@ def calculate_risk_metrics(trades):
     """
     if not trades:
         return {
-            'total_trades': 0,
-            'winning_trades': 0,
-            'losing_trades': 0,
-            'win_rate': 0.0,
-            'total_profit_loss': 0.0,
-            'max_drawdown': 0.0,
-            'sharpe_ratio': 0.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "win_rate": 0.0,
+            "total_profit_loss": 0.0,
+            "max_drawdown": 0.0,
+            "sharpe_ratio": 0.0,
         }
 
     total_trades = len(trades)
@@ -339,7 +347,7 @@ def calculate_risk_metrics(trades):
     losses = []
 
     for trade in trades:
-        pnl = float(trade.get('profit_loss', 0))
+        pnl = float(trade.get("profit_loss", 0))
         total_pnl += pnl
 
         if pnl > 0:
@@ -357,7 +365,7 @@ def calculate_risk_metrics(trades):
         peak = 0.0
         running_total = 0.0
         for trade in trades:
-            pnl = float(trade.get('profit_loss', 0))
+            pnl = float(trade.get("profit_loss", 0))
             running_total += pnl
             if running_total > peak:
                 peak = running_total
@@ -375,13 +383,13 @@ def calculate_risk_metrics(trades):
                 sharpe_ratio = avg_profit / avg_loss
 
     return {
-        'total_trades': total_trades,
-        'winning_trades': winning_trades,
-        'losing_trades': losing_trades,
-        'win_rate': round(win_rate, 2),
-        'total_profit_loss': round(total_pnl, 2),
-        'max_drawdown': round(max_drawdown, 2),
-        'sharpe_ratio': round(sharpe_ratio, 2),
+        "total_trades": total_trades,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "win_rate": round(win_rate, 2),
+        "total_profit_loss": round(total_pnl, 2),
+        "max_drawdown": round(max_drawdown, 2),
+        "sharpe_ratio": round(sharpe_ratio, 2),
     }
 
 
@@ -397,7 +405,7 @@ def timestamp_to_datetime(timestamp):
     Convert timestamp to datetime.
     """
     try:
-        return datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+        return datetime.fromtimestamp(float(timestamp), tz=dt_timezone.utc)
     except (ValueError, TypeError):
         return timezone.now()
 
@@ -414,11 +422,12 @@ def jsonify_decimal(obj):
         return [jsonify_decimal(item) for item in obj]
     return obj
 
+
 def get_client_ip(request):
     """Get client IP address from request."""
-    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
     if x_forwarded_for:
-        ip = x_forwarded_for.split(',')[0].strip()
+        ip = x_forwarded_for.split(",")[0].strip()
     else:
-        ip = request.META.get('REMOTE_ADDR')
+        ip = request.META.get("REMOTE_ADDR")
     return ip

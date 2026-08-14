@@ -1,71 +1,82 @@
 import uuid
-import pytz
 from decimal import Decimal
-from django.db import models
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.core.validators import MinValueValidator, MaxValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
+from django.db import models
 from django.utils import timezone
 
-from config import settings
-from core.models import TimeStampedModel, SoftDeleteModel
-from core.utils import encrypt_api_key, decrypt_api_key, generate_secret_key, looks_encrypted
-from django.conf import settings
 from apps.exchanges.models import ExchangeCredentials
+from core.models import SoftDeleteModel, TimeStampedModel
+from core.utils import decrypt_api_key, encrypt_api_key, generate_secret_key, looks_encrypted
 
 User = get_user_model()
 
-# Exchange choices constant (shared across bot types)
-EXCHANGE_CHOICES = ExchangeCredentials.EXCHANGE_CHOICES
-
-
 # ==================== SIGNAL BOT (TradingView Webhook) ====================
+
 
 class SignalBot(SoftDeleteModel):
     """Signal Bot - receives trading signals from TradingView webhooks and executes trades"""
 
     class Meta:
-        db_table = 'bots_signal_bots'
-        ordering = ['-created_at']
+        db_table = "bots_signal_bots"
+        ordering = ["-created_at"]
         indexes = [
-            models.Index(fields=['user', 'is_active']),
-            models.Index(fields=['exchange_name', 'trading_pair']),
+            models.Index(fields=["user", "is_active"]),
+            models.Index(fields=["exchange_name", "trading_pair"]),
         ]
 
-    EXCHANGE_CHOICES = EXCHANGE_CHOICES
+    EXCHANGE_CHOICES = ExchangeCredentials.EXCHANGE_CHOICES
 
     MARKET_TYPE_CHOICES = [
-        ('spot', 'Spot Trading'),
-        ('futures', 'Futures Trading'),
+        ("spot", "Spot Trading"),
+        ("futures", "Futures Trading"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='signal_bots')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="signal_bots")
 
-    # NEW: Link to subscription
     subscription = models.ForeignKey(
-        'payments.BotSubscription',
-        on_delete=models.CASCADE,
-        related_name='signal_bots',
+        "payments.BotSubscription",
+        on_delete=models.SET_NULL,
+        related_name="signal_bots",
         null=True,
-        blank=True
+        blank=True,
     )
 
     # Bot identification
-    bot_id = models.CharField(max_length=100, unique=True, blank=True, db_index=True, help_text="Unique bot ID in format xxxxx-xxxxx-xxxxx")
+    bot_id = models.CharField(
+        max_length=100,
+        unique=True,
+        blank=True,
+        db_index=True,
+        help_text="Unique bot ID in format xxxxx-xxxxx-xxxxx",
+    )
     bot_name = models.CharField(max_length=255)
-    
+
     # Webhook configuration
-    webhook_url = models.URLField(unique=True, blank=True)
-    webhook_message = models.JSONField(blank=True, null=True, help_text="Auto-generated JSON template for TradingView")
+    webhook_url = models.URLField(blank=True)
+    webhook_message = models.JSONField(
+        blank=True,
+        null=True,
+        help_text="Auto-generated JSON template (TradingView placeholders). "
+        "Editable for any platform: bot_id, secret, side, timestamp, Pair/pair/symbol.",
+    )
     secret_key = models.CharField(max_length=64, blank=True)
 
     exchange_name = models.CharField(max_length=20, choices=EXCHANGE_CHOICES)
-    market_type = models.CharField(max_length=20, choices=MARKET_TYPE_CHOICES, default='spot')
+    market_type = models.CharField(max_length=20, choices=MARKET_TYPE_CHOICES, default="spot")
     trading_pair = models.CharField(max_length=20)
 
     # Trading settings
-    default_amount = models.DecimalField(max_digits=20, decimal_places=8, validators=[MinValueValidator(0)])
-    use_tradingView_position_size = models.BooleanField(default=False, help_text="Use position size from TradingView alert instead of default_amount")
+    default_amount = models.DecimalField(
+        max_digits=20, decimal_places=8, validators=[MinValueValidator(0)]
+    )
+    use_tradingView_position_size = models.BooleanField(
+        default=False,
+        help_text="Use position size from the alert payload instead of default_amount",
+    )
     take_profit_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     stop_loss_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
 
@@ -90,18 +101,22 @@ class SignalBot(SoftDeleteModel):
         return f"{uuid.uuid4().hex[:5]}-{uuid.uuid4().hex[:5]}-{uuid.uuid4().hex[:5]}"
 
     def create_message(self):
-        """Generate JSON webhook message template with TradingView placeholders"""
-        import json
+        """Generate JSON webhook message template with TradingView placeholders
+
+        The template uses TradingView {{placeholders}} so it pastes straight into
+        a TradingView alert. For other platforms (or hand-built bodies) the user
+        may replace the template with any JSON containing: bot_id, secret, side,
+        timestamp, and a pair (Pair/pair/symbol/ticker/market/currency).
+        """
         from django.conf import settings
-        
-        if not self.bot_id:
-            self.save()  # Ensure bot_id is generated first
-        
+
+        # NOTE: bot_id is guaranteed to exist by save() before this is called.
+        # Do NOT call self.save() here — that would cause infinite recursion.
         # Get webhook URL from settings or generate it
-        site_url = getattr(settings, 'SITE_URL', 'https://yourdomain.com')
-        if not site_url.startswith('http'):
+        site_url = getattr(settings, "SITE_URL", "https://yourdomain.com")
+        if not site_url.startswith("http"):
             site_url = f"https://{site_url}"
-        
+
         data = {
             "bot_id": self.bot_id,
             "secret": self.secret_key,
@@ -109,7 +124,8 @@ class SignalBot(SoftDeleteModel):
             "position_size": "{{strategy.position_size}}",
             "exchange": self.exchange_name,
             "timestamp": "{{timenow}}",
-            "side": "{{strategy.order.action}}"
+            "side": "{{strategy.order.action}}",
+            "order_id": "{{strategy.order.id}}",
         }
         return data
 
@@ -122,28 +138,29 @@ class SignalBot(SoftDeleteModel):
                 if not SignalBot.objects.filter(bot_id=new_id).exists():
                     self.bot_id = new_id
                     break
-        
+
         # Generate webhook URL and secret if not exists
         if not self.webhook_url:
             from django.conf import settings
-            site_url = getattr(settings, 'SITE_URL', 'https://yourdomain.com')
-            if not site_url.startswith('http'):
+
+            site_url = getattr(settings, "SITE_URL", "https://yourdomain.com")
+            if not site_url.startswith("http"):
                 site_url = f"https://{site_url}"
             self.webhook_url = f"{site_url}/api/webhooks/custombot/"
-        
+
         if not self.secret_key:
             self.secret_key = generate_secret_key(32)
-        
+
         # Generate webhook message template if not exists
         if not self.webhook_message:
             self.webhook_message = self.create_message()
-        
+
         super().save(*args, **kwargs)
 
     def generate_webhook_credentials(self):
         """Generate unique webhook URL and secret on creation"""
         if not self.webhook_url:
-            self.webhook_url = f"https://api.torgovo.com/api/webhooks/custom/{self.id}/"
+            self.webhook_url = f"{settings.SITE_URL}/api/webhooks/custom/{self.id}/"
         if not self.secret_key:
             self.secret_key = generate_secret_key(32)
         self.save()
@@ -171,36 +188,36 @@ class SignalBot(SoftDeleteModel):
 
 # ==================== GRID BOT ====================
 
+
 class GridBot(SoftDeleteModel):
     """Grid trading bot with subscription support"""
 
     class Meta:
-        db_table = 'bots_grid_bots'
-        ordering = ['-created_at']
-        unique_together = ['subscription']  # 1 bot per subscription
+        db_table = "bots_grid_bots"
+        ordering = ["-created_at"]
+        unique_together = ["subscription"]  # 1 bot per subscription
         indexes = [
-            models.Index(fields=['user', 'is_running']),
-            models.Index(fields=['exchange_name', 'trading_pair']),
-            models.Index(fields=['subscription']),
+            models.Index(fields=["user", "is_running"]),
+            models.Index(fields=["exchange_name", "trading_pair"]),
+            models.Index(fields=["subscription"]),
         ]
 
-    EXCHANGE_CHOICES = EXCHANGE_CHOICES
+    EXCHANGE_CHOICES = ExchangeCredentials.EXCHANGE_CHOICES
 
     AMOUNT_TYPE_CHOICES = [
-        ('base', 'Base Currency (Coins)'),
-        ('quote', 'Quote Currency (USDT/USDC)'),
+        ("base", "Base Currency (Coins)"),
+        ("quote", "Quote Currency (USDT/USDC)"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='grid_bots')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="grid_bots")
 
-    # NEW: Link to subscription
     subscription = models.ForeignKey(
-        'payments.BotSubscription',
-        on_delete=models.CASCADE,
-        related_name='grid_bots',
+        "payments.BotSubscription",
+        on_delete=models.SET_NULL,
+        related_name="grid_bots",
         null=True,
-        blank=True
+        blank=True,
     )
 
     bot_name = models.CharField(max_length=255)
@@ -215,27 +232,31 @@ class GridBot(SoftDeleteModel):
     favor_levels = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(50)])
     against_levels = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(50)])
     level_spacing_percent = models.DecimalField(max_digits=5, decimal_places=2, default=1.0)
-    favor_level_qty = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'), null=True, blank=True)
-    against_level_qty = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'), null=True, blank=True)
+    favor_level_qty = models.DecimalField(
+        max_digits=20, decimal_places=8, default=Decimal("0"), null=True, blank=True
+    )
+    against_level_qty = models.DecimalField(
+        max_digits=20, decimal_places=8, default=Decimal("0"), null=True, blank=True
+    )
 
     # NEW: Level difference fields
     favor_level_difference = models.DecimalField(
-        max_digits=5, 
-        decimal_places=2, 
-        null=True, 
+        max_digits=5,
+        decimal_places=2,
+        null=True,
         blank=True,
-        help_text="Percentage difference between each favor level"
+        help_text="Percentage difference between each favor level",
     )
     against_level_difference = models.DecimalField(
-        max_digits=5, 
-        decimal_places=2, 
-        null=True, 
+        max_digits=5,
+        decimal_places=2,
+        null=True,
         blank=True,
-        help_text="Percentage difference between each against level"
+        help_text="Percentage difference between each against level",
     )
 
     # NEW: Amount type selection
-    amount_type = models.CharField(max_length=10, choices=AMOUNT_TYPE_CHOICES, default='quote')
+    amount_type = models.CharField(max_length=10, choices=AMOUNT_TYPE_CHOICES, default="quote")
 
     # Risk management
     take_profit_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
@@ -263,40 +284,78 @@ class GridBot(SoftDeleteModel):
             self.active_orders = active_orders
         if grid_levels is not None:
             self.current_grid_levels = grid_levels
-        self.save(update_fields=['active_orders', 'current_grid_levels', 'updated_at'])
+        self.save(update_fields=["active_orders", "current_grid_levels", "updated_at"])
 
     def __str__(self):
         return f"{self.bot_name} - {self.trading_pair}"
 
 
+class ActiveOrder(TimeStampedModel):
+    """Individual active order for a GridBot (replaces JSONField)."""
+
+    class Meta:
+        db_table = "bots_active_orders"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["grid_bot", "status"]),
+            models.Index(fields=["grid_bot", "side"]),
+        ]
+
+    SIDE_CHOICES = [("buy", "Buy"), ("sell", "Sell")]
+    STATUS_CHOICES = [
+        ("open", "Open"),
+        ("filled", "Filled"),
+        ("cancelled", "Cancelled"),
+        ("expired", "Expired"),
+    ]
+
+    grid_bot = models.ForeignKey(
+        GridBot,
+        on_delete=models.CASCADE,
+        related_name="active_orders_model",
+    )
+    side = models.CharField(max_length=5, choices=SIDE_CHOICES)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="open")
+    quantity = models.DecimalField(max_digits=20, decimal_places=8)
+    price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    filled_quantity = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    exchange_order_id = models.CharField(max_length=100, blank=True, db_index=True)
+    level_index = models.IntegerField(
+        default=0, help_text="Position in grid level (positive=favor, negative=against)"
+    )
+
+    def __str__(self):
+        return f"{self.grid_bot.bot_name} {self.side} {self.quantity} @ {self.price}"
+
+
 # ==================== MARTINGALE BOT ====================
+
 
 class MartingaleBot(SoftDeleteModel):
     """Martingale bot with subscription support"""
 
     class Meta:
-        db_table = 'bots_martingale_bots'
-        ordering = ['-created_at']
-        unique_together = ['subscription']  # 1 bot per subscription
+        db_table = "bots_martingale_bots"
+        ordering = ["-created_at"]
+        unique_together = ["subscription"]  # 1 bot per subscription
         indexes = [
-            models.Index(fields=['user', 'is_running']),
-            models.Index(fields=['exchange_name', 'trading_pair']),
-            models.Index(fields=['subscription']),
+            models.Index(fields=["user", "is_running"]),
+            models.Index(fields=["exchange_name", "trading_pair"]),
+            models.Index(fields=["subscription"]),
         ]
 
-    EXCHANGE_CHOICES = EXCHANGE_CHOICES
+    EXCHANGE_CHOICES = ExchangeCredentials.EXCHANGE_CHOICES
     AMOUNT_TYPE_CHOICES = GridBot.AMOUNT_TYPE_CHOICES
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='martingale_bots')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="martingale_bots")
 
-    # NEW: Link to subscription
     subscription = models.ForeignKey(
-        'payments.BotSubscription',
-        on_delete=models.CASCADE,
-        related_name='martingale_bots',
+        "payments.BotSubscription",
+        on_delete=models.SET_NULL,
+        related_name="martingale_bots",
         null=True,
-        blank=True
+        blank=True,
     )
 
     bot_name = models.CharField(max_length=255)
@@ -311,15 +370,23 @@ class MartingaleBot(SoftDeleteModel):
     favor_levels = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(50)])
     against_levels = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(50)])
     level_spacing_percent = models.DecimalField(max_digits=5, decimal_places=2, default=2.0)
-    favor_level_qty = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'), null=True, blank=True)
-    against_level_qty = models.DecimalField(max_digits=20, decimal_places=8, default=Decimal('0'), null=True, blank=True)
+    favor_level_qty = models.DecimalField(
+        max_digits=20, decimal_places=8, default=Decimal("0"), null=True, blank=True
+    )
+    against_level_qty = models.DecimalField(
+        max_digits=20, decimal_places=8, default=Decimal("0"), null=True, blank=True
+    )
 
     # NEW: Level difference fields
-    favor_level_difference = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
-    against_level_difference = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    favor_level_difference = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
+    against_level_difference = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
 
     # NEW: Amount type selection
-    amount_type = models.CharField(max_length=10, choices=AMOUNT_TYPE_CHOICES, default='quote')
+    amount_type = models.CharField(max_length=10, choices=AMOUNT_TYPE_CHOICES, default="quote")
 
     multiplier_factor = models.DecimalField(max_digits=5, decimal_places=2, default=2.0)
 
@@ -336,7 +403,9 @@ class MartingaleBot(SoftDeleteModel):
     # Level tracking
     current_level = models.IntegerField(default=0)
     max_level_reached = models.IntegerField(default=0)
-    last_execution_price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    last_execution_price = models.DecimalField(
+        max_digits=20, decimal_places=8, null=True, blank=True
+    )
 
     # Statistics
     active_orders = models.JSONField(default=list)
@@ -353,23 +422,28 @@ class MartingaleBot(SoftDeleteModel):
 
 # ==================== QUANTUM AI FUND (Admin-Managed) ====================
 
+
 class QuantumAIFund(SoftDeleteModel):
     """Admin-managed master fund for Quantum AI trading"""
 
     class Meta:
-        db_table = 'bots_quantum_ai_fund'
+        db_table = "bots_quantum_ai_fund"
         verbose_name = "Quantum AI Master Fund"
         verbose_name_plural = "Quantum AI Master Funds"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255, default="Master Trading Fund")
     trading_strategy = models.TextField(blank=True)
-    risk_parameters = models.JSONField(default=dict, help_text="JSON: max_drawdown, stop_loss, etc.")
+    risk_parameters = models.JSONField(
+        default=dict, help_text="JSON: max_drawdown, stop_loss, etc."
+    )
 
     # Master API keys (encrypted)
     master_api_key = models.TextField(help_text="Encrypted master API key")
     master_secret_key = models.TextField(help_text="Encrypted master secret key")
-    master_passphrase = models.TextField(blank=True, null=True, help_text="Encrypted passphrase if needed")
+    master_passphrase = models.TextField(
+        blank=True, null=True, help_text="Encrypted passphrase if needed"
+    )
 
     # Fund Performance
     total_fund_value = models.DecimalField(max_digits=20, decimal_places=8, default=0)
@@ -379,19 +453,25 @@ class QuantumAIFund(SoftDeleteModel):
 
     # Smoothed return config (admin configurable)
     monthly_min_return = models.DecimalField(
-        max_digits=5, decimal_places=2, default=2.0,
+        max_digits=5,
+        decimal_places=2,
+        default=2.0,
         validators=[MinValueValidator(0), MaxValueValidator(100)],
-        help_text="Minimum monthly return shown to users (floor, e.g. 2%)"
+        help_text="Minimum monthly return shown to users (floor, e.g. 2%)",
     )
     monthly_max_return = models.DecimalField(
-        max_digits=5, decimal_places=2, default=15.0,
+        max_digits=5,
+        decimal_places=2,
+        default=15.0,
         validators=[MinValueValidator(0), MaxValueValidator(100)],
-        help_text="Maximum monthly return shown to users (cap, e.g. 15%)"
+        help_text="Maximum monthly return shown to users (cap, e.g. 15%)",
     )
     reserve_buffer_pct = models.DecimalField(
-        max_digits=5, decimal_places=2, default=10.0,
+        max_digits=5,
+        decimal_places=2,
+        default=10.0,
         validators=[MinValueValidator(0), MaxValueValidator(100)],
-        help_text="Target reserve as percentage of total deposits (e.g. 10%)"
+        help_text="Target reserve as percentage of total deposits (e.g. 10%)",
     )
 
     # Admin Controls
@@ -420,9 +500,11 @@ class QuantumAIFund(SoftDeleteModel):
     def get_decrypted_credentials(self):
         """Get decrypted master credentials for exchange API usage."""
         return {
-            'api_key': decrypt_api_key(self.master_api_key),
-            'secret_key': decrypt_api_key(self.master_secret_key),
-            'passphrase': decrypt_api_key(self.master_passphrase) if self.master_passphrase else None,
+            "api_key": decrypt_api_key(self.master_api_key),
+            "secret_key": decrypt_api_key(self.master_secret_key),
+            "passphrase": (
+                decrypt_api_key(self.master_passphrase) if self.master_passphrase else None
+            ),
         }
 
     def __str__(self):
@@ -463,14 +545,12 @@ class ReserveFund(SoftDeleteModel):
     """
 
     class Meta:
-        db_table = 'bots_reserve_fund'
+        db_table = "bots_reserve_fund"
         verbose_name = "Reserve Fund"
         verbose_name_plural = "Reserve Funds"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    fund = models.OneToOneField(
-        QuantumAIFund, on_delete=models.CASCADE, related_name='reserve'
-    )
+    fund = models.OneToOneField(QuantumAIFund, on_delete=models.CASCADE, related_name="reserve")
     balance = models.DecimalField(max_digits=20, decimal_places=8, default=0)
     last_top_up = models.DateTimeField(null=True, blank=True)
     last_withdrawal = models.DateTimeField(null=True, blank=True)
@@ -486,15 +566,16 @@ class ReserveFund(SoftDeleteModel):
         """Check if reserve is below target percentage of deposits."""
         if self.fund.total_deposits == 0:
             return True
-        target = self.fund.total_deposits * (self.fund.reserve_buffer_pct / Decimal('100'))
+        target = self.fund.total_deposits * (self.fund.reserve_buffer_pct / Decimal("100"))
         return self.balance < target
 
     def can_cover(self, amount: Decimal) -> bool:
         """Check if reserve can cover a withdrawal."""
         return self.balance >= amount
 
-    def record_transaction(self, balance_before: Decimal, amount: Decimal,
-                           txn_type: str, description: str = ""):
+    def record_transaction(
+        self, balance_before: Decimal, amount: Decimal, txn_type: str, description: str = ""
+    ):
         """
         Record a reserve movement with full audit trail.
 
@@ -524,30 +605,28 @@ class ReserveTransaction(TimeStampedModel):
     """
 
     class Meta:
-        db_table = 'bots_reserve_transactions'
+        db_table = "bots_reserve_transactions"
         verbose_name = "Reserve Transaction"
         verbose_name_plural = "Reserve Transactions"
-        ordering = ['-created_at']
+        ordering = ["-created_at"]
         indexes = [
-            models.Index(fields=['fund', '-created_at']),
-            models.Index(fields=['transaction_type']),
+            models.Index(fields=["fund", "-created_at"]),
+            models.Index(fields=["transaction_type"]),
         ]
 
     TRANSACTION_TYPES = [
-        ('top_up', 'Admin Top-Up'),
-        ('withdrawal', 'Admin Withdrawal'),
-        ('shortfall_cover', 'Shortfall Cover (paid to users)'),
-        ('excess_deposit', 'Excess Return Deposit (from overperformance)'),
-        ('smoothing_adj', 'Smoothing Adjustment'),
+        ("top_up", "Admin Top-Up"),
+        ("withdrawal", "Admin Withdrawal"),
+        ("shortfall_cover", "Shortfall Cover (paid to users)"),
+        ("excess_deposit", "Excess Return Deposit (from overperformance)"),
+        ("smoothing_adj", "Smoothing Adjustment"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     fund = models.ForeignKey(
-        QuantumAIFund, on_delete=models.CASCADE, related_name='reserve_transactions'
+        QuantumAIFund, on_delete=models.CASCADE, related_name="reserve_transactions"
     )
-    reserve = models.ForeignKey(
-        ReserveFund, on_delete=models.CASCADE, related_name='transactions'
-    )
+    reserve = models.ForeignKey(ReserveFund, on_delete=models.CASCADE, related_name="transactions")
     amount = models.DecimalField(max_digits=20, decimal_places=8)
     balance_before = models.DecimalField(max_digits=20, decimal_places=8)
     balance_after = models.DecimalField(max_digits=20, decimal_places=8)
@@ -556,30 +635,34 @@ class ReserveTransaction(TimeStampedModel):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.transaction_type} — {self.amount} USDT (balance: {self.balance_before} → {self.balance_after})"
+        return (
+            f"{self.transaction_type} — {self.amount} USDT "
+            f"(balance: {self.balance_before} → {self.balance_after})"
+        )
 
 
 # ==================== QUANTUM AI BOT (Admin-Managed Trading Bot) ====================
 
+
 class QuantumAIBot(SoftDeleteModel):
     """Admin-managed trading bot that trades using the QuantumAI strategy against the fund.
-    
+
     Admin sees and configures this bot. Users only see their investment balance.
     """
 
     class Meta:
-        db_table = 'bots_quantum_ai_bots'
+        db_table = "bots_quantum_ai_bots"
         verbose_name = "Quantum AI Bot"
         verbose_name_plural = "Quantum AI Bots"
         indexes = [
-            models.Index(fields=['fund', 'is_running']),
-            models.Index(fields=['exchange_name', 'trading_pair']),
+            models.Index(fields=["fund", "is_running"]),
+            models.Index(fields=["exchange_name", "trading_pair"]),
         ]
 
-    EXCHANGE_CHOICES = EXCHANGE_CHOICES
+    EXCHANGE_CHOICES = ExchangeCredentials.EXCHANGE_CHOICES
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    fund = models.ForeignKey(QuantumAIFund, on_delete=models.CASCADE, related_name='bots')
+    fund = models.ForeignKey(QuantumAIFund, on_delete=models.CASCADE, related_name="bots")
 
     bot_name = models.CharField(max_length=255)
     exchange_name = models.CharField(max_length=20, choices=EXCHANGE_CHOICES)
@@ -587,8 +670,7 @@ class QuantumAIBot(SoftDeleteModel):
 
     # Strategy parameters
     strategy_parameters = models.JSONField(
-        default=dict,
-        help_text="Strategy-specific config: timeframes, indicators, thresholds, etc."
+        default=dict, help_text="Strategy-specific config: timeframes, indicators, thresholds, etc."
     )
 
     # Bot state
@@ -607,46 +689,51 @@ class QuantumAIBot(SoftDeleteModel):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        status = 'Running' if self.is_running else 'Stopped'
+        status = "Running" if self.is_running else "Stopped"
         return f"{self.bot_name} [{status}] - {self.trading_pair}"
 
 
 # ==================== QUANTUM AI INVESTMENT (User-Facing) ====================
 
+
 class QuantumAIInvestment(SoftDeleteModel):
     """User's investment in Quantum AI fund"""
 
     class Meta:
-        db_table = 'bots_quantum_ai_investments'
-        unique_together = ['user', 'fund']
+        db_table = "bots_quantum_ai_investments"
+        unique_together = ["user", "fund"]
         indexes = [
-            models.Index(fields=['user', 'status']),
-            models.Index(fields=['fund', 'status']),
+            models.Index(fields=["user", "status"]),
+            models.Index(fields=["fund", "status"]),
         ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='quantum_ai_investments')
-    fund = models.ForeignKey(QuantumAIFund, on_delete=models.CASCADE, related_name='investments')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="quantum_ai_investments")
+    fund = models.ForeignKey(QuantumAIFund, on_delete=models.CASCADE, related_name="investments")
 
     # Link to subscription
     subscription = models.ForeignKey(
-        'payments.BotSubscription',
+        "payments.BotSubscription",
         on_delete=models.CASCADE,
-        related_name='quantum_ai_investments',
+        related_name="quantum_ai_investments",
         null=True,
-        blank=True
+        blank=True,
     )
 
     amount = models.DecimalField(max_digits=20, decimal_places=8)
     share_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
 
     deposited_at = models.DateTimeField(auto_now_add=True)
-    status = models.CharField(max_length=20, choices=[
-        ('pending', 'Pending Approval'),
-        ('active', 'Active'),
-        ('withdrawn', 'Withdrawn'),
-        ('cancelled', 'Cancelled'),
-    ], default='pending')
+    status = models.CharField(
+        max_length=20,
+        choices=[
+            ("pending", "Pending Approval"),
+            ("active", "Active"),
+            ("withdrawn", "Withdrawn"),
+            ("cancelled", "Cancelled"),
+        ],
+        default="pending",
+    )
 
     # Calculated fields
     accrued_profit = models.DecimalField(max_digits=20, decimal_places=8, default=0)
@@ -661,7 +748,7 @@ class QuantumAIInvestment(SoftDeleteModel):
     def calculate_share_percentage(self):
         """Calculate user's share of total fund"""
         if self.fund.total_deposits == 0:
-            return Decimal('0')
+            return Decimal("0")
         return (self.amount / self.fund.total_deposits) * 100
 
     def calculate_profit_share(self, actual_return_pct: Decimal) -> Decimal:
@@ -674,36 +761,46 @@ class QuantumAIInvestment(SoftDeleteModel):
         Returns:
             User's share in USDT
         """
-        if self.status != 'active' or self.fund.total_deposits == 0:
-            return Decimal('0')
+        if self.status != "active" or self.fund.total_deposits == 0:
+            return Decimal("0")
 
         shown_pct = self.fund.calculate_smoothed_return(actual_return_pct)
         user_portion = self.amount / self.fund.total_deposits
-        return self.fund.total_deposits * (shown_pct / Decimal('100')) * user_portion
+        return self.fund.total_deposits * (shown_pct / Decimal("100")) * user_portion
 
 
 # ==================== QUANTUM DEPOSIT WALLETS (Keep Existing) ====================
+
 
 class QuantumDepositWallet(SoftDeleteModel):
     """Admin-controlled deposit wallets for Quantum AI bot"""
 
     class Meta:
-        db_table = 'bots_quantum_wallets'
-        unique_together = ['coin', 'blockchain']
-        ordering = ['coin', 'blockchain']
+        db_table = "bots_quantum_wallets"
+        unique_together = ["coin", "blockchain"]
+        ordering = ["coin", "blockchain"]
         indexes = [
-            models.Index(fields=['coin', 'blockchain', 'is_active']),
+            models.Index(fields=["coin", "blockchain", "is_active"]),
         ]
 
     COIN_CHOICES = [
-        ('USDT', 'USDT'), ('USDC', 'USDC'), ('BTC', 'BTC'),
-        ('ETH', 'ETH'), ('BNB', 'BNB'), ('SOL', 'SOL'), ('APT', 'APTOS')
+        ("USDT", "USDT"),
+        ("USDC", "USDC"),
+        ("BTC", "BTC"),
+        ("ETH", "ETH"),
+        ("BNB", "BNB"),
+        ("SOL", "SOL"),
+        ("APT", "APTOS"),
     ]
 
     BLOCKCHAIN_CHOICES = [
-        ('SOL', 'Solana'), ('BEP20', 'BEP20'), ('APTOS', 'Aptos'),
-        ('ERC20', 'ERC20'), ('TRC20', 'TRC20'), ('BTC', 'Bitcoin'),
-        ('POLYGON', 'Polygon')
+        ("SOL", "Solana"),
+        ("BEP20", "BEP20"),
+        ("APTOS", "Aptos"),
+        ("ERC20", "ERC20"),
+        ("TRC20", "TRC20"),
+        ("BTC", "Bitcoin"),
+        ("POLYGON", "Polygon"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -724,31 +821,41 @@ class QuantumDeposit(SoftDeleteModel):
     """User deposits for Quantum AI with admin approval workflow"""
 
     class Meta:
-        db_table = 'bots_quantum_deposits'
-        ordering = ['-created_at']
+        db_table = "bots_quantum_deposits"
+        ordering = ["-created_at"]
         indexes = [
-            models.Index(fields=['user', 'status', '-created_at']),
-            models.Index(fields=['status', '-created_at']),
+            models.Index(fields=["user", "status", "-created_at"]),
+            models.Index(fields=["status", "-created_at"]),
         ]
 
     STATUS_CHOICES = [
-        ('pending', 'Pending Approval'),
-        ('approved', 'Approved'),
-        ('rejected', 'Rejected'),
-        ('processing', 'Processing'),
+        ("pending", "Pending Approval"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+        ("processing", "Processing"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='quantum_deposits')
-    wallet = models.ForeignKey(QuantumDepositWallet, on_delete=models.PROTECT, related_name='deposits')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="quantum_deposits")
+    wallet = models.ForeignKey(
+        QuantumDepositWallet, on_delete=models.PROTECT, related_name="deposits"
+    )
 
     amount = models.DecimalField(max_digits=20, decimal_places=8)
     transaction_hash = models.CharField(max_length=100, unique=True, db_index=True)
-    screenshot = models.ImageField(upload_to='quantum_deposits/%Y/%m/%d/')
+    screenshot = models.ImageField(upload_to="quantum_deposits/%Y/%m/%d/")
 
     # Admin approval fields
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True)
-    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_quantum_deposits')
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True
+    )
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_quantum_deposits",
+    )
     review_notes = models.TextField(blank=True)
 
     # Timestamps
@@ -764,28 +871,31 @@ class QuantumDeposit(SoftDeleteModel):
 
 # ==================== QUANTUM WEEKLY PROFIT (Keep Existing) ====================
 
+
 class QuantumWeeklyProfit(SoftDeleteModel):
     """Weekly profit/loss distribution with 20/80 split"""
 
     class Meta:
-        db_table = 'bots_quantum_weekly_profits'
-        unique_together = ['user', 'week_start']
-        ordering = ['-week_start']
+        db_table = "bots_quantum_weekly_profits"
+        unique_together = ["user", "week_start"]
+        ordering = ["-week_start"]
         indexes = [
-            models.Index(fields=['user', '-week_start', 'is_distributed']),
-            models.Index(fields=['is_distributed', '-week_start']),
+            models.Index(fields=["user", "-week_start", "is_distributed"]),
+            models.Index(fields=["is_distributed", "-week_start"]),
         ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='quantum_weekly_profits')
-    fund = models.ForeignKey(QuantumAIFund, on_delete=models.PROTECT, related_name='weekly_profits')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="quantum_weekly_profits")
+    fund = models.ForeignKey(QuantumAIFund, on_delete=models.PROTECT, related_name="weekly_profits")
 
     week_start = models.DateField()
     week_end = models.DateField()
     total_deposited = models.DecimalField(max_digits=20, decimal_places=8, default=0)
     realized_pnl = models.DecimalField(max_digits=20, decimal_places=8, default=0)
     unrealized_pnl = models.DecimalField(max_digits=20, decimal_places=8, default=0)
-    user_share_percent = models.DecimalField(max_digits=5, decimal_places=2, default=20.0)
+    user_share_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("20.0")
+    )
     is_distributed = models.BooleanField(default=False, db_index=True)
     distributed_at = models.DateTimeField(null=True, blank=True)
 
@@ -820,70 +930,79 @@ class QuantumWeeklyProfit(SoftDeleteModel):
 
 # ==================== PAIR CONFIG (Keep Your Model) ====================
 
+
 class PairConfig(TimeStampedModel):
     """Pair configuration model (preserved from your code)"""
 
     class Meta:
-        db_table = 'bots_pair_configs'
-        unique_together = ['user', 'pair_symbol', 'bot_type']
+        db_table = "bots_pair_configs"
+        unique_together = ["user", "pair_symbol", "bot_type"]
 
-    amount_choices = [('coin', 'Coins'), ('dollar', '$')]
-    order_choices = [('market', 'Market Order'), ('limit', 'Limit Order')]
-    SLTP_choices = [('percentage', 'Percentage'), ('dollars', 'Dollars')]
-    entry_choices = [('buy', 'BUY'), ('sell', 'SELL'), ('both', 'BOTH'), (None, 'None')]
-    exit_choices = [('tp', 'TP'), ('sl', 'SL'), ('both', 'BOTH'), (None, 'None')]
+    amount_choices = [("coin", "Coins"), ("dollar", "$")]
+    order_choices = [("market", "Market Order"), ("limit", "Limit Order")]
+    SLTP_choices = [("percentage", "Percentage"), ("dollars", "Dollars")]
+    entry_choices = [("buy", "BUY"), ("sell", "SELL"), ("both", "BOTH"), (None, "None")]
+    exit_choices = [("tp", "TP"), ("sl", "SL"), ("both", "BOTH"), (None, "None")]
 
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="pair_configs")
     pair_symbol = models.CharField(max_length=20, null=False, blank=False)
     slug = models.SlugField(null=True, blank=True)
 
     # NEW: Link to subscription
     subscription = models.ForeignKey(
-        'payments.BotSubscription',
+        "payments.BotSubscription",
         on_delete=models.CASCADE,
-        related_name='pair_configs',
+        related_name="pair_configs",
         null=True,
-        blank=True
+        blank=True,
     )
 
     # NEW: Bot type this config belongs to
-    bot_type = models.CharField(max_length=20, choices=[
-        ('grid', 'Grid Bot'),
-        ('martingale', 'Martingale Bot'),
-        ('custom', 'Custom Bot'),
-    ], default='grid')
+    bot_type = models.CharField(
+        max_length=20,
+        choices=[
+            ("grid", "Grid Bot"),
+            ("martingale", "Martingale Bot"),
+            ("custom", "Custom Bot"),
+        ],
+        default="grid",
+    )
 
-    quantity = models.FloatField(null=True, blank=True)
+    quantity = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     favor_levels = models.IntegerField(default=3, null=True, blank=True)
     against_levels = models.IntegerField(default=3, null=True, blank=True)
-    favor_level_qty = models.FloatField(null=True, blank=True)
-    against_level_qty = models.FloatField(null=True, blank=True)
-    favor_level_difference = models.FloatField(null=True, blank=True)
-    against_level_difference = models.FloatField(null=True, blank=True)
+    favor_level_qty = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    against_level_qty = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    favor_level_difference = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True
+    )
+    against_level_difference = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True
+    )
 
-    Order_Type = models.CharField(max_length=10, default='market', choices=order_choices)
-    Amount_Type = models.CharField(max_length=10, default='dollar', choices=amount_choices)
-    SLTP_Type = models.CharField(max_length=10, default='dollar', choices=SLTP_choices)
-    Stop_Loss = models.FloatField(blank=True, null=True)
-    Take_Profit = models.FloatField(blank=True, null=True)
+    Order_Type = models.CharField(max_length=10, default="market", choices=order_choices)
+    Amount_Type = models.CharField(max_length=10, default="dollar", choices=amount_choices)
+    SLTP_Type = models.CharField(max_length=10, default="dollar", choices=SLTP_choices)
+    Stop_Loss = models.DecimalField(max_digits=20, decimal_places=8, blank=True, null=True)
+    Take_Profit = models.DecimalField(max_digits=20, decimal_places=8, blank=True, null=True)
 
     RSI_Lower = models.FloatField(default=30, null=True, blank=True)
     RSI_Upper = models.FloatField(default=70, null=True, blank=True)
 
-    RSI_Entry = models.CharField(max_length=10, default='None', choices=entry_choices, null=True, blank=True)
-    BB_Entry = models.CharField(max_length=10, default='None', choices=entry_choices, null=True, blank=True)
-    EMA_RSI_Entry = models.CharField(max_length=10, default='None', choices=entry_choices, null=True, blank=True)
-    EMA_BB_Entry = models.CharField(max_length=10, default='None', choices=entry_choices, null=True, blank=True)
-    BB_RSI_Entry = models.CharField(max_length=10, default='None', choices=entry_choices, null=True, blank=True)
-    EMA_BB_RSI_Entry = models.CharField(max_length=10, default='None', choices=entry_choices, null=True, blank=True)
+    RSI_Entry = models.CharField(max_length=10, choices=entry_choices, null=True, blank=True)
+    BB_Entry = models.CharField(max_length=10, choices=entry_choices, null=True, blank=True)
+    EMA_RSI_Entry = models.CharField(max_length=10, choices=entry_choices, null=True, blank=True)
+    EMA_BB_Entry = models.CharField(max_length=10, choices=entry_choices, null=True, blank=True)
+    BB_RSI_Entry = models.CharField(max_length=10, choices=entry_choices, null=True, blank=True)
+    EMA_BB_RSI_Entry = models.CharField(max_length=10, choices=entry_choices, null=True, blank=True)
 
-    BB_Exit = models.CharField(max_length=10, default='None', choices=exit_choices, null=True, blank=True)
-    RSI_Exit = models.CharField(max_length=10, default='None', choices=exit_choices, null=True, blank=True)
-    EMA_RSI_Exit = models.CharField(max_length=10, default='None', choices=exit_choices, null=True, blank=True)
-    EMA_BB_Exit = models.CharField(max_length=10, default='None', choices=exit_choices, null=True, blank=True)
-    BB_RSI_Exit = models.CharField(max_length=10, default='None', choices=exit_choices, null=True, blank=True)
-    EMA_BB_RSI_Exit = models.CharField(max_length=10, default='None', choices=exit_choices, null=True, blank=True)
-    SL_Exit = models.CharField(max_length=10, default='None', choices=exit_choices, null=True, blank=True)
+    BB_Exit = models.CharField(max_length=10, choices=exit_choices, null=True, blank=True)
+    RSI_Exit = models.CharField(max_length=10, choices=exit_choices, null=True, blank=True)
+    EMA_RSI_Exit = models.CharField(max_length=10, choices=exit_choices, null=True, blank=True)
+    EMA_BB_Exit = models.CharField(max_length=10, choices=exit_choices, null=True, blank=True)
+    BB_RSI_Exit = models.CharField(max_length=10, choices=exit_choices, null=True, blank=True)
+    EMA_BB_RSI_Exit = models.CharField(max_length=10, choices=exit_choices, null=True, blank=True)
+    SL_Exit = models.CharField(max_length=10, choices=exit_choices, null=True, blank=True)
 
     def __str__(self):
         return f"{self.slug} Config"
@@ -891,12 +1010,13 @@ class PairConfig(TimeStampedModel):
 
 # ==================== INDICATOR (Keep Your Model) ====================
 
+
 class Indicator(TimeStampedModel):
     """Technical indicator model (preserved from your code)"""
 
     class Meta:
-        db_table = 'bots_indicators'
-        indexes = [models.Index(fields=['user', 'Pair'])]
+        db_table = "bots_indicators"
+        indexes = [models.Index(fields=["user", "Pair"])]
 
     Pair = models.CharField(max_length=20, null=True, blank=True)
     user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
@@ -913,24 +1033,27 @@ class Indicator(TimeStampedModel):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f'{self.user} {self.Pair} Indicator Data {self.id}'
+        return f"{self.user} {self.Pair} Indicator Data {self.id}"
 
 
 # ==================== ORDER (Keep Your Model + New Links) ====================
 
-class Order(TimeStampedModel):
-    """Unified order model (preserved from your code)"""
+
+class BotOrder(TimeStampedModel):
+    """Bot execution order record (preserved from your code)."""
 
     class Meta:
-        db_table = 'bots_orders'
-        ordering = ['-Time']
+        db_table = "bots_orders"
+        ordering = ["-Time"]
         indexes = [
-            models.Index(fields=['user', 'Pair']),
-            models.Index(fields=['-Time']),
+            models.Index(fields=["user", "Pair"]),
+            models.Index(fields=["-Time"]),
         ]
 
     Time = models.DateTimeField()
-    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, null=True, blank=True, related_name="legacy_orders"
+    )
     Pair = models.CharField(max_length=20, null=True, blank=True)
 
     # KEEP your relationships
@@ -938,20 +1061,28 @@ class Order(TimeStampedModel):
     Indicators = models.ForeignKey(Indicator, on_delete=models.CASCADE, blank=True, null=True)
 
     # Bot references (polymorphic)
-    signal_bot = models.ForeignKey(SignalBot, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
-    grid_bot = models.ForeignKey(GridBot, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
-    martingale_bot = models.ForeignKey(MartingaleBot, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
-    quantum_ai_investment = models.ForeignKey(QuantumAIInvestment, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
+    signal_bot = models.ForeignKey(
+        SignalBot, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
+    )
+    grid_bot = models.ForeignKey(
+        GridBot, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
+    )
+    martingale_bot = models.ForeignKey(
+        MartingaleBot, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
+    )
+    quantum_ai_investment = models.ForeignKey(
+        QuantumAIInvestment, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
+    )
 
     # Your existing fields
     Side = models.CharField(max_length=5, null=True, blank=True)
     Category = models.CharField(max_length=20, null=True, blank=True)
     Order_type = models.CharField(max_length=20, null=True, blank=True)
     Quantity = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
-    Price = models.FloatField(null=True, blank=True)
+    Price = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
     Exchange = models.CharField(max_length=20, blank=True, null=True)
-    Take_Profit = models.FloatField(blank=True, null=True)
-    Stop_Loss = models.FloatField(blank=True, null=True)
+    Take_Profit = models.DecimalField(max_digits=20, decimal_places=8, blank=True, null=True)
+    Stop_Loss = models.DecimalField(max_digits=20, decimal_places=8, blank=True, null=True)
     Description = models.TextField(blank=True, null=True)
     Details = models.JSONField(blank=True, null=True)
 
@@ -959,107 +1090,10 @@ class Order(TimeStampedModel):
     updated_at = models.DateTimeField(auto_now=True)
 
     def save(self, *args, **kwargs):
-        # KEEP your timezone override
-        if not self.id:
-            pakistan_tz = pytz.timezone('Asia/Karachi')
-            self.Time = timezone.now().astimezone(pakistan_tz)
-
-        # Ensure Time is set if empty
-        if not self.Time:
+        if self._state.adding:
             self.Time = timezone.now()
 
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f'{self.user} - {self.Pair} - {self.Side} - {self.Price} - {self.Time}'
-
-
-# ==================== TELEGRAM SIGNALS (Keep Existing) ====================
-
-class TelegramSignalPlan(SoftDeleteModel):
-    class Meta:
-        db_table = 'bots_telegram_plans'
-        ordering = ['price_usd']
-        indexes = [
-            models.Index(fields=['is_active', 'price_usd']),
-        ]
-
-    name = models.CharField(max_length=50, unique=True)
-    description = models.TextField()
-    duration_days = models.IntegerField()
-    price_usd = models.DecimalField(max_digits=10, decimal_places=2)
-    features = models.JSONField(default=dict, blank=True)
-    is_active = models.BooleanField(default=True, db_index=True)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return f"{self.name} - ${self.price_usd}"
-
-
-class TelegramSignalSubscription(SoftDeleteModel):
-    class Meta:
-        db_table = 'bots_telegram_subscriptions'
-        ordering = ['-subscribed_at']
-        indexes = [
-            models.Index(fields=['status', '-subscribed_at']),
-            models.Index(fields=['expires_at', 'status']),
-        ]
-
-    STATUS_CHOICES = [
-        ('pending', 'Pending Admin Approval'),
-        ('active', 'Active'),
-        ('expired', 'Expired'),
-        ('cancelled', 'Cancelled'),
-    ]
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-
-    # NEW: Link to unified BotSubscription
-    bot_subscription = models.OneToOneField(
-        'payments.BotSubscription',
-        on_delete=models.CASCADE,
-        related_name='telegram_subscription',
-        null=True,
-        blank=True
-    )
-
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='telegram_subscription')
-    plan = models.ForeignKey(TelegramSignalPlan, on_delete=models.PROTECT)
-    telegram_handle = models.CharField(max_length=50, unique=True, db_index=True)
-    invitation_link = models.URLField(null=True, blank=True)
-
-    # NEW: Join tracking
-    joined_channel = models.BooleanField(default=False)
-    joined_at = models.DateTimeField(null=True, blank=True)
-
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True)
-    subscribed_at = models.DateTimeField(auto_now_add=True)
-    approved_at = models.DateTimeField(null=True, blank=True)
-    expires_at = models.DateTimeField()
-
-    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_telegram_subs')
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def check_and_update_status(self):
-        """Auto-update status based on expiry"""
-        from django.utils import timezone
-        now = timezone.now()
-        if self.status == 'active' and now > self.expires_at:
-            self.status = 'expired'
-            self.save(update_fields=['status'])
-        return self.status
-
-    @property
-    def is_active(self):
-        """Check if subscription is currently active"""
-        from django.utils import timezone
-        if not self.approved_at:
-            return False
-        return timezone.now() < self.expires_at and self.status == 'active'
-
-    def __str__(self):
-        return f"{self.user.email} - {self.telegram_handle}"
+        return f"{self.user} - {self.Pair} - {self.Side} - {self.Price} - {self.Time}"
