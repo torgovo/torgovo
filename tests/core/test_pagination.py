@@ -1,17 +1,15 @@
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock
 
 import pytest
-from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory
 
 from core.pagination import (
-    StandardResultsSetPagination,
+    BotListPagination,
     LargeResultsSetPagination,
     SmallResultsSetPagination,
+    StandardResultsSetPagination,
     TradeHistoryPagination,
-    BotListPagination,
 )
-
 
 factory = APIRequestFactory()
 

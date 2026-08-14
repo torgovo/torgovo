@@ -1,18 +1,23 @@
-import pytest
-from django.utils import timezone
 from datetime import timedelta
+
+import pytest
 from django.contrib.auth import get_user_model
-from rest_framework.exceptions import ErrorDetail
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory
+
+from apps.authentication.models import EmailVerification, PasswordResetToken, PhoneVerification
 from apps.authentication.serializers import (
-    UserRegistrationSerializer, UserLoginSerializer, UserProfileSerializer,
-    UserSerializer, EmailVerificationSerializer, PhoneVerificationSerializer,
-    PhoneVerificationConfirmSerializer, PasswordResetRequestSerializer,
-    PasswordResetConfirmSerializer, GoogleAuthSerializer,
-    ChangePasswordSerializer, UpdateProfileSerializer, RefreshTokenSerializer
-)
-from apps.authentication.models import (
-    UserProfile, EmailVerification, PhoneVerification, PasswordResetToken
+    ChangePasswordSerializer,
+    EmailVerificationSerializer,
+    GoogleAuthSerializer,
+    PasswordResetConfirmSerializer,
+    PasswordResetRequestSerializer,
+    PhoneVerificationConfirmSerializer,
+    PhoneVerificationSerializer,
+    RefreshTokenSerializer,
+    UserLoginSerializer,
+    UserRegistrationSerializer,
+    UserSerializer,
 )
 
 User = get_user_model()
@@ -22,92 +27,92 @@ User = get_user_model()
 class TestUserRegistrationSerializer:
     def test_valid_registration(self):
         data = {
-            'username': 'newuser',
-            'email': 'newuser@example.com',
-            'password': 'StrongPass123!',
-            'password_confirm': 'StrongPass123!',
-            'first_name': 'New',
-            'last_name': 'User',
+            "username": "newuser",
+            "email": "newuser@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
+            "first_name": "New",
+            "last_name": "User",
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid(), serializer.errors
 
     def test_password_mismatch(self):
         data = {
-            'username': 'newuser',
-            'email': 'newuser@example.com',
-            'password': 'StrongPass123!',
-            'password_confirm': 'DifferentPass456!',
+            "username": "newuser",
+            "email": "newuser@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "DifferentPass456!",
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid() is False
-        assert 'Passwords' in str(serializer.errors['non_field_errors'])
+        assert "Passwords" in str(serializer.errors["non_field_errors"])
 
     def test_duplicate_email(self, user):
         data = {
-            'username': 'anotheruser',
-            'email': 'test@example.com',
-            'password': 'StrongPass123!',
-            'password_confirm': 'StrongPass123!',
+            "username": "anotheruser",
+            "email": "test@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid() is False
-        assert 'email' in serializer.errors
+        assert "email" in serializer.errors
 
     def test_duplicate_username(self, user):
         data = {
-            'username': 'testuser',
-            'email': 'unique@example.com',
-            'password': 'StrongPass123!',
-            'password_confirm': 'StrongPass123!',
+            "username": "testuser",
+            "email": "unique@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid() is False
-        assert 'username' in serializer.errors
+        assert "username" in serializer.errors
 
     def test_duplicate_phone_number(self, user):
-        user.phone_number = '+1234567890'
+        user.phone_number = "+1234567890"
         user.save()
         data = {
-            'username': 'anotheruser',
-            'email': 'another@example.com',
-            'password': 'StrongPass123!',
-            'password_confirm': 'StrongPass123!',
-            'phone_number': '+1234567890',
+            "username": "anotheruser",
+            "email": "another@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
+            "phone_number": "+1234567890",
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid() is False
-        assert 'phone_number' in serializer.errors
+        assert "phone_number" in serializer.errors
 
     def test_create_user_and_profile(self):
         data = {
-            'username': 'createuser',
-            'email': 'create@example.com',
-            'password': 'StrongPass123!',
-            'password_confirm': 'StrongPass123!',
+            "username": "createuser",
+            "email": "create@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid()
         user = serializer.save()
-        assert User.objects.filter(email='create@example.com').exists()
-        assert UserProfile.objects.filter(user=user).exists()
-        assert user.check_password('StrongPass123!')
+        assert User.objects.filter(email="create@example.com").exists()
+        assert user.referral_code is not None
+        assert user.check_password("StrongPass123!")
 
     def test_missing_password_confirm(self):
         data = {
-            'username': 'newuser',
-            'email': 'new@example.com',
-            'password': 'StrongPass123!',
+            "username": "newuser",
+            "email": "new@example.com",
+            "password": "StrongPass123!",
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid() is False
 
     def test_weak_password(self):
         data = {
-            'username': 'weakuser',
-            'email': 'weak@example.com',
-            'password': '123',
-            'password_confirm': '123',
+            "username": "weakuser",
+            "email": "weak@example.com",
+            "password": "123",
+            "password_confirm": "123",
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid() is False
@@ -116,15 +121,15 @@ class TestUserRegistrationSerializer:
 @pytest.mark.django_db
 class TestUserLoginSerializer:
     def test_valid_credentials(self, user):
-        user.set_password('CorrectPass123!')
+        user.set_password("CorrectPass123!")
         user.save()
-        data = {'email': 'test@example.com', 'password': 'CorrectPass123!'}
+        data = {"email": "test@example.com", "password": "CorrectPass123!"}
         serializer = UserLoginSerializer(data=data)
         assert serializer.is_valid(), serializer.errors
-        assert 'user' in serializer.validated_data
+        assert "user" in serializer.validated_data
 
     def test_invalid_credentials(self):
-        data = {'email': 'test@example.com', 'password': 'wrongpass'}
+        data = {"email": "test@example.com", "password": "wrongpass"}
         serializer = UserLoginSerializer(data=data)
         assert serializer.is_valid() is False
 
@@ -133,42 +138,13 @@ class TestUserLoginSerializer:
         assert serializer.is_valid() is False
 
     def test_disabled_user(self, user):
-        user.set_password('CorrectPass123!')
+        user.set_password("CorrectPass123!")
         user.save()
         user.is_active = False
         user.save()
-        data = {'email': 'test@example.com', 'password': 'CorrectPass123!'}
+        data = {"email": "test@example.com", "password": "CorrectPass123!"}
         serializer = UserLoginSerializer(data=data)
         assert serializer.is_valid() is False
-
-
-@pytest.mark.django_db
-class TestUserProfileSerializer:
-    def test_profile_serialization(self, user):
-        profile = UserProfile.objects.get(user=user)
-        serializer = UserProfileSerializer(profile)
-        data = serializer.data
-        assert data['user_email'] == user.email
-        assert data['subscription_plan'] == 'free'
-        assert data['subscription_plan_display'] == 'Free'
-        assert data['max_bots_allowed'] == 3
-        assert data['demo_trading_enabled'] is True
-        assert data['referral_code'] == profile.referral_code
-
-    def test_profile_read_only_fields(self, user):
-        profile = UserProfile.objects.get(user=user)
-        serializer = UserProfileSerializer(profile, data={'max_bots_allowed': 100}, partial=True)
-        assert serializer.is_valid()
-        serializer.save()
-        profile.refresh_from_db()
-        assert profile.max_bots_allowed == 3
-
-    def test_profile_serialization_with_preferences(self, user):
-        profile = UserProfile.objects.get(user=user)
-        profile.trading_preferences = {'risk_level': 'high'}
-        profile.save()
-        serializer = UserProfileSerializer(profile)
-        assert serializer.data['trading_preferences'] == {'risk_level': 'high'}
 
 
 @pytest.mark.django_db
@@ -176,31 +152,30 @@ class TestUserSerializer:
     def test_user_serialization(self, user):
         serializer = UserSerializer(user)
         data = serializer.data
-        assert data['email'] == user.email
-        assert data['username'] == user.username
-        assert data['is_email_verified'] is False
-        assert 'profile' in data
-        assert data['profile']['subscription_plan'] == 'free'
+        assert data["email"] == user.email
+        assert data["username"] == user.username
+        assert data["is_email_verified"] is False
+        assert data["subscription_plan"] == "free"
 
     def test_user_serialization_read_only_fields(self, user):
-        serializer = UserSerializer(user, data={'is_email_verified': True}, partial=True)
+        serializer = UserSerializer(user, data={"is_email_verified": True}, partial=True)
         assert serializer.is_valid()
         serializer.save()
         user.refresh_from_db()
         assert user.is_email_verified is False
 
     def test_full_name_read_only(self, user):
-        user.first_name = 'John'
-        user.last_name = 'Doe'
+        user.first_name = "John"
+        user.last_name = "Doe"
         user.save()
         serializer = UserSerializer(user)
-        assert serializer.data['full_name'] == 'John Doe'
+        assert serializer.data["full_name"] == "John Doe"
 
 
 @pytest.mark.django_db
 class TestEmailVerificationSerializer:
     def test_create_email_verification(self, user):
-        data = {'user': user.id}
+        data = {"user": user.id}
         serializer = EmailVerificationSerializer(data=data)
         assert serializer.is_valid(), serializer.errors
         ev = serializer.save()
@@ -210,19 +185,20 @@ class TestEmailVerificationSerializer:
 
     def test_token_is_read_only(self):
         serializer = EmailVerificationSerializer()
-        assert 'token' in serializer.get_fields()
-        assert serializer.get_fields()['token'].read_only is True
+        assert "token" in serializer.get_fields()
+        assert serializer.get_fields()["token"].read_only is True
 
     def test_expires_at_is_read_only(self):
         serializer = EmailVerificationSerializer()
-        assert serializer.get_fields()['expires_at'].read_only is True
+        assert serializer.get_fields()["expires_at"].read_only is True
 
     def test_invalidates_old_tokens(self, user):
         old_ev = EmailVerification.objects.create(
-            user=user, token='oldtoken123456789012345678901234567890123456789012345678901234',
-            expires_at=timezone.now() + timedelta(hours=24)
+            user=user,
+            token="oldtoken123456789012345678901234567890123456789012345678901234",
+            expires_at=timezone.now() + timedelta(hours=24),
         )
-        serializer = EmailVerificationSerializer(data={'user': user.id})
+        serializer = EmailVerificationSerializer(data={"user": user.id})
         assert serializer.is_valid()
         serializer.save()
         old_ev.refresh_from_db()
@@ -233,46 +209,46 @@ class TestEmailVerificationSerializer:
 class TestPhoneVerificationSerializer:
     def test_valid_phone_number(self):
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = None
-        data = {'phone_number': '+1234567890'}
-        serializer = PhoneVerificationSerializer(data=data, context={'request': request})
+        data = {"phone_number": "+1234567890"}
+        serializer = PhoneVerificationSerializer(data=data, context={"request": request})
         assert serializer.is_valid(), serializer.errors
 
     def test_invalid_phone_number(self):
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = None
-        data = {'phone_number': 'abc'}
-        serializer = PhoneVerificationSerializer(data=data, context={'request': request})
+        data = {"phone_number": "abc"}
+        serializer = PhoneVerificationSerializer(data=data, context={"request": request})
         assert serializer.is_valid() is False
 
     def test_create_verification(self, user):
-        from unittest.mock import Mock
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
-        data = {'phone_number': '+1234567890'}
-        serializer = PhoneVerificationSerializer(data=data, context={'request': request})
+        data = {"phone_number": "+1234567890"}
+        serializer = PhoneVerificationSerializer(data=data, context={"request": request})
         assert serializer.is_valid(), serializer.errors
         pv = serializer.save()
         assert pv.user == user
-        assert pv.phone_number == '+1234567890'
+        assert pv.phone_number == "+1234567890"
         assert len(pv.code) == 6
         assert pv.code.isdigit()
         assert pv.expires_at > timezone.now()
 
     def test_invalidates_old_codes(self, user):
-        from unittest.mock import Mock
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
         old_pv = PhoneVerification.objects.create(
-            user=user, code='000000', phone_number='+1987654321',
-            expires_at=timezone.now() + timedelta(minutes=10)
+            user=user,
+            code="000000",
+            phone_number="+1987654321",
+            expires_at=timezone.now() + timedelta(minutes=10),
         )
-        data = {'phone_number': '+1234567890'}
-        serializer = PhoneVerificationSerializer(data=data, context={'request': request})
+        data = {"phone_number": "+1234567890"}
+        serializer = PhoneVerificationSerializer(data=data, context={"request": request})
         assert serializer.is_valid()
         serializer.save()
         old_pv.refresh_from_db()
@@ -283,81 +259,91 @@ class TestPhoneVerificationSerializer:
 class TestPhoneVerificationConfirmSerializer:
     def test_valid_code(self, user):
         pv = PhoneVerification.objects.create(
-            user=user, code='123456', phone_number='+1234567890',
-            expires_at=timezone.now() + timedelta(minutes=10)
+            user=user,
+            code="123456",
+            phone_number="+1234567890",
+            expires_at=timezone.now() + timedelta(minutes=10),
         )
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
-        data = {'code': '123456', 'phone_number': '+1234567890'}
-        serializer = PhoneVerificationConfirmSerializer(data=data, context={'request': request})
+        data = {"code": "123456", "phone_number": "+1234567890"}
+        serializer = PhoneVerificationConfirmSerializer(data=data, context={"request": request})
         assert serializer.is_valid(), serializer.errors
-        assert serializer.validated_data['verification'] == pv
+        assert serializer.validated_data["verification"] == pv
 
     def test_wrong_code(self, user):
         PhoneVerification.objects.create(
-            user=user, code='123456', phone_number='+1234567890',
-            expires_at=timezone.now() + timedelta(minutes=10)
+            user=user,
+            code="123456",
+            phone_number="+1234567890",
+            expires_at=timezone.now() + timedelta(minutes=10),
         )
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
-        data = {'code': '000000', 'phone_number': '+1234567890'}
-        serializer = PhoneVerificationConfirmSerializer(data=data, context={'request': request})
+        data = {"code": "000000", "phone_number": "+1234567890"}
+        serializer = PhoneVerificationConfirmSerializer(data=data, context={"request": request})
         assert serializer.is_valid() is False
 
     def test_expired_code(self, user):
         PhoneVerification.objects.create(
-            user=user, code='123456', phone_number='+1234567890',
-            expires_at=timezone.now() - timedelta(minutes=1)
+            user=user,
+            code="123456",
+            phone_number="+1234567890",
+            expires_at=timezone.now() - timedelta(minutes=1),
         )
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
-        data = {'code': '123456', 'phone_number': '+1234567890'}
-        serializer = PhoneVerificationConfirmSerializer(data=data, context={'request': request})
+        data = {"code": "123456", "phone_number": "+1234567890"}
+        serializer = PhoneVerificationConfirmSerializer(data=data, context={"request": request})
         assert serializer.is_valid() is False
 
     def test_too_many_attempts(self, user):
         PhoneVerification.objects.create(
-            user=user, code='123456', phone_number='+1234567890',
+            user=user,
+            code="123456",
+            phone_number="+1234567890",
             expires_at=timezone.now() + timedelta(minutes=10),
-            attempts=3
+            attempts=3,
         )
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
-        data = {'code': '123456', 'phone_number': '+1234567890'}
-        serializer = PhoneVerificationConfirmSerializer(data=data, context={'request': request})
+        data = {"code": "123456", "phone_number": "+1234567890"}
+        serializer = PhoneVerificationConfirmSerializer(data=data, context={"request": request})
         assert serializer.is_valid() is False
 
     def test_wrong_code_increments_attempts(self, user):
         pv = PhoneVerification.objects.create(
-            user=user, code='123456', phone_number='+1234567890',
-            expires_at=timezone.now() + timedelta(minutes=10)
+            user=user,
+            code="123456",
+            phone_number="+1234567890",
+            expires_at=timezone.now() + timedelta(minutes=10),
         )
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
-        data = {'code': '000000', 'phone_number': '+1234567890'}
-        serializer = PhoneVerificationConfirmSerializer(data=data, context={'request': request})
+        data = {"code": "000000", "phone_number": "+1234567890"}
+        serializer = PhoneVerificationConfirmSerializer(data=data, context={"request": request})
         assert serializer.is_valid() is False
         pv.refresh_from_db()
         assert pv.attempts == 1
 
     def test_nonexistent_verification(self, user):
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
-        data = {'code': '123456', 'phone_number': '+9999999999'}
-        serializer = PhoneVerificationConfirmSerializer(data=data, context={'request': request})
+        data = {"code": "123456", "phone_number": "+9999999999"}
+        serializer = PhoneVerificationConfirmSerializer(data=data, context={"request": request})
         assert serializer.is_valid() is False
 
 
 @pytest.mark.django_db
 class TestPasswordResetRequestSerializer:
     def test_valid_email(self, user):
-        data = {'email': 'test@example.com'}
+        data = {"email": "test@example.com"}
         serializer = PasswordResetRequestSerializer(data=data)
         assert serializer.is_valid(), serializer.errors
 
@@ -365,14 +351,14 @@ class TestPasswordResetRequestSerializer:
         """Unknown email must NOT raise validation error (defeats user
         enumeration). The serializer accepts the email and ``save()``
         returns a no-op sentinel (``user=None``) instead of creating a token."""
-        data = {'email': 'nonexistent@example.com'}
+        data = {"email": "nonexistent@example.com"}
         serializer = PasswordResetRequestSerializer(data=data)
         assert serializer.is_valid(), serializer.errors
         result = serializer.save()
-        assert getattr(result, 'user', 'missing') is None
+        assert getattr(result, "user", "missing") is None
 
     def test_create_token(self, user):
-        data = {'email': 'test@example.com'}
+        data = {"email": "test@example.com"}
         serializer = PasswordResetRequestSerializer(data=data)
         assert serializer.is_valid()
         prt = serializer.save()
@@ -382,10 +368,11 @@ class TestPasswordResetRequestSerializer:
 
     def test_invalidates_old_tokens(self, user):
         old_prt = PasswordResetToken.objects.create(
-            user=user, token='oldresettokendatadatadatadatadatadatada',
-            expires_at=timezone.now() + timedelta(hours=2)
+            user=user,
+            token="oldresettokendatadatadatadatadatadatada",
+            expires_at=timezone.now() + timedelta(hours=2),
         )
-        data = {'email': 'test@example.com'}
+        data = {"email": "test@example.com"}
         serializer = PasswordResetRequestSerializer(data=data)
         assert serializer.is_valid()
         serializer.save()
@@ -397,12 +384,12 @@ class TestPasswordResetRequestSerializer:
 class TestPasswordResetConfirmSerializer:
     def test_valid_reset(self, user):
         prt = PasswordResetToken.objects.create(
-            user=user, token='validresettoken123', expires_at=timezone.now() + timedelta(hours=2)
+            user=user, token="validresettoken123", expires_at=timezone.now() + timedelta(hours=2)
         )
         data = {
-            'token': 'validresettoken123',
-            'new_password': 'NewStrongPass123!',
-            'new_password_confirm': 'NewStrongPass123!',
+            "token": "validresettoken123",
+            "new_password": "NewStrongPass123!",
+            "new_password_confirm": "NewStrongPass123!",
         }
         serializer = PasswordResetConfirmSerializer(data=data)
         assert serializer.is_valid(), serializer.errors
@@ -411,64 +398,67 @@ class TestPasswordResetConfirmSerializer:
         # Re-fetch from DB; the ``user`` fixture object holds the original
         # in-memory password hash and won't reflect the change.
         user.refresh_from_db()
-        assert user.check_password('NewStrongPass123!')
+        assert user.check_password("NewStrongPass123!")
         prt.refresh_from_db()
         assert prt.is_used is True
 
     def test_expired_token(self, user):
         PasswordResetToken.objects.create(
-            user=user, token='expiredtoken12345', expires_at=timezone.now() - timedelta(hours=1)
+            user=user, token="expiredtoken12345", expires_at=timezone.now() - timedelta(hours=1)
         )
         data = {
-            'token': 'expiredtoken12345',
-            'new_password': 'NewStrongPass123!',
-            'new_password_confirm': 'NewStrongPass123!',
+            "token": "expiredtoken12345",
+            "new_password": "NewStrongPass123!",
+            "new_password_confirm": "NewStrongPass123!",
         }
         serializer = PasswordResetConfirmSerializer(data=data)
         assert serializer.is_valid() is False
 
     def test_invalid_token(self):
         data = {
-            'token': 'nonexistenttoken',
-            'new_password': 'NewStrongPass123!',
-            'new_password_confirm': 'NewStrongPass123!',
+            "token": "nonexistenttoken",
+            "new_password": "NewStrongPass123!",
+            "new_password_confirm": "NewStrongPass123!",
         }
         serializer = PasswordResetConfirmSerializer(data=data)
         assert serializer.is_valid() is False
 
     def test_password_mismatch(self, user):
         PasswordResetToken.objects.create(
-            user=user, token='mismatchtoken1234', expires_at=timezone.now() + timedelta(hours=2)
+            user=user, token="mismatchtoken1234", expires_at=timezone.now() + timedelta(hours=2)
         )
         data = {
-            'token': 'mismatchtoken1234',
-            'new_password': 'NewStrongPass123!',
-            'new_password_confirm': 'DifferentPass456!',
+            "token": "mismatchtoken1234",
+            "new_password": "NewStrongPass123!",
+            "new_password_confirm": "DifferentPass456!",
         }
         serializer = PasswordResetConfirmSerializer(data=data)
         assert serializer.is_valid() is False
 
     def test_used_token(self, user):
-        prt = PasswordResetToken.objects.create(
-            user=user, token='usedtoken1234567', expires_at=timezone.now() + timedelta(hours=2),
-            is_used=True, used_at=timezone.now()
+        PasswordResetToken.objects.create(
+            user=user,
+            token="usedtoken1234567",
+            expires_at=timezone.now() + timedelta(hours=2),
+            is_used=True,
+            used_at=timezone.now(),
         )
         data = {
-            'token': 'usedtoken1234567',
-            'new_password': 'NewStrongPass123!',
-            'new_password_confirm': 'NewStrongPass123!',
+            "token": "usedtoken1234567",
+            "new_password": "NewStrongPass123!",
+            "new_password_confirm": "NewStrongPass123!",
         }
         serializer = PasswordResetConfirmSerializer(data=data)
         assert serializer.is_valid() is False
 
     def test_weak_password(self, user):
-        prt = PasswordResetToken.objects.create(
-            user=user, token='weakpasswordtoken', expires_at=timezone.now() + timedelta(hours=2)
+        PasswordResetToken.objects.create(
+            user=user, token="weakpasswordtoken", expires_at=timezone.now() + timedelta(hours=2)
         )
         data = {
-            'token': 'weakpasswordtoken',
-            'new_password': '123',
-            'new_password_confirm': '123',
+            "token": "weakpasswordtoken",
+            "new_password": "123",
+            "new_password_confirm": "123",
         }
         serializer = PasswordResetConfirmSerializer(data=data)
         assert serializer.is_valid() is False
@@ -477,27 +467,44 @@ class TestPasswordResetConfirmSerializer:
 @pytest.mark.django_db
 class TestGoogleAuthSerializer:
     def test_validate_access_token_calls_google(self, mocker):
-        mock_response = mocker.Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'email': 'google@example.com',
-            'name': 'Google User',
+        tokeninfo_response = mocker.Mock()
+        tokeninfo_response.status_code = 200
+        tokeninfo_response.json.return_value = {
+            "aud": "your-google-oauth-client-id",
+            "email": "google@example.com",
+            "name": "Google User",
         }
-        mocker.patch('requests.get', return_value=mock_response)
-        serializer = GoogleAuthSerializer(data={'access_token': 'valid-google-token'})
+        userinfo_response = mocker.Mock()
+        userinfo_response.status_code = 200
+        userinfo_response.json.return_value = {
+            "email": "google@example.com",
+            "name": "Google User",
+        }
+
+        def mock_requests_get(url, **kwargs):
+            if "tokeninfo" in url:
+                return tokeninfo_response
+            if "userinfo" in url:
+                return userinfo_response
+            return tokeninfo_response
+
+        mocker.patch("requests.get", side_effect=mock_requests_get)
+        serializer = GoogleAuthSerializer(data={"access_token": "valid-google-token"})
         assert serializer.is_valid(), serializer.errors
-        assert serializer.validated_data['access_token']['email'] == 'google@example.com'
+        assert serializer.validated_data["access_token"]["email"] == "google@example.com"
 
     def test_invalid_google_token(self, mocker):
         mock_response = mocker.Mock()
         mock_response.status_code = 401
-        mocker.patch('requests.get', return_value=mock_response)
-        serializer = GoogleAuthSerializer(data={'access_token': 'invalid-token'})
+        mocker.patch("requests.get", return_value=mock_response)
+        serializer = GoogleAuthSerializer(data={"access_token": "invalid-token"})
         assert serializer.is_valid() is False
 
     def test_google_api_error(self, mocker):
-        mocker.patch('requests.get', side_effect=Exception('Connection error'))
-        serializer = GoogleAuthSerializer(data={'access_token': 'error-token'})
+        import requests
+
+        mocker.patch("requests.get", side_effect=requests.ConnectionError("Connection error"))
+        serializer = GoogleAuthSerializer(data={"access_token": "error-token"})
         assert serializer.is_valid() is False
 
     def test_missing_access_token(self):
@@ -508,131 +515,86 @@ class TestGoogleAuthSerializer:
 @pytest.mark.django_db
 class TestChangePasswordSerializer:
     def test_valid_password_change(self, user):
-        user.set_password('OldPass123!')
+        user.set_password("OldPass123!")
         user.save()
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
         data = {
-            'old_password': 'OldPass123!',
-            'new_password': 'NewPass456!',
-            'new_password_confirm': 'NewPass456!',
+            "old_password": "OldPass123!",
+            "new_password": "NewPass456!",
+            "new_password_confirm": "NewPass456!",
         }
-        serializer = ChangePasswordSerializer(data=data, context={'request': request})
+        serializer = ChangePasswordSerializer(data=data, context={"request": request})
         assert serializer.is_valid(), serializer.errors
         serializer.save()
         user.refresh_from_db()
-        assert user.check_password('NewPass456!')
+        assert user.check_password("NewPass456!")
 
     def test_wrong_old_password(self, user):
-        user.set_password('OldPass123!')
+        user.set_password("OldPass123!")
         user.save()
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
         data = {
-            'old_password': 'WrongOldPass!',
-            'new_password': 'NewPass456!',
-            'new_password_confirm': 'NewPass456!',
+            "old_password": "WrongOldPass!",
+            "new_password": "NewPass456!",
+            "new_password_confirm": "NewPass456!",
         }
-        serializer = ChangePasswordSerializer(data=data, context={'request': request})
+        serializer = ChangePasswordSerializer(data=data, context={"request": request})
         assert serializer.is_valid() is False
 
     def test_password_mismatch(self, user):
-        user.set_password('OldPass123!')
+        user.set_password("OldPass123!")
         user.save()
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
         data = {
-            'old_password': 'OldPass123!',
-            'new_password': 'NewPass456!',
-            'new_password_confirm': 'DifferentPass789!',
+            "old_password": "OldPass123!",
+            "new_password": "NewPass456!",
+            "new_password_confirm": "DifferentPass789!",
         }
-        serializer = ChangePasswordSerializer(data=data, context={'request': request})
+        serializer = ChangePasswordSerializer(data=data, context={"request": request})
         assert serializer.is_valid() is False
 
     def test_weak_new_password(self, user):
-        user.set_password('OldPass123!')
+        user.set_password("OldPass123!")
         user.save()
         factory = APIRequestFactory()
-        request = factory.post('/')
+        request = factory.post("/")
         request.user = user
         data = {
-            'old_password': 'OldPass123!',
-            'new_password': '123',
-            'new_password_confirm': '123',
+            "old_password": "OldPass123!",
+            "new_password": "123",
+            "new_password_confirm": "123",
         }
-        serializer = ChangePasswordSerializer(data=data, context={'request': request})
+        serializer = ChangePasswordSerializer(data=data, context={"request": request})
         assert serializer.is_valid() is False
-
-
-@pytest.mark.django_db
-class TestUpdateProfileSerializer:
-    def test_valid_update(self, user):
-        profile = UserProfile.objects.get(user=user)
-        data = {
-            'timezone': 'America/New_York',
-            'demo_trading_enabled': False,
-            'email_notifications': False,
-            'push_notifications': False,
-        }
-        serializer = UpdateProfileSerializer(profile, data=data, partial=True)
-        assert serializer.is_valid(), serializer.errors
-        serializer.save()
-        profile.refresh_from_db()
-        assert profile.timezone == 'America/New_York'
-        assert profile.demo_trading_enabled is False
-        assert profile.email_notifications is False
-        assert profile.push_notifications is False
-
-    def test_invalid_trading_preferences(self, user):
-        profile = UserProfile.objects.get(user=user)
-        data = {'trading_preferences': 'not_a_dict'}
-        serializer = UpdateProfileSerializer(profile, data=data, partial=True)
-        assert serializer.is_valid() is False
-
-    def test_valid_trading_preferences(self, user):
-        profile = UserProfile.objects.get(user=user)
-        data = {'trading_preferences': {'key': 'value'}}
-        serializer = UpdateProfileSerializer(profile, data=data, partial=True)
-        assert serializer.is_valid(), serializer.errors
-        serializer.save()
-        profile.refresh_from_db()
-        assert profile.trading_preferences == {'key': 'value'}
-
-    def test_partial_update(self, user):
-        profile = UserProfile.objects.get(user=user)
-        original_tz = profile.timezone
-        data = {'sms_notifications': True}
-        serializer = UpdateProfileSerializer(profile, data=data, partial=True)
-        assert serializer.is_valid()
-        serializer.save()
-        profile.refresh_from_db()
-        assert profile.sms_notifications is True
-        assert profile.timezone == original_tz
 
 
 @pytest.mark.django_db
 class TestRefreshTokenSerializer:
     def test_valid_refresh_token(self, user):
         from rest_framework_simplejwt.tokens import RefreshToken
+
         token = RefreshToken.for_user(user)
-        data = {'refresh_token': str(token)}
+        data = {"refresh_token": str(token)}
         serializer = RefreshTokenSerializer(data=data)
         assert serializer.is_valid(), serializer.errors
-        assert serializer.validated_data['refresh_token'] is not None
+        assert serializer.validated_data["refresh_token"] is not None
 
     def test_invalid_refresh_token(self):
-        data = {'refresh_token': 'invalidtoken'}
+        data = {"refresh_token": "invalidtoken"}
         serializer = RefreshTokenSerializer(data=data)
         assert serializer.is_valid() is False
 
     def test_expired_refresh_token(self):
         from rest_framework_simplejwt.tokens import RefreshToken
-        import time
+
         token = RefreshToken()
         token.set_exp(lifetime=timedelta(seconds=-1))
-        data = {'refresh_token': str(token)}
+        data = {"refresh_token": str(token)}
         serializer = RefreshTokenSerializer(data=data)
         assert serializer.is_valid() is False

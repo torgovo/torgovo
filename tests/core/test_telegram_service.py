@@ -1,6 +1,4 @@
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from core.telegram_service import TelegramService
 
@@ -61,6 +59,7 @@ class TestTelegramServiceSendMessage:
     @patch("core.telegram_service.requests.post")
     def test_send_message_request_exception(self, mock_post):
         from requests.exceptions import RequestException
+
         mock_post.side_effect = RequestException("Connection error")
 
         result = TelegramService.send_message(
@@ -134,11 +133,13 @@ class TestTelegramServiceSendTradeAlert:
         }
         result = TelegramService.send_trade_alert(user, trade_data)
         assert result is True
-        mock_send_message.assert_called_once()
-        args, kwargs = mock_send_message.call_args
-        assert kwargs["token"] == "12345:ABC"
-        assert kwargs["chat_id"] == "-100123456789"
-        message = kwargs["message"]
+        mock_send_message.assert_called_once_with(
+            "12345:ABC", "-100123456789", mock_send_message.call_args[0][2]
+        )
+        args, _ = mock_send_message.call_args
+        assert args[0] == "12345:ABC"
+        assert args[1] == "-100123456789"
+        message = args[2]
         assert "BTC/USDT" in message
         assert "BUY" in message
         assert "0.5" in message
@@ -162,7 +163,7 @@ class TestTelegramServiceSendTradeAlert:
         }
         result = TelegramService.send_trade_alert(user, trade_data)
         assert result is True
-        message = mock_send_message.call_args[1]["message"]
+        message = mock_send_message.call_args[0][2]
         assert "SELL" in message
         assert "ETH/USDT" in message
         assert "Bybit" in message
@@ -183,7 +184,7 @@ class TestTelegramServiceSendTradeAlert:
         }
         result = TelegramService.send_trade_alert(user, trade_data)
         assert result is True
-        message = mock_send_message.call_args[1]["message"]
+        message = mock_send_message.call_args[0][2]
         assert "P&L" not in message
 
 
@@ -274,7 +275,7 @@ class TestTelegramServiceNotifyBotStarted:
             user, "GridBot", {"trading_pair": "BTC/USDT", "exchange_name": "Binance"}
         )
         assert result is True
-        message = mock_send_message.call_args[1]["message"]
+        message = mock_send_message.call_args[0][2]
         assert "**Bot Started**" in message
         assert "**Type:** GridBot" in message
         assert "**Pair:** BTC/USDT" in message
@@ -299,7 +300,7 @@ class TestTelegramServiceNotifyBotStarted:
 
         result = TelegramService.notify_bot_started(user, "DCA", {})
         assert result is True
-        message = mock_send_message.call_args[1]["message"]
+        message = mock_send_message.call_args[0][2]
         assert "**Pair:** N/A" in message
         assert "**Exchange:** N/A" in message
 
@@ -314,7 +315,7 @@ class TestTelegramServiceNotifyBotStopped:
 
         result = TelegramService.notify_bot_stopped(user, "GridBot", "TP hit")
         assert result is True
-        message = mock_send_message.call_args[1]["message"]
+        message = mock_send_message.call_args[0][2]
         assert "**Bot Stopped**" in message
         assert "**Type:** GridBot" in message
         assert "**Reason:** TP hit" in message
@@ -328,7 +329,7 @@ class TestTelegramServiceNotifyBotStopped:
 
         result = TelegramService.notify_bot_stopped(user, "Martingale")
         assert result is True
-        message = mock_send_message.call_args[1]["message"]
+        message = mock_send_message.call_args[0][2]
         assert "User stopped" in message
 
     @patch.object(TelegramService, "send_message")

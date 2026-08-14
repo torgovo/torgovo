@@ -1,20 +1,19 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from django.test import RequestFactory
-from rest_framework import permissions
+from rest_framework.test import APIRequestFactory
 
 from core.permissions import (
-    IsOwnerOrReadOnly,
-    IsOwnerOrAdmin,
+    CanApproveDeposits,
+    CanCreateBots,
+    HasExchangeCredentials,
+    HasValidSubscription,
     IsAdminOrReadOnly,
     IsAdminUser,
     IsBotOwner,
-    HasValidSubscription,
-    CanCreateBots,
-    HasExchangeCredentials,
+    IsOwnerOrAdmin,
+    IsOwnerOrReadOnly,
     IsQuantumAIDepositOwner,
-    CanApproveDeposits,
     IsWebhookOwner,
 )
 
@@ -26,20 +25,20 @@ class TestIsOwnerOrReadOnly:
 
     def test_safe_methods_allowed(self, permission):
         for method in ["GET", "HEAD", "OPTIONS"]:
-            request = RequestFactory().generic(method, "/")
+            request = APIRequestFactory().generic(method, "/")
             obj = MagicMock()
             assert permission.has_object_permission(request, None, obj) is True
 
     def test_owner_can_write(self, permission):
         user = MagicMock()
-        request = RequestFactory().put("/")
+        request = APIRequestFactory().put("/")
         request.user = user
         obj = MagicMock()
         obj.user = user
         assert permission.has_object_permission(request, None, obj) is True
 
     def test_non_owner_cannot_write(self, permission):
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = MagicMock()
         obj = MagicMock()
         obj.user = MagicMock()
@@ -55,7 +54,7 @@ class TestIsOwnerOrAdmin:
         user = MagicMock()
         user.is_staff = True
         user.is_superuser = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         obj = MagicMock()
         assert permission.has_object_permission(request, None, obj) is True
@@ -64,7 +63,7 @@ class TestIsOwnerOrAdmin:
         user = MagicMock()
         user.is_staff = False
         user.is_superuser = True
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         obj = MagicMock()
         assert permission.has_object_permission(request, None, obj) is True
@@ -73,7 +72,7 @@ class TestIsOwnerOrAdmin:
         user = MagicMock()
         user.is_staff = False
         user.is_superuser = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         obj = MagicMock()
         obj.user = user
@@ -83,7 +82,7 @@ class TestIsOwnerOrAdmin:
         user = MagicMock()
         user.is_staff = False
         user.is_superuser = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         obj = MagicMock()
         obj.user = MagicMock()
@@ -93,7 +92,7 @@ class TestIsOwnerOrAdmin:
         user = MagicMock()
         user.is_staff = False
         user.is_superuser = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         obj = MagicMock(spec=[])  # No user attribute
         assert permission.has_object_permission(request, None, obj) is False
@@ -107,14 +106,14 @@ class TestIsAdminOrReadOnly:
     def test_authenticated_user_can_read(self, permission):
         user = MagicMock()
         user.is_authenticated = True
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
     def test_unauthenticated_user_cannot_read(self, permission):
         user = MagicMock()
         user.is_authenticated = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
@@ -122,7 +121,7 @@ class TestIsAdminOrReadOnly:
         user = MagicMock()
         user.is_staff = True
         user.is_superuser = True
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
@@ -130,7 +129,7 @@ class TestIsAdminOrReadOnly:
         user = MagicMock()
         user.is_staff = True
         user.is_superuser = False
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
@@ -138,7 +137,7 @@ class TestIsAdminOrReadOnly:
         user = MagicMock()
         user.is_staff = False
         user.is_superuser = False
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
@@ -152,7 +151,7 @@ class TestIsAdminUser:
         user = MagicMock()
         user.is_staff = True
         user.is_superuser = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
@@ -160,7 +159,7 @@ class TestIsAdminUser:
         user = MagicMock()
         user.is_staff = False
         user.is_superuser = True
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
@@ -168,7 +167,7 @@ class TestIsAdminUser:
         user = MagicMock()
         user.is_staff = False
         user.is_superuser = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
@@ -180,20 +179,20 @@ class TestIsBotOwner:
 
     def test_safe_methods_allowed(self, permission):
         for method in ["GET", "HEAD", "OPTIONS"]:
-            request = RequestFactory().generic(method, "/")
+            request = APIRequestFactory().generic(method, "/")
             obj = MagicMock()
             assert permission.has_object_permission(request, None, obj) is True
 
     def test_owner_can_write(self, permission):
         user = MagicMock()
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = user
         obj = MagicMock()
         obj.user = user
         assert permission.has_object_permission(request, None, obj) is True
 
     def test_non_owner_cannot_write(self, permission):
-        request = RequestFactory().put("/")
+        request = APIRequestFactory().put("/")
         request.user = MagicMock()
         obj = MagicMock()
         obj.user = MagicMock()
@@ -208,7 +207,7 @@ class TestHasValidSubscription:
     def test_unauthenticated_user_denied(self, permission):
         user = MagicMock()
         user.is_authenticated = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
@@ -217,7 +216,7 @@ class TestHasValidSubscription:
         user.is_authenticated = True
         user.is_staff = True
         user.is_superuser = True
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
@@ -226,32 +225,18 @@ class TestHasValidSubscription:
         user.is_authenticated = True
         user.is_staff = False
         user.is_superuser = False
-        profile = MagicMock()
-        profile.has_active_subscription.return_value = True
-        user.profile = profile
-        request = RequestFactory().get("/")
+        user.has_active_subscription.return_value = True
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is True
-
-    def test_user_without_profile(self, permission):
-        user = MagicMock()
-        user.is_authenticated = True
-        user.is_staff = False
-        user.is_superuser = False
-        del user.profile
-        request = RequestFactory().get("/")
-        request.user = user
-        assert permission.has_permission(request, None) is False
 
     def test_user_without_active_subscription(self, permission):
         user = MagicMock()
         user.is_authenticated = True
         user.is_staff = False
         user.is_superuser = False
-        profile = MagicMock()
-        profile.has_active_subscription.return_value = False
-        user.profile = profile
-        request = RequestFactory().get("/")
+        user.has_active_subscription.return_value = False
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
@@ -263,13 +248,13 @@ class TestCanCreateBots:
 
     def test_non_post_methods_allowed(self, permission):
         for method in ["GET", "PUT", "PATCH", "DELETE", "HEAD"]:
-            request = RequestFactory().generic(method, "/")
+            request = APIRequestFactory().generic(method, "/")
             assert permission.has_permission(request, None) is True
 
     def test_unauthenticated_user_cannot_create(self, permission):
         user = MagicMock()
         user.is_authenticated = False
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
@@ -278,7 +263,7 @@ class TestCanCreateBots:
         user.is_authenticated = True
         user.is_staff = True
         user.is_superuser = True
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
@@ -287,10 +272,8 @@ class TestCanCreateBots:
         user.is_authenticated = True
         user.is_staff = False
         user.is_superuser = False
-        profile = MagicMock()
-        profile.can_create_more_bots.return_value = True
-        user.profile = profile
-        request = RequestFactory().post("/")
+        user.can_create_more_bots.return_value = True
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
@@ -299,10 +282,8 @@ class TestCanCreateBots:
         user.is_authenticated = True
         user.is_staff = False
         user.is_superuser = False
-        profile = MagicMock()
-        profile.can_create_more_bots.return_value = False
-        user.profile = profile
-        request = RequestFactory().post("/")
+        user.can_create_more_bots.return_value = False
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
@@ -316,40 +297,46 @@ class TestHasExchangeCredentials:
     def test_unauthenticated_user_denied(self, permission):
         user = MagicMock()
         user.is_authenticated = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
     def test_safe_methods_allowed_for_authenticated(self, permission):
         user = MagicMock()
         user.is_authenticated = True
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
     def test_post_without_exchange_name(self, permission):
         user = MagicMock()
         user.is_authenticated = True
-        request = RequestFactory().post("/", data={})
+        request = MagicMock()
+        request.method = "POST"
         request.user = user
+        request.data = {}
         assert permission.has_permission(request, None) is True
 
-    @patch("core.permissions.ExchangeCredentials.objects.filter")
+    @patch("apps.exchanges.models.ExchangeCredentials.objects.filter")
     def test_post_with_valid_credentials(self, mock_filter, permission):
         mock_filter.return_value.exists.return_value = True
         user = MagicMock()
         user.is_authenticated = True
-        request = RequestFactory().post("/", data={"exchange_name": "binance"})
+        request = MagicMock()
+        request.method = "POST"
         request.user = user
+        request.data = {"exchange_name": "binance"}
         assert permission.has_permission(request, None) is True
 
-    @patch("core.permissions.ExchangeCredentials.objects.filter")
+    @patch("apps.exchanges.models.ExchangeCredentials.objects.filter")
     def test_post_without_credentials(self, mock_filter, permission):
         mock_filter.return_value.exists.return_value = False
         user = MagicMock()
         user.is_authenticated = True
-        request = RequestFactory().post("/", data={"exchange_name": "unknown"})
+        request = MagicMock()
+        request.method = "POST"
         request.user = user
+        request.data = {"exchange_name": "unknown"}
         assert permission.has_permission(request, None) is False
 
 
@@ -362,7 +349,7 @@ class TestIsQuantumAIDepositOwner:
         user = MagicMock()
         user.is_staff = True
         user.is_superuser = True
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         obj = MagicMock()
         assert permission.has_object_permission(request, None, obj) is True
@@ -371,7 +358,7 @@ class TestIsQuantumAIDepositOwner:
         user = MagicMock()
         user.is_staff = False
         user.is_superuser = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         obj = MagicMock()
         obj.user = user
@@ -381,7 +368,7 @@ class TestIsQuantumAIDepositOwner:
         user = MagicMock()
         user.is_staff = False
         user.is_superuser = False
-        request = RequestFactory().get("/")
+        request = APIRequestFactory().get("/")
         request.user = user
         obj = MagicMock()
         obj.user = MagicMock()
@@ -396,7 +383,7 @@ class TestCanApproveDeposits:
     def test_unauthenticated_denied(self, permission):
         user = MagicMock()
         user.is_authenticated = False
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
@@ -405,7 +392,7 @@ class TestCanApproveDeposits:
         user.is_authenticated = True
         user.is_staff = True
         user.is_superuser = False
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
@@ -414,7 +401,7 @@ class TestCanApproveDeposits:
         user.is_authenticated = True
         user.is_staff = False
         user.is_superuser = True
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
@@ -423,7 +410,7 @@ class TestCanApproveDeposits:
         user.is_authenticated = True
         user.is_staff = False
         user.is_superuser = False
-        request = RequestFactory().post("/")
+        request = APIRequestFactory().post("/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
@@ -433,34 +420,44 @@ class TestIsWebhookOwner:
     def permission(self):
         return IsWebhookOwner()
 
-    def test_post_allows_anyone(self, permission):
-        request = RequestFactory().post("/webhooks/")
+    def test_post_requires_authenticated(self, permission):
+        user = MagicMock()
+        user.is_authenticated = False
+        request = APIRequestFactory().post("/webhooks/")
+        request.user = user
+        assert permission.has_permission(request, None) is False
+
+    def test_post_allows_authenticated(self, permission):
+        user = MagicMock()
+        user.is_authenticated = True
+        request = APIRequestFactory().post("/webhooks/")
+        request.user = user
         assert permission.has_permission(request, None) is True
 
     def test_get_requires_authenticated(self, permission):
         user = MagicMock()
         user.is_authenticated = False
-        request = RequestFactory().get("/webhooks/")
+        request = APIRequestFactory().get("/webhooks/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
     def test_get_allows_authenticated(self, permission):
         user = MagicMock()
         user.is_authenticated = True
-        request = RequestFactory().get("/webhooks/")
+        request = APIRequestFactory().get("/webhooks/")
         request.user = user
         assert permission.has_permission(request, None) is True
 
     def test_put_requires_authenticated(self, permission):
         user = MagicMock()
         user.is_authenticated = False
-        request = RequestFactory().put("/webhooks/")
+        request = APIRequestFactory().put("/webhooks/")
         request.user = user
         assert permission.has_permission(request, None) is False
 
     def test_delete_requires_authenticated(self, permission):
         user = MagicMock()
         user.is_authenticated = True
-        request = RequestFactory().delete("/webhooks/")
+        request = APIRequestFactory().delete("/webhooks/")
         request.user = user
         assert permission.has_permission(request, None) is True

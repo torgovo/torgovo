@@ -1,18 +1,16 @@
 import uuid
-from decimal import Decimal
-from datetime import timedelta
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.db import models
 from django.utils import timezone
-from django.contrib.auth import get_user_model
 
 from core.models import (
-    TimeStampedModel,
-    SoftDeleteModel,
-    UserActivityLog,
-    SystemConfiguration,
     AuditLog,
+    SoftDeleteModel,
+    SystemConfiguration,
+    TimeStampedModel,
+    UserActivityLog,
 )
 
 User = get_user_model()
@@ -174,7 +172,7 @@ class TestUserActivityLog:
         assert UserActivityLog._meta.db_table == "core_user_activity_log"
 
     def test_indexes(self):
-        indexes = {idx.fields: idx for idx in UserActivityLog._meta.indexes}
+        indexes = {tuple(idx.fields): idx for idx in UserActivityLog._meta.indexes}
         assert ("user", "created_at") in indexes
         assert ("action", "created_at") in indexes
 
@@ -212,9 +210,7 @@ class TestSystemConfiguration:
         assert config.is_active is True
 
     def test_inactive_config(self):
-        config = SystemConfiguration.objects.create(
-            key="INACTIVE", value="false", is_active=False
-        )
+        config = SystemConfiguration.objects.create(key="INACTIVE", value="false", is_active=False)
         assert config.is_active is False
         config.is_active = True
         config.save()
@@ -313,7 +309,7 @@ class TestAuditLog:
         assert AuditLog._meta.db_table == "core_audit_log"
 
     def test_indexes(self):
-        indexes = {idx.fields: idx for idx in AuditLog._meta.indexes}
+        indexes = {tuple(idx.fields): idx for idx in AuditLog._meta.indexes}
         assert ("user", "created_at") in indexes
         assert ("action", "created_at") in indexes
         assert ("resource_type", "resource_id") in indexes

@@ -1,16 +1,16 @@
 import time
 import uuid
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-from django.test import RequestFactory
 from django.http import HttpResponse, JsonResponse
+from django.test import RequestFactory
 
 from core.middleware import (
+    CorrelationIDMiddleware,
+    RateLimitMiddleware,
     RequestLoggingMiddleware,
     SecurityHeadersMiddleware,
-    RateLimitMiddleware,
-    CorrelationIDMiddleware,
 )
 
 
@@ -172,15 +172,35 @@ class TestRateLimitMiddleware:
         assert hasattr(request, "rate_limit_total")
 
     def test_rate_limit_exceeded(self, middleware):
+        from django.core.cache import cache
+
         client_id = "ip:127.0.0.1"
         current_time = int(time.time() // 60)
-        key = f"{client_id}:{current_time}"
-        middleware.rate_limits[key] = 100
+        cache_key = f"ratelimit:{client_id}:{current_time}"
+        cache.set(cache_key, 100, timeout=61)
 
         request = RequestFactory().get("/api/bots/", REMOTE_ADDR="127.0.0.1")
         result = middleware.process_request(request)
         assert isinstance(result, JsonResponse)
         assert result.status_code == 429
+
+    def test_count_increments_within_window(self, middleware):
+        request = RequestFactory().get("/api/bots/", REMOTE_ADDR="127.0.0.1")
+        middleware.process_request(request)
+        middleware.process_request(request)
+        assert request.rate_limit_remaining == 98
+        assert request.rate_limit_total == 100
+
+    def test_falls_back_to_memory_when_cache_unavailable(self, middleware):
+        from unittest.mock import patch
+
+        with patch("core.middleware.cache.incr", side_effect=ConnectionError("redis down")):
+            with patch("core.middleware.cache.add", side_effect=ConnectionError("redis down")):
+                request = RequestFactory().get("/api/bots/", REMOTE_ADDR="127.0.0.1")
+                result = middleware.process_request(request)
+                assert result is None
+                assert request.rate_limit_total == 100
+                assert request.rate_limit_remaining == 99
 
     def test_adds_rate_limit_headers(self, middleware):
         request = RequestFactory().get("/api/bots/")

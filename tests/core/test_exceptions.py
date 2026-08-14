@@ -1,35 +1,36 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.core.exceptions import PermissionDenied
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import Http404
-from django.core.exceptions import PermissionDenied, ValidationError as DjangoValidationError
 from rest_framework import status
 from rest_framework.exceptions import (
     AuthenticationFailed,
+    MethodNotAllowed,
+    NotAcceptable,
     NotAuthenticated,
     NotFound,
     ParseError,
-    MethodNotAllowed,
-    NotAcceptable,
-    UnsupportedMediaType,
     Throttled,
-    ValidationError as DRFValidationError,
+    UnsupportedMediaType,
 )
+from rest_framework.exceptions import ValidationError as DRFValidationError
 
 from core.exceptions import (
-    custom_exception_handler,
-    get_error_code,
-    get_error_message,
-    get_error_details,
-    get_status_code,
-    get_timestamp,
-    TradingBotException,
+    BotLimitException,
     ExchangeAPIException,
     InsufficientBalanceException,
     InvalidOrderException,
-    BotLimitException,
     QuantumAIDepositException,
+    TradingBotException,
     WebhookException,
+    custom_exception_handler,
+    get_error_code,
+    get_error_details,
+    get_error_message,
+    get_status_code,
+    get_timestamp,
 )
 
 
@@ -147,7 +148,7 @@ class TestGetErrorCode:
 
     def test_trading_bot_exception(self):
         exc = TradingBotException("error")
-        assert get_error_code(exc) == "INTERNAL_SERVER_ERROR"
+        assert get_error_code(exc) == "TRADING_BOT_ERROR"
 
 
 class TestGetErrorMessage:

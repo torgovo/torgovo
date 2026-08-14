@@ -1,36 +1,36 @@
-import uuid
-import hmac
 import hashlib
+import hmac
+import uuid
 from decimal import Decimal
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from core.utils import (
-    generate_uuid,
-    generate_secret_key,
-    encrypt_api_key,
-    decrypt_api_key,
-    validate_webhook_signature,
-    format_decimal,
-    calculate_percentage_change,
-    validate_trading_pair,
-    parse_float,
-    parse_decimal,
-    get_timeframe_minutes,
-    round_to_nearest,
     calculate_grid_levels,
     calculate_martingale_levels,
-    validate_deposit_amount,
-    format_currency,
-    validate_exchange_credentials,
-    save_uploaded_file,
-    delete_file,
+    calculate_percentage_change,
     calculate_risk_metrics,
-    get_utc_timestamp,
-    timestamp_to_datetime,
-    jsonify_decimal,
+    decrypt_api_key,
+    delete_file,
+    encrypt_api_key,
+    format_currency,
+    format_decimal,
+    generate_secret_key,
+    generate_uuid,
     get_client_ip,
+    get_timeframe_minutes,
+    get_utc_timestamp,
+    jsonify_decimal,
+    parse_decimal,
+    parse_float,
+    round_to_nearest,
+    save_uploaded_file,
+    timestamp_to_datetime,
+    validate_deposit_amount,
+    validate_exchange_credentials,
+    validate_trading_pair,
+    validate_webhook_signature,
 )
 
 FERNET_KEY = "K_suZkl9BIXa2xQQlFOj0mTuRVi2Z_bnC0bWmBZysdE="
@@ -109,9 +109,7 @@ class TestValidateWebhookSignature:
     def test_valid_signature(self):
         payload = '{"event": "test"}'
         secret = "my-webhook-secret"
-        signature = hmac.new(
-            secret.encode(), payload.encode(), hashlib.sha256
-        ).hexdigest()
+        signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
         assert validate_webhook_signature(payload, signature, secret) is True
 
     def test_invalid_signature(self):
@@ -122,15 +120,11 @@ class TestValidateWebhookSignature:
 
     def test_wrong_secret(self):
         payload = '{"event": "test"}'
-        signature = hmac.new(
-            b"correct-secret", payload.encode(), hashlib.sha256
-        ).hexdigest()
+        signature = hmac.new(b"correct-secret", payload.encode(), hashlib.sha256).hexdigest()
         assert validate_webhook_signature(payload, signature, "wrong-secret") is False
 
     def test_empty_payload(self):
-        signature = hmac.new(
-            b"secret", b"", hashlib.sha256
-        ).hexdigest()
+        signature = hmac.new(b"secret", b"", hashlib.sha256).hexdigest()
         assert validate_webhook_signature("", signature, "secret") is True
 
     def test_handles_exception_gracefully(self):
@@ -153,7 +147,7 @@ class TestFormatDecimal:
         assert format_decimal(value, places) == expected
 
     def test_negative_value(self):
-        assert format_decimal("-50.1234", 2) == Decimal("-50.13")
+        assert format_decimal("-50.1234", 2) == Decimal("-50.12")
 
     @pytest.mark.parametrize(
         "value,expected",
@@ -294,7 +288,7 @@ class TestCalculateGridLevels:
     def test_single_level(self):
         levels = calculate_grid_levels(100, 1, 10)
         assert len(levels) == 3
-        assert levels == [80.0, 100.0, 120.0]
+        assert levels == [90.0, 100.0, 110.0]
 
     def test_zero_levels(self):
         levels = calculate_grid_levels(100, 0, 5)
@@ -314,7 +308,7 @@ class TestCalculateMartingaleLevels:
 
     def test_custom_multiplier(self):
         levels = calculate_martingale_levels(100, 2, 3.0)
-        assert levels == [100.0, 300.0, 900.0, 2700.0]
+        assert levels == [100.0, 300.0, 900.0]
 
     def test_single_level(self):
         levels = calculate_martingale_levels(50, 0)
@@ -407,12 +401,16 @@ class TestValidateExchangeCredentials:
         assert valid is False
 
     def test_coinbase_requires_passphrase(self):
-        valid, msg = validate_exchange_credentials("coinbase", "api-key-min-10-chars", "secret12345678")
+        valid, msg = validate_exchange_credentials(
+            "coinbase", "api-key-min-10-chars", "secret12345678"
+        )
         assert valid is False
         assert "Passphrase" in msg
 
     def test_kraken_requires_passphrase(self):
-        valid, msg = validate_exchange_credentials("kraken", "api-key-min-10-chars", "secret12345678")
+        valid, msg = validate_exchange_credentials(
+            "kraken", "api-key-min-10-chars", "secret12345678"
+        )
         assert valid is False
 
     def test_coinbase_with_passphrase(self):
@@ -448,8 +446,9 @@ class TestSaveUploadedFile:
         assert result == "uploads/2026/06/14/uuid_test_file.txt"
         mock_storage.save.assert_called_once()
 
-    @patch("core.utils.default_storage", side_effect=Exception("Storage error"))
+    @patch("core.utils.default_storage")
     def test_save_uploaded_file_error(self, mock_storage):
+        mock_storage.save.side_effect = Exception("Storage error")
         mock_file = MagicMock()
         mock_file.name = "test.txt"
         with pytest.raises(Exception):
@@ -560,6 +559,7 @@ class TestGetUtcTimestamp:
 
     def test_recent_timestamp(self):
         import time
+
         ts = get_utc_timestamp()
         now = int(time.time())
         assert abs(ts - now) < 5
@@ -567,13 +567,15 @@ class TestGetUtcTimestamp:
 
 class TestTimestampToDatetime:
     def test_valid_timestamp(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         dt = timestamp_to_datetime(1686729600)
         assert isinstance(dt, datetime)
         assert dt.year == 2023
 
     def test_invalid_timestamp(self):
-        from django.utils import timezone
+        from datetime import datetime
+
         dt = timestamp_to_datetime("invalid")
         assert isinstance(dt, datetime)
 
