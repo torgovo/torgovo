@@ -37,11 +37,15 @@ jobs:
       - name: Django system check
         run: python manage.py check
         env:
-          SECRET_KEY: test-secret-key-for-ci-12345678
+          DJANGO_SECRET_KEY: test-secret-key-for-ci-12345678
+          JWT_SECRET_KEY: test-jwt-secret-key-for-ci-12345678
+          DB_PASSWORD: ''
           FERNET_KEY: Vw1oIt2-ldkqoA62pHf3uu-683L7nmuna60HvTt50Uc=
       - name: Run tests
         run: |
           python -m pytest tests/ --nomigrations -q --tb=short --cov=apps --cov-report=term --cov-fail-under=80
         env:
-          SECRET_KEY: test-secret-key-for-ci-12345678
+          DJANGO_SECRET_KEY: test-secret-key-for-ci-12345678
+          JWT_SECRET_KEY: test-jwt-secret-key-for-ci-12345678
+          DB_PASSWORD: ''
           FERNET_KEY: Vw1oIt2-ldkqoA62pHf3uu-683L7nmuna60HvTt50Uc=

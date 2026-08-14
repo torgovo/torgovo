@@ -89,6 +89,20 @@ graphify-out/
 # User-uploaded media
 media/
 
+# Local agent/IDE tooling & scratch files (not part of the app)
+.agents/
+.claude/
+.codex/
+.continue/
+.idea/
+oldbybit.py
+antigravity-setup.sh
+opencode sessions.txt
+IMPLEMENTATION_COMPLETE.md
+IMPLEMENTATION_VERIFY.md
+REFERRAL_SYSTEM_VERIFIED.md
+ZERO_ERRORS_VERIFICATION.md
+
 # Celery beat runtime DB
 celerybeat-schedule.db
 celerybeat.pid
