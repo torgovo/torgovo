@@ -34,105 +34,78 @@ services:
 
   # Django Application
   web:
-    image: torgovo2
-    build:
-      context: .
-      dockerfile: Dockerfile
-    environment:
-      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
-      - DEBUG=${DEBUG}
-      - ALLOWED_HOSTS=localhost,127.0.0.1,0.0.0.0
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_HOST=db
-      - DB_PORT=5432
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - GOOGLE_SECRET_KEY=${GOOGLE_SECRET_KEY}
-      - FERNET_KEY=${FERNET_KEY}
-      - FRONTEND_URL=${FRONTEND_URL}
-      - BASE_URL=${BASE_URL}
+    build: .
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput --clear &&
+             gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000 -w 4 --max-requests 1000 --max-requests-jitter 50"
     volumes:
       - .:/app
       - static_volume:/app/staticfiles
       - media_volume:/app/media
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
+    env_file: .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      DB_HOST: db
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
-    command: >
-      sh -c "
-        python manage.py migrate &&
-        python manage.py collectstatic --noinput &&
-        python manage.py runserver 0.0.0.0:8000
-      "
 
   # Celery Worker
   celery-worker:
-    image: torgovo2
-    build:
-      context: .
-      dockerfile: Dockerfile
-    environment:
-      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
-      - DEBUG=${DEBUG}
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_HOST=db
-      - DB_PORT=5432
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - FERNET_KEY=${FERNET_KEY}
+    build: .
+    command: celery -A config.celery worker -l info --concurrency=4
     volumes:
+      - .:/app
       - media_volume:/app/media
+    env_file: .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      DB_HOST: db
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
     depends_on:
       - db
       - redis
     restart: unless-stopped
-    command: celery -A config worker --loglevel=info --concurrency=4
 
   # Celery Beat (Periodic Tasks)
   celery-beat:
-    image: torgovo2
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
+    command: celery -A config.celery beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - .:/app
+    env_file: .env
     environment:
-      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
-      - DEBUG=${DEBUG}
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_HOST=db
-      - DB_PORT=5432
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      DB_HOST: db
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
     depends_on:
       - db
       - redis
     restart: unless-stopped
-    command: celery -A config beat --loglevel=info
 
   # Nginx Reverse Proxy
   nginx:
-    image: nginx:alpine
+    image: nginx:1.25-alpine
     ports:
       - "80:80"
       - "443:443"
     volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
       - static_volume:/app/staticfiles
       - media_volume:/app/media
-      - ./nginx.conf:/etc/nginx/nginx.conf
       - ./ssl:/etc/nginx/ssl
     depends_on:
       - web

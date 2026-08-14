@@ -1,0 +1,64 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project-specific
+logs/
+media/
+staticfiles/
+*.db
+*.sqlite3
+
+# Docker
+docker-compose*.yml
+Dockerfile
+.dockerignore
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.next/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+test*.py
+tests/
+
+# Documentation
+docs/
+*.md
+graphify-out/
+
+# Config
+nginx.conf
+ssl/
+*.pem
+*.key

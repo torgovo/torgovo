@@ -1,0 +1,126 @@
+{% extends "admin/index.html" %}
+{% load i18n static %}
+
+{% block extrahead %}
+{{ block.super }}
+<style>
+:root {
+  --primary: #1a1a2e;
+  --accent: #00d4aa;
+  --accent-hover: #00b894;
+  --card-bg: #ffffff;
+  --text-primary: #2d3436;
+  --text-muted: #636e72;
+  --border: #e0e0e0;
+  --success: #00b894;
+  --warning: #fdcb6e;
+  --danger: #e17055;
+  --info: #0984e3;
+}
+body {
+  background: #f5f6fa;
+}
+#header {
+  background: var(--primary);
+  color: white;
+  border-bottom: 3px solid var(--accent);
+}
+#header a:link, #header a:visited {
+  color: white;
+}
+.module caption, .module h2 {
+  background: var(--primary);
+}
+.dashboard #content {
+  max-width: 1400px;
+}
+.dashboard .kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 28px;
+}
+.dashboard .kpi-card {
+  background: var(--card-bg);
+  border-radius: 10px;
+  padding: 20px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  border-left: 4px solid var(--accent);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.dashboard .kpi-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+}
+.dashboard .kpi-card .kpi-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.dashboard .kpi-card .kpi-value {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.dashboard .kpi-card .kpi-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+.dashboard .kpi-card.kpi-users { border-left-color: var(--info); }
+.dashboard .kpi-card.kpi-bots { border-left-color: var(--accent); }
+.dashboard .kpi-card.kpi-revenue { border-left-color: var(--success); }
+.dashboard .kpi-card.kpi-withdrawals { border-left-color: var(--warning); }
+.dashboard .kpi-card.kpi-active { border-left-color: var(--primary); }
+#recent-actions-module {
+  background: var(--card-bg);
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+#recent-actions-module h2 {
+  border-radius: 10px 10px 0 0;
+}
+.dashboard .module {
+  background: var(--card-bg);
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  margin-bottom: 20px;
+}
+.dashboard .module table {
+  border-radius: 0 0 10px 10px;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  <div class="kpi-grid">
+    <div class="kpi-card kpi-users">
+      <div class="kpi-label">{% translate 'Total Users' %}</div>
+      <div class="kpi-value">{{ kpi_data.total_users|default:"—" }}</div>
+      <div class="kpi-sub">{{ kpi_data.new_users_today|default:"0" }} {% translate 'today' %}</div>
+    </div>
+    <div class="kpi-card kpi-active">
+      <div class="kpi-label">{% translate 'Active Subscriptions' %}</div>
+      <div class="kpi-value">{{ kpi_data.active_subscriptions|default:"—" }}</div>
+    </div>
+    <div class="kpi-card kpi-bots">
+      <div class="kpi-label">{% translate 'Bots Running' %}</div>
+      <div class="kpi-value">{{ kpi_data.bots_running|default:"—" }}</div>
+      <div class="kpi-sub">{{ kpi_data.total_bots|default:"0" }} {% translate 'total' %}</div>
+    </div>
+    <div class="kpi-card kpi-revenue">
+      <div class="kpi-label">{% translate 'Revenue (MTD)' %}</div>
+      <div class="kpi-value">${{ kpi_data.monthly_revenue|default:"0"|floatformat:0 }}</div>
+    </div>
+    <div class="kpi-card kpi-withdrawals">
+      <div class="kpi-label">{% translate 'Pending Withdrawals' %}</div>
+      <div class="kpi-value">{{ kpi_data.pending_withdrawals|default:"0" }}</div>
+      <div class="kpi-sub">${{ kpi_data.pending_withdrawal_amount|default:"0"|floatformat:0 }}</div>
+    </div>
+  </div>
+  {{ block.super }}
+</div>
+{% endblock %}

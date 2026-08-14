@@ -56,6 +56,8 @@ numpy>=1.26.0,<2
 
 # Monitoring and logging
 sentry-sdk>=1.38.0
+django-health-check>=3.17.0
+django-prometheus>=2.3.1
 
 # File handling
 python-magic>=0.4.27

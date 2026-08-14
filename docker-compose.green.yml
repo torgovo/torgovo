@@ -1,0 +1,24 @@
+services:
+  web-green:
+    build: .
+    command: >
+      sh -c "gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000 -w 4 --max-requests 1000 --max-requests-jitter 50"
+    volumes:
+      - .:/app
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    expose:
+      - "8000"
+    env_file: .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  static_volume:
+  media_volume:

@@ -1,0 +1,79 @@
+version: "3.8"
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.53
+    container_name: torgovo-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - torgovo_monitoring
+
+  grafana:
+    image: grafana/grafana:11.1
+    container_name: torgovo-grafana
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    restart: unless-stopped
+    networks:
+      - torgovo_monitoring
+    depends_on:
+      - prometheus
+
+  node-exporter:
+    image: prom/node-exporter:v1.8
+    container_name: torgovo-node-exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+    ports:
+      - "9100:9100"
+    restart: unless-stopped
+    networks:
+      - torgovo_monitoring
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15
+    container_name: torgovo-postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=disable"
+    ports:
+      - "9187:9187"
+    restart: unless-stopped
+    networks:
+      - torgovo_monitoring
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62
+    container_name: torgovo-redis-exporter
+    environment:
+      REDIS_ADDR: redis://${REDIS_HOST:-redis}:6379
+    ports:
+      - "9121:9121"
+    restart: unless-stopped
+    networks:
+      - torgovo_monitoring
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  torgovo_monitoring:
+    driver: bridge
