@@ -70,6 +70,29 @@ web_modules/
 .env.*
 !.env.example
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Generated knowledge-graph output (graphify)
+graphify-out/
+
+# User-uploaded media
+media/
+
+# Celery beat runtime DB
+celerybeat-schedule.db
+celerybeat.pid
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache
