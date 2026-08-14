@@ -8,82 +8,120 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('subscriptions', '0002_initial'),
+        ("subscriptions", "0002_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.RemoveField(
-            model_name='telegramsubscription',
-            name='start_date',
+            model_name="telegramsubscription",
+            name="start_date",
         ),
         migrations.AddField(
-            model_name='telegramsubscription',
-            name='admin_notes',
+            model_name="telegramsubscription",
+            name="admin_notes",
             field=models.TextField(blank=True),
         ),
         migrations.AddField(
-            model_name='telegramsubscription',
-            name='approved_at',
+            model_name="telegramsubscription",
+            name="approved_at",
             field=models.DateTimeField(blank=True, null=True),
         ),
         migrations.AddField(
-            model_name='telegramsubscription',
-            name='approved_by',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='approved_telegram_subscriptions', to=settings.AUTH_USER_MODEL),
+            model_name="telegramsubscription",
+            name="approved_by",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.SET_NULL,
+                related_name="approved_telegram_subscriptions",
+                to=settings.AUTH_USER_MODEL,
+            ),
         ),
         migrations.AddField(
-            model_name='telegramsubscription',
-            name='payment_blockchain',
-            field=models.CharField(blank=True, help_text='e.g., BEP20, ERC20, TRC20', max_length=20),
+            model_name="telegramsubscription",
+            name="payment_blockchain",
+            field=models.CharField(
+                blank=True, help_text="e.g., BEP20, ERC20, TRC20", max_length=20
+            ),
         ),
         migrations.AddField(
-            model_name='telegramsubscription',
-            name='payment_screenshot',
-            field=models.ImageField(blank=True, null=True, upload_to='telegram_subscriptions/payments/%Y/%m/%d/'),
+            model_name="telegramsubscription",
+            name="payment_screenshot",
+            field=models.ImageField(
+                blank=True, null=True, upload_to="telegram_subscriptions/payments/%Y/%m/%d/"
+            ),
         ),
         migrations.AddField(
-            model_name='telegramsubscription',
-            name='payment_transaction_hash',
-            field=models.CharField(blank=True, help_text='For crypto payments', max_length=255),
+            model_name="telegramsubscription",
+            name="payment_transaction_hash",
+            field=models.CharField(blank=True, help_text="For crypto payments", max_length=255),
         ),
         migrations.AddField(
-            model_name='telegramsubscription',
-            name='rejected_at',
+            model_name="telegramsubscription",
+            name="rejected_at",
             field=models.DateTimeField(blank=True, null=True),
         ),
         migrations.AddField(
-            model_name='telegramsubscription',
-            name='rejected_by',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='rejected_telegram_subscriptions', to=settings.AUTH_USER_MODEL),
+            model_name="telegramsubscription",
+            name="rejected_by",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.SET_NULL,
+                related_name="rejected_telegram_subscriptions",
+                to=settings.AUTH_USER_MODEL,
+            ),
         ),
         migrations.AddField(
-            model_name='telegramsubscription',
-            name='rejection_reason',
+            model_name="telegramsubscription",
+            name="rejection_reason",
             field=models.TextField(blank=True),
         ),
         migrations.AddField(
-            model_name='telegramsubscription',
-            name='started_at',
-            field=models.DateTimeField(blank=True, help_text='Set when admin approves', null=True),
+            model_name="telegramsubscription",
+            name="started_at",
+            field=models.DateTimeField(blank=True, help_text="Set when admin approves", null=True),
         ),
         migrations.AlterField(
-            model_name='telegramsubscription',
-            name='end_date',
+            model_name="telegramsubscription",
+            name="end_date",
             field=models.DateField(blank=True, null=True),
         ),
         migrations.AlterField(
-            model_name='telegramsubscription',
-            name='payment_method',
-            field=models.CharField(choices=[('stripe', 'Stripe'), ('crypto', 'Cryptocurrency'), ('bank', 'Bank Transfer')], default='crypto', max_length=20),
+            model_name="telegramsubscription",
+            name="payment_method",
+            field=models.CharField(
+                choices=[
+                    ("stripe", "Stripe"),
+                    ("crypto", "Cryptocurrency"),
+                    ("bank", "Bank Transfer"),
+                ],
+                default="crypto",
+                max_length=20,
+            ),
         ),
         migrations.AlterField(
-            model_name='telegramsubscription',
-            name='status',
-            field=models.CharField(choices=[('pending_payment', 'Pending Payment Upload'), ('pending_approval', 'Pending Admin Approval'), ('active', 'Active'), ('expired', 'Expired'), ('cancelled', 'Cancelled'), ('rejected', 'Rejected')], db_index=True, default='pending_payment', max_length=20),
+            model_name="telegramsubscription",
+            name="status",
+            field=models.CharField(
+                choices=[
+                    ("pending_payment", "Pending Payment Upload"),
+                    ("pending_approval", "Pending Admin Approval"),
+                    ("active", "Active"),
+                    ("expired", "Expired"),
+                    ("cancelled", "Cancelled"),
+                    ("rejected", "Rejected"),
+                ],
+                db_index=True,
+                default="pending_payment",
+                max_length=20,
+            ),
         ),
         migrations.AddIndex(
-            model_name='telegramsubscription',
-            index=models.Index(fields=['status', 'created_at'], name='subscriptio_status_e0bb96_idx'),
+            model_name="telegramsubscription",
+            index=models.Index(
+                fields=["status", "created_at"], name="subscriptio_status_e0bb96_idx"
+            ),
         ),
     ]

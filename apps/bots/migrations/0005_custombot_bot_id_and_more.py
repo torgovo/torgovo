@@ -6,26 +6,37 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('bots', '0004_gridbot_subscription_martingalebot_active_orders_and_more'),
+        ("bots", "0004_gridbot_subscription_martingalebot_active_orders_and_more"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='custombot',
-            name='bot_id',
-            field=models.CharField(blank=True, db_index=True, help_text='Unique bot ID in format xxxxx-xxxxx-xxxxx', max_length=100, unique=True),
+            model_name="custombot",
+            name="bot_id",
+            field=models.CharField(
+                blank=True,
+                db_index=True,
+                help_text="Unique bot ID in format xxxxx-xxxxx-xxxxx",
+                max_length=100,
+                unique=True,
+            ),
         ),
         migrations.AddField(
-            model_name='custombot',
-            name='use_tradingView_position_size',
-            field=models.BooleanField(default=False, help_text='Use position size from TradingView alert instead of default_amount'),
+            model_name="custombot",
+            name="use_tradingView_position_size",
+            field=models.BooleanField(
+                default=False,
+                help_text="Use position size from TradingView alert instead of default_amount",
+            ),
         ),
         migrations.AddField(
-            model_name='custombot',
-            name='webhook_message',
-            field=models.JSONField(blank=True, help_text='Auto-generated JSON template for TradingView', null=True),
+            model_name="custombot",
+            name="webhook_message",
+            field=models.JSONField(
+                blank=True, help_text="Auto-generated JSON template for TradingView", null=True
+            ),
         ),
         migrations.DeleteModel(
-            name='ExchangeCredential',
+            name="ExchangeCredential",
         ),
     ]
