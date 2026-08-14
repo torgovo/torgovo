@@ -9,7 +9,7 @@ Single source of truth for any AI assistant continuing work on this project. Rea
 
 Subscription-based crypto trading bot platform. Users create bots, connect exchanges, receive TradingView webhook signals, and auto-execute trades via CCXT.
 
-**Stack:** Django 5.x + DRF, PostgreSQL, Celery + Redis, CCXT, Docker  
+**Stack:** Django 5.x + DRF, PostgreSQL, Celery + Redis, CCXT, Docker
 **Frontend:** React + Vite (separate, not started yet)
 
 ---
@@ -240,7 +240,7 @@ executor = BotExecutor.from_config(config)
 executor.run()
 ```
 
-`StrategyConfig` stays in DB for default presets. When building the config dict, merge:  
+`StrategyConfig` stays in DB for default presets. When building the config dict, merge:
 `defaults from StrategyConfig` → `overrides from bot model fields` → `final config dict`
 
 ---

@@ -42,12 +42,12 @@ apps/trading/        → Trading engine (internal)
   strategies/        → BaseStrategy, QuantumAI, Grid, Martingale, Signal
   exchanges/         → CCXT adapters: Binance, Bybit, OKX, MEXC, Alpaca
   engines/           → BotEngine (core logic), BotExecutor (orchestration)
-  models.py          → Exchange, TradingPair, ExchangeStatus, StrategyConfig, etc.
+  models.py          → StrategyConfig (imports Exchange, TradingPair from apps/exchanges)
   tasks.py           → Celery async tasks (run_bot, stop_bot, check_active)
 
 apps/payments/       → Payment-only views (subscriptions, deposits, withdrawals)
-apps/exchanges/      → Exchange CRUD + ExchangeCredentials (canonical location)
-apps/investments/    → Quantum AI investment views + serializers
+apps/exchanges/      → Exchange, TradingPair, ExchangeCredentials (canonical trading data)
+apps/investments/    → SupportedBlockchain, ExchangeRate, ExchangeStatus, Quantum AI views
 apps/webhooks/       → SignalBot webhook receiver (TradingView → CCXT trade)
 apps/authentication/ → JWT auth, OAuth, OTP
 apps/users/          → User profiles

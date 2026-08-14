@@ -1,6 +1,6 @@
 # Torgovo Backend – Production & Missing Features Tasks
 
-**Target AI:** Kimi 2.6 (Hermes)  
+**Target AI:** Kimi 2.6 (Hermes)
 **Goal:** Transform the current Django REST API into a production‑ready, secure, and complete backend that a frontend can safely integrate with.
 
 ---
@@ -28,7 +28,7 @@ Add these to `apps/subscriptions/views.py`, `apps/referrals/views.py`, `apps/inv
 
 ### 1.1 Subscription Plans (User)
 
-**Endpoint:** `GET /api/subscriptions/plans/`  
+**Endpoint:** `GET /api/subscriptions/plans/`
 **Response:**
 ```json
 {
@@ -340,7 +340,3 @@ Final Warning for the AI
 
 If you follow this document, the backend will be secure, production‑ready, and fully compatible with the frontend.
 text
-
-
-
-

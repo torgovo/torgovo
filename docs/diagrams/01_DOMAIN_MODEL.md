@@ -502,11 +502,12 @@ classDiagram
 | Context | Description | Key Aggregate Roots |
 |---|---|---|
 | **Identity & Access** (`apps/users`, `core`) | Users, auth, audit, system config | `CustomUser`, `AuditLog` |
-| **Exchange Management** (`apps/exchanges`, `apps/trading`) | Exchange configs, encrypted credentials, market data | `Exchange`, `ExchangeCredentials` |
+| **Exchange Management** (`apps/exchanges`) | Exchange configs, encrypted credentials, trading pairs (trading data only) | `Exchange`, `ExchangeCredentials`, `TradingPair` |
 | **Bot Domain** (`apps/bots`) | Bot types (Signal, Grid, Martingale, Quantum AI), orders, indicators, pair configs | `SignalBot`, `GridBot`, `MartingaleBot`, `QuantumAIFund` |
+| **Trading Engine** (`apps/trading`) | Strategy presets, CCXT adapters, bot engine (pure Python) | `StrategyConfig` |
+| **Investments** (`apps/investments`) | Deposit blockchains, exchange rates, exchange health display, Quantum AI investment views | `SupportedBlockchain`, `ExchangeRate`, `ExchangeStatus` |
 | **Payment & Subscription** (`apps/payments`) | Subscription plans, deposits, withdrawals, transactions | `BotSubscription`, `PaymentTransaction` |
 | **Telegram Signals** (`apps/subscriptions`) | Signal plans, channels, trading signals, results | `TelegramSignalPlan`, `TradingSignal` |
-| **Investments** (`apps/investments`, self-contained) | Parallel investment models wrapping the fund | `QuantumAIBot`, `BotBase` |
 | **Referrals** (`apps/referrals`) | Referral tracking and payouts | `Referral` |
 | **Webhooks** (`apps/webhooks`) | Incoming webhook logs from TradingView/sources | `WebhookLog` |
 
@@ -514,6 +515,7 @@ classDiagram
 
 1. **Polymorphic bot references on `Order`** — separate FK columns for each bot type rather than a generic FK, keeping FK constraints and preventing orphan references
 2. **Two QuantumAIBot models** — `apps.bots.QuantumAIBot` (admin trading, references fund) and `apps.investments.QuantumAIBot` (user-facing, extends BotBase). This separates concerns between trading infrastructure and user API
-3. **SoftDeleteModel everywhere** — all production models soft-delete to prevent data loss
-4. **Encrypted credentials** — API keys are encrypted at rest via `core.utils.encrypt_api_key()`, decrypted only at use time
-5. **BotSubscription as central subscription hub** — referenced by SignalBot, GridBot, MartingaleBot, QuantumAIInvestment, PairConfig, and TelegramSignalSubscription
+3. **Model ownership by domain** — `apps/exchanges` owns trading data (Exchange, TradingPair, ExchangeCredentials), `apps/investments` owns display data (SupportedBlockchain, ExchangeRate, ExchangeStatus), `apps/trading` imports rather than duplicates
+4. **SoftDeleteModel everywhere** — all production models soft-delete to prevent data loss
+5. **Encrypted credentials** — API keys are encrypted at rest via `core.utils.encrypt_api_key()`, decrypted only at use time
+6. **BotSubscription as central subscription hub** — referenced by SignalBot, GridBot, MartingaleBot, QuantumAIInvestment, PairConfig, and TelegramSignalSubscription

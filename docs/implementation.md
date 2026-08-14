@@ -1,9 +1,9 @@
 # Torgovo - Crypto Trading Bot Platform
 
 ## Tech Stack
-**Backend:** Django + Django REST Framework  
-**Frontend:** React + Vite  
-**Database:** PostgreSQL  
+**Backend:** Django + Django REST Framework
+**Frontend:** React + Vite
+**Database:** PostgreSQL
 **Architecture:** Async processing, production-ready with Docker
 
 ## Project Overview

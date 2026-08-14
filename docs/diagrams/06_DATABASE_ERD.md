@@ -689,28 +689,6 @@ erDiagram
 
 ```mermaid
 erDiagram
-    trading_exchange {
-        uuid id PK
-        varchar name UK
-        varchar display_name
-        boolean is_active
-        varchar status
-        jsonb supported_features
-        datetime created_at
-    }
-
-    trading_trading_pair {
-        uuid id PK
-        uuid exchange_id FK
-        varchar symbol
-        varchar base_asset
-        varchar quote_asset
-        decimal current_price
-        decimal price_change_24h
-        decimal volume_24h
-        UX "exchange + symbol"
-    }
-
     trading_strategy_config {
         uuid id PK
         varchar name
@@ -745,7 +723,6 @@ erDiagram
         datetime created_at
     }
 
-    trading_strategy_config }o--|| trading_exchange : ""
     webhooks_webhook_log }o--|| users_customuser : "nullable"
     referrals_referral }o--|| users_customuser : referrer
     referrals_referral }o--|| users_customuser : referred_user
@@ -826,15 +803,15 @@ graph LR
 ## Table Inventory
 
 | App | Tables | Row Estimate | Notes |
-|---|---|---|---|
+|---|---|---|---|---|
 | `core` | 3 | 10K+ | Audit log grows unbounded; archive policy needed |
 | `users` | 2 (+ Django auth tables) | 1K-10K | Row per registered user |
-| `exchanges` | 5 | 100-500 | Static reference data + credentials |
+| `exchanges` | 3 | 100-500 | Exchange, ExchangeCredentials, TradingPair |
 | `bots` | 12 | 10K+ orders | Orders and indicators grow fast |
 | `payments` | 5 | 1K-10K | Subscriptions + transactions |
 | `subscriptions` | 5 | 1K-10K | Telegram signal tracking |
-| `trading` | 3 | 100-500 | Legacy migration tables |
+| `investments` | 3 | <1K | SupportedBlockchain, ExchangeRate, ExchangeStatus (+ references bots models) |
+| `trading` | 1 | <10 | StrategyConfig only |
 | `webhooks` | 1 | 10K+ | Webhook log grows fast |
 | `referrals` | 1 | <1K | Relatively small |
-| `investments` | 10 | <1K | Legacy, parallel models |
-| **Total** | **47** | | |
+| **Total** | **36** | | |
