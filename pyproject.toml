@@ -17,3 +17,15 @@ filterwarnings = [
     "ignore:datetime.datetime.utcnow:DeprecationWarning",
     "ignore::RuntimeWarning:django.db.models.fields",
 ]
+
+[tool.coverage.run]
+omit = ["*/migrations/*", "*/tests/*", "*/apps/*/management/*"]
+source = ["apps"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "def __repr__",
+    "if self.debug:",
+]
