@@ -12,6 +12,10 @@ SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
+# Ensure the log directory exists (gitignored) so RotatingFileHandler
+# handlers below and in development.py don't fail on a fresh checkout.
+(BASE_DIR / "logs").mkdir(parents=True, exist_ok=True)
+
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config("DJANGO_SECRET_KEY")
 
