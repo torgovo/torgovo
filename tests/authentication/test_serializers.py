@@ -2,6 +2,7 @@ from datetime import timedelta
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password, make_password
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory
 
@@ -19,6 +20,7 @@ from apps.authentication.serializers import (
     UserRegistrationSerializer,
     UserSerializer,
 )
+from apps.authentication.signals import generate_otp_code
 
 User = get_user_model()
 
@@ -33,9 +35,52 @@ class TestUserRegistrationSerializer:
             "password_confirm": "StrongPass123!",
             "first_name": "New",
             "last_name": "User",
+            "terms_accepted": True,
+            "privacy_policy_accepted": True,
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid(), serializer.errors
+
+    def test_registration_requires_consent(self):
+        """COMPLIANCE Phase-1: registration without consent booleans fails."""
+        data = {
+            "username": "noconsent",
+            "email": "noconsent@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
+        }
+        serializer = UserRegistrationSerializer(data=data)
+        assert serializer.is_valid() is False
+        assert "terms_accepted" in serializer.errors
+        assert "privacy_policy_accepted" in serializer.errors
+
+    def test_registration_rejects_unaccepted_terms(self):
+        """COMPLIANCE Phase-1: explicit False for terms is rejected."""
+        data = {
+            "username": "nopolicy",
+            "email": "nopolicy@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
+            "terms_accepted": False,
+            "privacy_policy_accepted": True,
+        }
+        serializer = UserRegistrationSerializer(data=data)
+        assert serializer.is_valid() is False
+        assert "terms_accepted" in serializer.errors
+
+    def test_registration_rejects_unaccepted_privacy_policy(self):
+        """COMPLIANCE Phase-1: explicit False for privacy policy is rejected."""
+        data = {
+            "username": "nopp",
+            "email": "nopp@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
+            "terms_accepted": True,
+            "privacy_policy_accepted": False,
+        }
+        serializer = UserRegistrationSerializer(data=data)
+        assert serializer.is_valid() is False
+        assert "privacy_policy_accepted" in serializer.errors
 
     def test_password_mismatch(self):
         data = {
@@ -43,6 +88,8 @@ class TestUserRegistrationSerializer:
             "email": "newuser@example.com",
             "password": "StrongPass123!",
             "password_confirm": "DifferentPass456!",
+            "terms_accepted": True,
+            "privacy_policy_accepted": True,
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid() is False
@@ -90,6 +137,8 @@ class TestUserRegistrationSerializer:
             "email": "create@example.com",
             "password": "StrongPass123!",
             "password_confirm": "StrongPass123!",
+            "terms_accepted": True,
+            "privacy_policy_accepted": True,
         }
         serializer = UserRegistrationSerializer(data=data)
         assert serializer.is_valid()
@@ -97,6 +146,25 @@ class TestUserRegistrationSerializer:
         assert User.objects.filter(email="create@example.com").exists()
         assert user.referral_code is not None
         assert user.check_password("StrongPass123!")
+
+    def test_create_stamps_consent_fields(self):
+        """COMPLIANCE Phase-1: consent acceptance timestamp + policy version recorded."""
+        from django.conf import settings
+
+        data = {
+            "username": "consentuser",
+            "email": "consent@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
+            "terms_accepted": True,
+            "privacy_policy_accepted": True,
+        }
+        serializer = UserRegistrationSerializer(data=data)
+        assert serializer.is_valid(), serializer.errors
+        user = serializer.save()
+        assert user.terms_accepted_at is not None
+        assert user.terms_accepted_at <= timezone.now()
+        assert user.privacy_version == settings.PRIVACY_POLICY_VERSION
 
     def test_missing_password_confirm(self):
         data = {
@@ -171,6 +239,51 @@ class TestUserSerializer:
         serializer = UserSerializer(user)
         assert serializer.data["full_name"] == "John Doe"
 
+    def test_billing_and_quota_fields_read_only(self, user):
+        """SECURITY S-1: server-computed billing/quota fields must be immutable.
+
+        Regression test — a self-PATCH used to set subscription_plan=premium +
+        is_subscription_active=true and gain premium limits without payment.
+        """
+        serializer = UserSerializer(
+            user,
+            data={
+                "subscription_plan": "premium",
+                "is_subscription_active": True,
+                "max_bots_allowed": 100,
+                "referral_code": "HACKED",
+                "total_trades_executed": 999,
+                "total_volume_traded": "12345.67",
+            },
+            partial=True,
+        )
+        assert serializer.is_valid(), serializer.errors
+        serializer.save()
+        user.refresh_from_db()
+        assert user.subscription_plan == "free"
+        assert user.is_subscription_active is False
+        assert user.referral_code != "HACKED"
+
+    def test_consent_fields_exposed_read_only(self, user):
+        """COMPLIANCE Phase-1: consent metadata is serialized but never writable."""
+        user.terms_accepted_at = timezone.now()
+        user.privacy_version = "2026-08-1"
+        user.save()
+        dumped = UserSerializer(user).data
+        assert "terms_accepted_at" in dumped
+        assert dumped["privacy_version"] == "2026-08-1"
+
+        # PATCH attempts to backdate/rewrite consent metadata are ignored.
+        serializer = UserSerializer(
+            user, data={"terms_accepted_at": "2015-01-01T00:00:00Z"}, partial=True
+        )
+        assert serializer.is_valid(), serializer.errors
+        serializer.save()
+        user.refresh_from_db()
+        assert user.terms_accepted_at is not None
+        assert user.terms_accepted_at > timezone.now() - timedelta(hours=1)
+        assert user.total_trades_executed == 0
+
 
 @pytest.mark.django_db
 class TestEmailVerificationSerializer:
@@ -231,10 +344,12 @@ class TestPhoneVerificationSerializer:
         serializer = PhoneVerificationSerializer(data=data, context={"request": request})
         assert serializer.is_valid(), serializer.errors
         pv = serializer.save()
+        raw_code = pv.raw_code
         assert pv.user == user
         assert pv.phone_number == "+1234567890"
-        assert len(pv.code) == 6
-        assert pv.code.isdigit()
+        # SECURITY S-2: stored code is a salted hash, not the raw 6-digit value
+        assert pv.code != raw_code
+        assert check_password(raw_code, pv.code) is True
         assert pv.expires_at > timezone.now()
 
     def test_invalidates_old_codes(self, user):
@@ -260,7 +375,7 @@ class TestPhoneVerificationConfirmSerializer:
     def test_valid_code(self, user):
         pv = PhoneVerification.objects.create(
             user=user,
-            code="123456",
+            code=make_password("123456"),
             phone_number="+1234567890",
             expires_at=timezone.now() + timedelta(minutes=10),
         )
@@ -275,7 +390,7 @@ class TestPhoneVerificationConfirmSerializer:
     def test_wrong_code(self, user):
         PhoneVerification.objects.create(
             user=user,
-            code="123456",
+            code=make_password("123456"),
             phone_number="+1234567890",
             expires_at=timezone.now() + timedelta(minutes=10),
         )
@@ -289,7 +404,7 @@ class TestPhoneVerificationConfirmSerializer:
     def test_expired_code(self, user):
         PhoneVerification.objects.create(
             user=user,
-            code="123456",
+            code=make_password("123456"),
             phone_number="+1234567890",
             expires_at=timezone.now() - timedelta(minutes=1),
         )
@@ -303,7 +418,7 @@ class TestPhoneVerificationConfirmSerializer:
     def test_too_many_attempts(self, user):
         PhoneVerification.objects.create(
             user=user,
-            code="123456",
+            code=make_password("123456"),
             phone_number="+1234567890",
             expires_at=timezone.now() + timedelta(minutes=10),
             attempts=3,
@@ -318,7 +433,7 @@ class TestPhoneVerificationConfirmSerializer:
     def test_wrong_code_increments_attempts(self, user):
         pv = PhoneVerification.objects.create(
             user=user,
-            code="123456",
+            code=make_password("123456"),
             phone_number="+1234567890",
             expires_at=timezone.now() + timedelta(minutes=10),
         )
@@ -330,6 +445,19 @@ class TestPhoneVerificationConfirmSerializer:
         assert serializer.is_valid() is False
         pv.refresh_from_db()
         assert pv.attempts == 1
+
+    def test_otp_code_generator_csprng_properties(self):
+        """SECURITY S-2: OTP codes are numeric, fixed-length, and varied.
+
+        generate_otp_code now uses secrets (CSPRNG) instead of random.choices.
+        Asserting the observable contract also guards against accidental changes
+        to length or character set.
+        """
+        codes = {generate_otp_code() for _ in range(50)}
+        assert len(codes) > 1
+        for code in codes:
+            assert len(code) == 6
+            assert code.isdigit()
 
     def test_nonexistent_verification(self, user):
         factory = APIRequestFactory()
@@ -510,6 +638,26 @@ class TestGoogleAuthSerializer:
     def test_missing_access_token(self):
         serializer = GoogleAuthSerializer(data={})
         assert serializer.is_valid() is False
+
+    def test_rejects_when_google_client_id_empty(self, mocker):
+        """SEC-1: When GOOGLE_CLIENT_ID is not configured, the serializer
+        must reject all tokens (fail-closed) instead of accepting any token
+        from any Google application."""
+        from django.test import override_settings
+
+        # Even with a valid tokeninfo response, the serializer should reject
+        tokeninfo_response = mocker.Mock()
+        tokeninfo_response.status_code = 200
+        tokeninfo_response.json.return_value = {"aud": "some-other-app"}
+        mocker.patch("requests.get", return_value=tokeninfo_response)
+
+        with override_settings(
+            GOOGLE_CLIENT_ID="",
+            SOCIALACCOUNT_PROVIDERS={"google": {"APP": {"client_id": ""}}},
+        ):
+            serializer = GoogleAuthSerializer(data={"access_token": "any-token"})
+            assert serializer.is_valid() is False
+            assert "not configured" in str(serializer.errors).lower()
 
 
 @pytest.mark.django_db

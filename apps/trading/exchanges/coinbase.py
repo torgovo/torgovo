@@ -69,6 +69,50 @@ class CoinbaseAdapter(BaseAdapter):
         )
         return self._normalize_order(order)
 
+    def create_stop_loss_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        stop_price: float,
+        params: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """Coinbase stop-loss uses a market order triggered at stop_price."""
+        formatted_symbol = self.format_symbol(symbol)
+        amount = self.amount_to_precision(symbol, amount)
+        stop_price = self.price_to_precision(symbol, stop_price)
+
+        order_params = {"stopPrice": stop_price}
+        if params:
+            order_params.update(params)
+
+        order = self._make_request(
+            "create_order", formatted_symbol, "market", side.lower(), amount, None, order_params
+        )
+        return self._normalize_order(order)
+
+    def create_take_profit_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        take_profit_price: float,
+        params: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """Coinbase take-profit uses a market order triggered at take_profit_price."""
+        formatted_symbol = self.format_symbol(symbol)
+        amount = self.amount_to_precision(symbol, amount)
+        take_profit_price = self.price_to_precision(symbol, take_profit_price)
+
+        order_params = {"stopPrice": take_profit_price}
+        if params:
+            order_params.update(params)
+
+        order = self._make_request(
+            "create_order", formatted_symbol, "market", side.lower(), amount, None, order_params
+        )
+        return self._normalize_order(order)
+
     def fetch_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """Coinbase is spot-only - no futures positions."""
         return []

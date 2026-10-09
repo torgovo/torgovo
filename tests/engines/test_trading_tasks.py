@@ -481,6 +481,62 @@ class TestHeartbeatCheck:
         assert result == {"restored": 2, "stopped": 1, "errors": 0}
 
 
+class TestPhase5WatchdogTuning:
+    """Phase 5 (CHG-5-4): heartbeat cadence, 30s stale cutoff, beat schedules.
+
+    Locks the watchdog timing contract: heartbeats are written every ~10s,
+    the stale cutoff is 30s (3x margin), and Celery Beat polls accordingly.
+    """
+
+    def test_heartbeat_interval_is_10_iterations(self):
+        from apps.trading.engines.grid_monitor import GridPositionMonitor
+
+        adapter = MagicMock()
+        monitor = GridPositionMonitor(
+            adapter,
+            symbol="BTC/USDT",
+            pair_config={},
+            bot_config={},
+            create_order_cb=MagicMock(),
+            close_all_orders_cb=MagicMock(),
+        )
+        # ~10 iterations at ~1s/iter = ~10s heartbeat cadence (CHG-5-1).
+        assert monitor._heartbeat_interval == 10
+
+    def test_stale_cutoff_is_30_seconds(self, user):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        # 2 minutes old: stale under the new 30s cutoff, but would have been
+        # MISSED by the old 5-minute cutoff — this is the regression guard.
+        stale = _grid_bot(user, is_running=True)
+        stale.last_heartbeat = timezone.now() - timedelta(minutes=2)
+        stale.save()
+
+        # Fresh heartbeat: must NOT be reaped.
+        fresh = _grid_bot(user, is_running=True)
+        fresh.last_heartbeat = timezone.now()
+        fresh.save()
+
+        with patch("apps.trading.tasks._handle_stale_bot") as mock_handle:
+            result = trade_tasks.check_stale_bots()
+
+        assert mock_handle.call_count == 1
+        assert mock_handle.call_args.args[0].id == stale.id
+        assert result["errors"] == 0
+
+    def test_beat_schedules_tuned(self):
+        from config.celery import app as celery_app
+
+        schedule = celery_app.conf.beat_schedule
+        # Phase 5 (CHG-5-3): stale poll 120s -> 30s, heartbeat poll 300s -> 60s.
+        assert schedule["check-stale-bots"]["schedule"] == 30.0
+        assert schedule["heartbeat-check"]["schedule"] == 60.0
+        # Not part of Phase 5 — the aggressive re-dispatch loop stays at 60s.
+        assert schedule["run-active-bots"]["schedule"] == 60.0
+
+
 class TestResetMonthlySignalLimits:
     def test_resets_used_bots_only(self, user):
         used = _signal_bot(user, bot_name="Used", signals_used_this_month=7)
@@ -539,7 +595,7 @@ class TestAccrueQuantumAIProfits:
 
 class TestDistributeQuantumAIProfits:
     def test_distributes_proportionally(self, user, second_user, quantum_fund):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
         # Rebuild fund with clean profit so smoothing math is deterministic
         quantum_fund.total_fund_value = Decimal("100000")
@@ -547,14 +603,14 @@ class TestDistributeQuantumAIProfits:
         quantum_fund.total_deposits = Decimal("10000")
         quantum_fund.save()
 
-        inv_a = QuantumAIInvestment.objects.create(
+        inv_a = InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("6000"),
             share_percentage=Decimal("60"),
             status="active",
         )
-        inv_b = QuantumAIInvestment.objects.create(
+        inv_b = InvestorPortfolio.objects.create(
             user=second_user,
             fund=quantum_fund,
             amount=Decimal("4000"),
@@ -571,11 +627,11 @@ class TestDistributeQuantumAIProfits:
         assert inv_b.accrued_profit == Decimal("400")
 
     def test_no_distribution_when_no_profit(self, user, quantum_fund):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
         quantum_fund.total_profit = Decimal("0")
         quantum_fund.save()
-        QuantumAIInvestment.objects.create(
+        InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("1000"),
@@ -588,13 +644,13 @@ class TestDistributeQuantumAIProfits:
         assert result == {"distributed_to": 0}
 
     def test_credits_reserve_on_excess(self, user, quantum_fund):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
         # 20% actual return > 15% max → 5% excess goes to reserve
         quantum_fund.total_profit = Decimal("2000")
         quantum_fund.total_deposits = Decimal("10000")
         quantum_fund.save()
-        QuantumAIInvestment.objects.create(
+        InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("10000"),

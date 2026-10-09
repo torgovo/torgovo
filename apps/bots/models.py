@@ -696,7 +696,7 @@ class QuantumAIBot(SoftDeleteModel):
 # ==================== QUANTUM AI INVESTMENT (User-Facing) ====================
 
 
-class QuantumAIInvestment(SoftDeleteModel):
+class InvestorPortfolio(SoftDeleteModel):
     """User's investment in Quantum AI fund"""
 
     class Meta:
@@ -1071,7 +1071,7 @@ class BotOrder(TimeStampedModel):
         MartingaleBot, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
     )
     quantum_ai_investment = models.ForeignKey(
-        QuantumAIInvestment, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
+        InvestorPortfolio, on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
     )
 
     # Your existing fields
@@ -1085,6 +1085,47 @@ class BotOrder(TimeStampedModel):
     Stop_Loss = models.DecimalField(max_digits=20, decimal_places=8, blank=True, null=True)
     Description = models.TextField(blank=True, null=True)
     Details = models.JSONField(blank=True, null=True)
+
+    # --- Phase 1 (persistence): trade-record integrity --------------------
+    # Additive + nullable only; never alters existing columns.  Lets a
+    # restart attribute every order to its bot and tell open trades apart
+    # from closed ones without re-querying the exchange.
+    STATUS_CHOICES = [("open", "Open"), ("closed", "Closed")]
+    bot_type = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Owning bot kind: grid|martingale|quantum_ai|signal|custom",
+    )
+    bot_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Uniform pointer to the owning bot's pk (see also signal_bot/"
+        "grid_bot/martingale_bot FKs, which stay authoritative when resolvable)",
+    )
+    Reason = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Structured entry reason (strategy signal reason)",
+    )
+    Status = models.CharField(
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default="closed",
+        help_text="open = trade still live, closed = flat. Default closed so "
+        "legacy rows never masquerade as open trades.",
+    )
+    Realized_PnL = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        null=True,
+        blank=True,
+        help_text="Realized P/L of the trade this record closes (exit records)",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

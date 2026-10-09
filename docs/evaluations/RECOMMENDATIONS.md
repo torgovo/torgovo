@@ -1,8 +1,8 @@
 # Consolidated Evaluation Report
 
-Seven-domain audit of torgovo2. Each domain graded independently. Priority recommendations marked with **P0** (must fix) / **P1** (should fix) / **P2** (nice to have).
+Eight-domain audit of torgovo2. Each domain graded independently. Priority recommendations marked with **P0** (must fix) / **P1** (should fix) / **P2** (nice to have).
 
-> **Re-assessment status (all seven domains):** Engineering **D → B** (2026-08-10, §engineering-evaluation/REPORT.md); Project Management **D → C− (62/100)** (2026-08-10); Compliance **30/100 → 35/100** (2026-08-10); Business **25/100 unchanged** (2026-08-11); C-Level Oversight **18/100 → 28/100** (2026-08-11); Internal Operations **12/100 → 24/100** (2026-08-11); Marketing **34/100 confirmed** (2026-08-11). Each graded domain fully re-audited against the live tree with dated sections in its own REPORT.md.
+> **Re-assessment status (all eight domains):** Engineering **D → B** (2026-08-10, §engineering-evaluation/REPORT.md); Project Management **D → C− (62/100)** (2026-08-10); Compliance **30/100 → 35/100** (2026-08-10); Business **25/100 unchanged** (2026-08-11); C-Level Oversight **18/100 → 28/100** (2026-08-11); Internal Operations **12/100 → 24/100** (2026-08-11); Marketing **34/100 confirmed** (2026-08-11); **Security C** (2026-08-15, §security-evaluation/REPORT.md). Each graded domain fully re-audited against the live tree with dated sections in its own REPORT.md.
 
 ---
 
@@ -168,6 +168,32 @@ Seven-domain audit of torgovo2. Each domain graded independently. Priority recom
 6. Write playbooks for: grid restart bug workaround, exchange API outage
 
 ---
+
+## 8. Security — Grade: C (Conditional) (2026-08-15 live re-check, see `security-evaluation/REPORT.md`)
+
+> First security-domain audit, run read-only against the live tree (`main=2bcfd5b`), using OWASP recon + `pip-audit` (venv-only). Baseline is strong — CSPRNG email tokens, lockdown JWT config, constant-time webhook auth + replay protection, full production HTTPS hardening, `.env` untracked, Fernet-encrypted exchange creds, account-scoped QuerySets, Redis rate limiting, 0 known vulns in `base.txt`. Grade blocked by one HIGH privilege-escalation path and one fake 2FA gate, plus stale prod pins. Closes to B once S-1 + S-4/S-5 land.
+
+| Issue | Priority | File(s) | Status 2026-08-15 |
+|-------|----------|---------|-------------------|
+| UserDetailView mass assignment: `subscription_plan`, `is_subscription_active`, `max_bots_allowed`, `referral_code`, trade-stats writable by self-PATCH → self-escalate plan limits | **P0** | `apps/authentication/serializers.py` (`UserSerializer`, read_only_fields omits them), `apps/authentication/views.py:271-279` | **FIXED** — read_only_fields + regression test |
+| Withdrawal 2FA gate = presence-only; code never verified against any store (`two_factor_code` any ≥4-char string passes) | **P1** | `apps/payments/views.py:244-279` | **FIXED** — RFC 6238 TOTP service (`services/two_factor.py`), `CustomUser.totp_secret` (users.0005), verifiable-code gate + self-service `/api/auth/2fa/{setup,confirm,disable}`; tests `test_two_factor.py` + withdrawal gate cases |
+| Phone OTP non-CSPRNG (`random.choices`), stored plaintext, `!=` compare, `send_verification_sms` comment falsely claims hashed | **P1** | `apps/authentication/signals.py:17-19`, `models.py:52-67`, `serializers.py:231`, `views.py:396-398` | **FIXED** — `secrets` + constant-time `check_password` + comment; **hash-at-rest now too** (PBKDF2 `make_password` in `PhoneVerificationSerializer.create`, `code` CharField(128), migration `authentication.0004`, transient `raw_code` never persisted) |
+| Gunicorn `==21.2.0` TE.CL / conflicting-TE request smuggling | **P0** | `requirements/production.txt:4`, `base.txt:69` → `22.0.0` | **FIXED** — `22.0.0` |
+| sentry-sdk `==1.38.0` env-var leak to subprocesses | **P1** | `requirements/production.txt:8-9` → `1.45.1`+ | **FIXED** — `1.45.1` |
+| Dev pins: pytest 7.4.3, black 23.11.0 (vulns above) | **P2** | `requirements/development.txt` | **FIXED** — pytest==9.1.0, pytest-django==4.12.0, pytest-asyncio==1.4.0, pytest-cov==4.1.0, pytest-mock==3.15.1, black==26.3.1 |
+| `PhoneVerificationRequestView` no throttle scope (SMS-cost / spam) | **P2** | `apps/authentication/views.py:381` | **FIXED** — throttle_scope + 5/hour rate |
+| Stale `apps/authentication/models.py.backup` with dead `two_factor_secret` | **P2** | delete file | **FIXED** — deleted |
+| Google OAuth audience bypass — `GOOGLE_OAUTH_CLIENT_ID` empty allows any JWT | **P0** | `apps/authentication/serializers.py`, `apps/authentication/apps.py` | **FIXED** — boot-time `ImproperlyConfigured` + serializer defense-in-depth |
+| `two_factor_code` column dead after TOTP migration | **P2** | `apps/payments/models.py` | **FIXED** — field removed + migration `0007` |
+| `_collect_engine_state()` wrong attribute names (`favor_levels` vs `favor_lvl`) | **P1** | `apps/trading/engines/execution.py` | **FIXED** — attributes corrected |
+| Nginx hardcoded TradingView IPs break webhook when TV rotates | **P1** | `nginx.conf:125-137` | **FIXED** — IP allowlist removed, HMAC-only auth |
+| Docker code volume mounts in prod (`docker-compose.yml` `.:/app`) | **P1** | `docker-compose.yml` | **FIXED** — split into `docker-compose.yml` (dev) + `docker-compose.prod.yml` (prod, no mounts) |
+| `collectstatic` silenced in Dockerfile (`|| true`) | **P2** | `Dockerfile:40` | **FIXED** — `|| true` removed, build fails on errors |
+| `SiteConfig.get()` uncached — DB hit on every bot-limit check | **P1** | `core/models.py` | **FIXED** — `@lru_cache(maxsize=1)` + `cache_clear()` on `save()` |
+| AuditLog unbounded growth — no retention policy | **P1** | `core/models.py` | **FIXED** — monthly cleanup task (`core.tasks.cleanup_old_audit_logs`, 90-day default) |
+| `process_payouts()` never called by Celery beat | **P0** | `config/celery.py` | **FIXED** — `process_fund_payouts` task + beat schedule (`00:05 UTC daily`) |
+| `SoftDeleteModel.delete()` triggers `post_delete` signal; default manager shows deleted rows | **P1** | `core/models.py` | **FIXED** — queryset override, signal removed, `hard_delete()` added |
+| `BOT_CONFIG` dead dict in settings | **P2** | `config/settings/base.py` | **FIXED** — deleted |
 
 ## Priority Summary
 

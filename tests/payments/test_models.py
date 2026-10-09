@@ -6,8 +6,8 @@ from apps.payments.models import (
     BlockchainAddress,
     BotSubscription,
     BotSubscriptionPlan,
+    InvestorDeposit,
     PaymentTransaction,
-    QuantumAIDeposit,
     ReferralPayout,
     SubscriptionPlan,
     WithdrawalRequest,
@@ -76,9 +76,9 @@ class TestSubscriptionPlanModel:
 
 
 @pytest.mark.django_db
-class TestQuantumAIDepositModel:
+class TestInvestorDepositModel:
     def test_create_deposit(self, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("100.00000000"),
             currency="USDT",
@@ -95,7 +95,7 @@ class TestQuantumAIDepositModel:
         assert str(deposit) == f"100.00000000 USDT - {user.email} (pending)"
 
     def test_deposit_unique_transaction_hash(self, user):
-        QuantumAIDeposit.objects.create(
+        InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("50"),
             currency="USDT",
@@ -104,7 +104,7 @@ class TestQuantumAIDepositModel:
             transaction_hash="0xuniquehash1",
         )
         with pytest.raises(Exception):
-            QuantumAIDeposit.objects.create(
+            InvestorDeposit.objects.create(
                 user=user,
                 amount=Decimal("50"),
                 currency="USDT",
@@ -114,7 +114,7 @@ class TestQuantumAIDepositModel:
             )
 
     def test_is_expired_property(self, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("10"),
             currency="USDT",
@@ -125,7 +125,7 @@ class TestQuantumAIDepositModel:
         assert deposit.is_expired is False
 
     def test_approve_deposit(self, user, admin_user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("500"),
             currency="USDT",
@@ -140,7 +140,7 @@ class TestQuantumAIDepositModel:
         assert deposit.verified_at is not None
 
     def test_reject_deposit(self, user, admin_user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("500"),
             currency="USDT",
@@ -155,7 +155,7 @@ class TestQuantumAIDepositModel:
         assert deposit.admin_notes == "Suspicious activity"
 
     def test_soft_delete(self, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("100"),
             currency="USDT",

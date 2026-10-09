@@ -40,14 +40,17 @@
 
 ## Phase 3: Known Remaining Items
 
+> Status verified against the codebase 2026-08-18 (several items below were
+> closed in the meantime by later sessions — see `docs/CHANGELOG.md`).
+
 ### Low Priority (functional but imperfect)
-- [ ] `get_exchange_rates()` in `apps/trading/views.py` — returns placeholder prices (Decimal('45000'))
-- [ ] OKX/MEXC/Alpaca adapters — minimal stubs only (Bybit + Binance are complete)
-- [ ] `QuantumAIStrategy` in `strategies/quantum_ai.py` — redundant (logic lives in bot_engine.py). Decide: keep as reference or remove
+- [x] `get_exchange_rates()` in `apps/trading/views.py` — now fetches live CCXT tickers (no longer placeholder Decimal('45000')); falls back to DB when CCXT fails
+- [ ] OKX/MEXC/Alpaca adapters — modules exist in `apps/trading/exchanges/` (`okx.py`, `mexc.py`, `alpaca.py`, plus `bybit.py`, `binance.py`, `coinbase.py`, `mock_adapter.py`) but parity/stub status unverified — audit before claiming complete
+- [x] `QuantumAIStrategy` in `strategies/quantum_ai.py` — removed (no root `strategies/` dir; logic lives in `bot_engine.py`)
 
 ### Features (Not Yet Started)
-- [ ] Telegram notifications — Port `print_details()`, `SendTelegramMessage()`
-- [ ] Frontend (React + Vite) — not started
-- [ ] Tests — 80%+ coverage target
+- [ ] Telegram notifications — `SendTelegramMessage()`/`print_details()` NOT ported from `oldbybit.py`; only partial wiring exists (`apps/trading/engines/order_service.py` notifies when `user.telegram_token`/`telegram_chat_id` attrs exist)
+- [ ] Frontend (React + Vite) — scaffold exists (`frontend/` with `src/components`, `contexts`, `services`) but completeness unverified
+- [ ] Tests — 80%+ coverage target (current suite 1912 passed / 13 skipped)
 - [x] Celery Beat scheduling for bot monitoring
-- [ ] Admin dashboard endpoints
+- [ ] Admin dashboard endpoints — no admin analytics/dashboard views found; only per-app Django admin

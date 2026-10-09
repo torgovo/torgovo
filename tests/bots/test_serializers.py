@@ -226,30 +226,30 @@ class TestQuantumAISerializers:
         assert "master_api_key" not in serializer.data
 
     def test_quantum_ai_investment_serializer(self, user, quantum_fund, bot_subscription):
-        from apps.bots.models import QuantumAIInvestment
-        from apps.bots.serializers import QuantumAIInvestmentSerializer
+        from apps.bots.models import InvestorPortfolio
+        from apps.bots.serializers import InvestorPortfolioSerializer
 
-        inv = QuantumAIInvestment.objects.create(
+        inv = InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("1000"),
             status="active",
             subscription=bot_subscription,
         )
-        serializer = QuantumAIInvestmentSerializer(instance=inv)
+        serializer = InvestorPortfolioSerializer(instance=inv)
         assert "user_share_amount" in serializer.data
         assert "share_percentage" in serializer.data
         assert "fund" in serializer.data
 
     def test_quantum_ai_investment_create_serializer(self, quantum_fund, bot_subscription):
-        from apps.bots.serializers import QuantumAIInvestmentSerializer
+        from apps.bots.serializers import InvestorPortfolioSerializer
 
         data = {
             "fund": str(quantum_fund.id),
             "amount": "1000",
             "subscription": str(bot_subscription.id),
         }
-        serializer = QuantumAIInvestmentSerializer(data=data, context=serializer_context())
+        serializer = InvestorPortfolioSerializer(data=data, context=serializer_context())
         assert serializer.is_valid(), serializer.errors
 
 
@@ -372,21 +372,3 @@ class TestQuantumDepositSerializers:
         assert serializer.data["status"] == "pending"
         assert "reviewed_by" in serializer.data
         assert "review_notes" in serializer.data
-
-
-class TestBotOverviewSerializer:
-    def test_bot_overview_serializer(self):
-        from apps.bots.serializers import BotOverviewSerializer
-
-        data = {
-            "total_bots": 10,
-            "running_bots": 5,
-            "total_users": 100,
-            "daily_trades": 250,
-            "platform_volume": "50000.00",
-            "by_type": {"grid": 5, "signal": 3, "martingale": 2},
-            "by_exchange": {"binance": 7, "bybit": 3},
-        }
-        serializer = BotOverviewSerializer(data=data)
-        assert serializer.is_valid(), serializer.errors
-        assert serializer.initial_data["total_bots"] == 10

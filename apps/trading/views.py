@@ -4,6 +4,8 @@ Views for trading endpoints
 
 import logging
 
+from django.http import Http404
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
@@ -58,6 +60,18 @@ class ExchangeCredentialsViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        response_serializer = ExchangeCredentialsSerializer(serializer.instance)
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=headers,
+        )
+
     @action(detail=False, methods=["get"])
     def active(self, request):
         """Get active exchange credentials."""
@@ -95,6 +109,16 @@ class ExchangeStatusViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ExchangeStatus.objects.all()
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
+
+    @action(detail=True, methods=["get"])
+    def trading_pairs(self, request, pk=None):
+        """Return the trading pairs associated with an exchange status entry."""
+        exchange_status = self.get_object()
+        pairs = TradingPair.objects.filter(
+            exchange_name=exchange_status.exchange_name, is_active=True
+        )
+        serializer = TradingPairSerializer(pairs, many=True)
+        return Response(serializer.data)
 
 
 # =============================================================================
@@ -169,11 +193,15 @@ def list_exchanges(request):
 def get_exchange_symbols(request, exchange_name):
     """Get trading symbols for a specific exchange."""
     try:
-        pairs = TradingPair.objects.filter(exchange_name=exchange_name, is_active=True)
+        exchange = get_object_or_404(Exchange, name=exchange_name, is_active=True)
+        pairs = TradingPair.objects.filter(exchange_name=exchange.name, is_active=True)
+
         symbols = [pair.symbol for pair in pairs]
 
-        return Response({"success": True, "exchange": exchange_name, "symbols": symbols})
+        return Response({"success": True, "exchange": exchange.display_name, "symbols": symbols})
 
+    except Http404:
+        raise
     except Exception as e:
         logger.error(f"Error getting exchange symbols for {exchange_name}: {str(e)}")
         return Response(

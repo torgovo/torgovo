@@ -129,7 +129,7 @@ class HasExchangeCredentials(permissions.BasePermission):
         ).exists()
 
 
-class IsQuantumAIDepositOwner(permissions.BasePermission):
+class IsInvestorDepositOwner(permissions.BasePermission):
     """
     Custom permission for Quantum AI deposit access.
     """
@@ -163,3 +163,7 @@ class IsWebhookOwner(permissions.BasePermission):
 
     def has_permission(self, request, view):
         return request.user.is_authenticated
+
+
+# IsInvestorDepositOwner (was IsQuantumAIDepositOwner)
+IsQuantumAIDepositOwner = IsInvestorDepositOwner

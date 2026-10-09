@@ -26,8 +26,12 @@ _running_bots: set = set()
 _running_bots_lock = threading.Lock()
 
 # Track running engine instances so stop_bot() can signal them
+# RLock (not Lock): ``_shutdown_handler`` runs *on the main thread* and may be
+# delivered while that same thread already holds this lock inside ``run_bot``
+# or ``stop_bot``. A non-reentrant Lock would then self-deadlock the process
+# we are trying to shut down. Drop-in compatible with every ``with`` usage.
 _running_engines: Dict[str, Any] = {}
-_running_engines_lock = threading.Lock()
+_running_engines_lock = threading.RLock()
 
 
 def _is_bot_running(bot_id: str) -> bool:
@@ -209,7 +213,7 @@ class BotExecutor:
         adapter = get_adapter(
             exchange_name=config.get("exchange_name", "bybit"),
             credentials=credentials,
-            demo_mode=config.get("is_testnet", False),
+            demo_mode=config.get("is_demo", False) or config.get("is_testnet", False),
         )
 
         config.pop("api_key", None)
@@ -348,6 +352,10 @@ class BotExecutor:
             User = get_user_model()
             user = User.objects.get(id=user_id)
 
+            # Phase 1: entry log -> live trade, linked to its owning bot.
+            bot_id = self.bot_config.get("bot_id")
+            bot_type = self.bot_config.get("bot_type")
+
             BotOrder.objects.create(
                 user=user,
                 Pair=signal.symbol,
@@ -359,6 +367,10 @@ class BotExecutor:
                 Price=signal.price or order.get("price", 0),
                 Description=signal.reason,
                 Details=signal.metadata,
+                bot_id=str(bot_id) if bot_id else None,
+                bot_type=bot_type or None,
+                Reason=signal.reason,
+                Status="open",
             )
 
         except Exception as e:
@@ -445,6 +457,11 @@ def run_bot(bot_id: str, bot_type: str = "grid", restore_mode: bool = False) -> 
         if restore_mode and not _try_redis_lock(bot_id):
             _mark_bot_stopped(bot_id)
             return {"success": False, "error": f"Bot {bot_id} restore locked by another worker"}
+
+        # Drop any stale stop flag from a previous session, otherwise a restart
+        # within _STOP_REQ_TTL seconds would be killed immediately on the first
+        # monitor-loop poll.
+        clear_stop_request(bot_id)
 
         # ---- Quantum AI: uses fund master keys, not user credentials ----
         if bot_type == "quantum_ai":
@@ -584,51 +601,187 @@ def run_bot(bot_id: str, bot_type: str = "grid", restore_mode: bool = False) -> 
         return {"success": False, "error": str(e)}
 
 
-# ── Graceful shutdown ──────────────────────────────────────────────────
+import os as _os  # noqa: E402  (graceful-shutdown block)
+
+# ── Graceful shutdown (Phase 6b) ───────────────────────────────────────
+# Registration runs from TWO places, because no single one covers every host:
+#   * this module (legacy gate below) — Django runserver child / gunicorn;
+#   * ``apps.trading.apps.TradingConfig.ready()`` — Celery workers, via the
+#     ``worker_ready`` / ``worker_process_init`` hooks it installs.
+# Both paths funnel through ``_install_shutdown_handler()``, which is
+# idempotent and CHAINS to whatever handler it displaced, so Celery's warm
+# shutdown, gunicorn's ``sys.exit(0)`` and Django's Ctrl-C still run.
 import signal as _signal  # noqa: E402  (graceful-shutdown block)
+
+# Handler displaced for each signum; replayed after our teardown.
+_prev_sig_handlers: dict = {}
+
+
+def _install_shutdown_handler(signum=None) -> bool:
+    """Install ``_shutdown_handler`` for ``signum`` (SIGTERM+SIGINT default).
+
+    Idempotent and self-healing: if we already own the slot the existing chain
+    is left untouched; if somebody else (Celery's ``install_platform_tweaks``)
+    has since displaced us, we reclaim the slot and record *their* handler as
+    the one to chain to. Returns True when our handler ends up installed.
+    """
+    signums = (_signal.SIGTERM, _signal.SIGINT) if signum is None else (signum,)
+    installed = True
+    for sig in signums:
+        try:
+            prev = _signal.getsignal(sig)
+        except (AttributeError, ValueError, OSError):
+            installed = False
+            continue
+        if prev is _shutdown_handler:
+            continue  # already ours — keep the chain already recorded
+        try:
+            _signal.signal(sig, _shutdown_handler)
+        except (AttributeError, ValueError, OSError, RuntimeError):
+            # Not the main thread (signals are main-thread-only) or a
+            # platform without this signal — leave the current owner alone.
+            installed = False
+            continue
+        _prev_sig_handlers[sig] = prev
+    return installed
+
+
+def _chain_to_previous_handler(signum, frame) -> None:
+    """Replay the handler we displaced (Celery / gunicorn / Django default)."""
+    prev = _prev_sig_handlers.get(signum)
+    if not callable(prev) or prev is _shutdown_handler:
+        return  # SIG_DFL / SIG_IGN / ourselves — nothing safe to call
+    try:
+        prev(signum, frame)
+    except Exception:
+        logger.exception("Chained signal handler for %s failed", signum)
 
 
 def _shutdown_handler(signum, frame):
-    """Signal handler for SIGTERM/SIGINT — stops all running engines."""
+    """Signal handler for SIGTERM/SIGINT — final snapshot, then stop all engines."""
     logger.warning(f"Received signal {signum}, stopping all running bots...")
     with _running_engines_lock:
-        engine_ids = list(_running_engines.keys())
-    for bid in engine_ids:
+        engine_items = list(_running_engines.items())
+    # CHG-3-5: force a FINAL snapshot BEFORE teardown so Phase 4 boot
+    # recovery gets the live in-process payload (force bypasses the 5s
+    # throttle). save_snapshot writes payload+heartbeat only — status is
+    # untouched. Best-effort: no persistence failure may block shutdown.
+    try:
+        from apps.trading import state as runtime_state
+    except Exception:
+        logger.exception("Shutdown snapshot skipped: state module unavailable")
+        runtime_state = None
+    if runtime_state is not None:
+        for bid, engine in engine_items:
+            if engine is None:
+                continue
+            try:
+                runtime_state.snapshot_engine(engine, force=True)
+            except Exception:
+                logger.exception("Shutdown snapshot failed for %s", bid)
+    for bid, _ in engine_items:
         stop_bot(bid)
-    logger.info(f"Stopped {len(engine_ids)} running bot(s)")
+    logger.info(f"Stopped {len(engine_items)} running bot(s)")
+    # Hand the signal back to the previous owner instead of swallowing it:
+    # Celery needs it to finish its warm shutdown, gunicorn to reap the
+    # worker, and Django's default_int_handler to raise KeyboardInterrupt.
+    _chain_to_previous_handler(signum, frame)
 
 
-# Register handlers (only in non-Django-management context)
-import os as _os  # noqa: E402  (graceful-shutdown block)
-
+# Legacy gate, kept verbatim from the pre-6b module-level registration: only
+# the processes that used to self-register at import time. Celery workers do
+# NOT match this gate — they register through apps.ready() instead.
 if _os.environ.get("RUN_MAIN") or "gunicorn" in (_os.environ.get("SERVER_SOFTWARE", "")):
-    _signal.signal(_signal.SIGTERM, _shutdown_handler)
-    _signal.signal(_signal.SIGINT, _shutdown_handler)
+    _install_shutdown_handler()
 
 
 def _collect_engine_state(engine) -> dict:
-    """Extract serialisable state dict from a BotEngine instance."""
+    """Extract serialisable state dict from a BotEngine instance.
+
+    DEAD-2: Fixed attribute names to match actual BotEngine attributes.
+    """
     try:
         return {
             "current_side": getattr(engine, "current_side", None),
-            "entry_price": getattr(engine, "entry_price", None),
             "count": getattr(engine, "count", 0),
             "reason": getattr(engine, "reason", ""),
-            "total_pnl": getattr(engine, "total_pnl", 0.0),
-            "favor_levels": getattr(engine, "favor_levels", []),
-            "against_levels": getattr(engine, "against_levels", []),
-            "favor_orders": getattr(engine, "favor_orders", []),
-            "against_orders": getattr(engine, "against_orders", []),
+            "current_price": getattr(engine, "current_price", 0.0),
+            "unrealized_pnl": getattr(engine, "Unrealized_Pnl", 0.0),
+            "favor_lvl": getattr(engine, "favor_lvl", []),
+            "against_lvl": getattr(engine, "against_lvl", []),
         }
     except Exception:
         logger.exception("Failed to collect engine state")
         return {}
 
 
+# ── Cross-process stop signalling (Phase 6a) ───────────────────────────
+# The API / Celery ``stop_bot`` task frequently runs on a *different* worker
+# than the one holding the engine, so an in-process registry lookup cannot
+# reach it. The engine's monitor loops poll this Redis flag and tear
+# themselves down when it appears.
+
+_STOP_REQ_TTL = 600  # seconds — long enough to outlive a slow worker restart
+
+
+def _stop_req_key(bot_id: str) -> str:
+    """Redis key carrying a pending stop request for one bot."""
+    return f"bot:stop_req:{bot_id}"
+
+
+def request_stop(bot_id: str) -> None:
+    """
+    Flag a bot for cross-process shutdown.
+
+    Called by ``tasks.stop_bot`` *before* the in-process teardown attempt, so
+    the owning worker stops its threads within seconds even when it is not
+    the worker that received the stop request.
+    """
+    try:
+        cache.set(_stop_req_key(bot_id), 1, _STOP_REQ_TTL)
+        logger.info(f"Stop requested for {bot_id} (key {_stop_req_key(bot_id)})")
+    except Exception as exc:
+        # Never let a Redis failure abort the caller's stop flow — the
+        # in-process path and the DB flags below still run.
+        logger.error(f"Failed to set stop flag for {bot_id}: {exc}")
+
+
+def stop_requested(bot_id: str) -> bool:
+    """
+    True when a cross-process stop has been requested for this bot.
+
+    Fails CLOSED on Redis errors from the *caller's* perspective? No — it
+    fails OPEN (returns False) so a transient Redis blip can never silently
+    kill a healthy bot's monitoring threads. The durable stop signal is the
+    DB ``is_running`` flag written by ``tasks.stop_bot``.
+    """
+    try:
+        return bool(cache.get(_stop_req_key(bot_id)))
+    except Exception as exc:
+        logger.debug(f"stop_requested lookup failed for {bot_id}: {exc}")
+        return False
+
+
+def clear_stop_request(bot_id: str) -> None:
+    """
+    Drop a pending stop flag when a bot (re)starts.
+
+    Without this, restarting within ``_STOP_REQ_TTL`` seconds would be killed
+    instantly by the previous session's flag.
+    """
+    try:
+        cache.delete(_stop_req_key(bot_id))
+    except Exception as exc:
+        logger.debug(f"clear_stop_request failed for {bot_id}: {exc}")
+
+
 def stop_bot(bot_id: str, bot_type: str = "quantum_ai") -> Dict[str, Any]:
     """
     Stop a running bot by signaling its engine threads.
     Saves engine state to Redis for seamless recovery.
+
+    Only reaches the engine when it lives in *this* process; cross-process
+    stops are handled by :func:`request_stop` + the monitor-loop poll.
     """
     _mark_bot_stopped(bot_id)
 
@@ -663,4 +816,7 @@ def stop_bot(bot_id: str, bot_type: str = "quantum_ai") -> Dict[str, Any]:
     except Exception as e:
         logger.exception(f"Failed to update DB flag for {bot_id}: {e}")
 
-    return {"success": True, "bot_id": bot_id}
+    # ``engine_found`` tells the caller whether threads were actually joined
+    # in this process. When it is False the engine lives on another worker and
+    # only the Redis stop flag can reach it.
+    return {"success": True, "bot_id": bot_id, "engine_found": engine is not None}

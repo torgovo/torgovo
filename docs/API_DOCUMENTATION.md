@@ -2,19 +2,24 @@
 
 ## Overview
 
-Torgovo is a comprehensive Django REST API-based cryptocurrency trading platform that provides users with multiple automated trading strategies, signal bots, and AI-powered trading bots. The platform supports integration with major cryptocurrency exchanges (Binance, Bybit, OKX, MEXC, Alpaca).
+Torgovo is a comprehensive Django REST API-based cryptocurrency trading platform that provides users with multiple automated trading strategies, signal bots, and AI-powered trading bots. The platform supports integration with major cryptocurrency exchanges (Binance, Bybit, OKX, MEXC, Alpaca, Coinbase).
 
 **Base URL**: `https://api.torgovo.com`
 **API Version**: v1
 **Content-Type**: `application/json`
 **Authentication**: Bearer Token (JWT)
+**Route verification**: all paths below checked against `urls.py` sources on
+2026-10-07 (frontend-docs consolidation Step 3). No Swagger mount exists in
+`config/urls.py` — this file is the full-API reference; `/api/bots/` payloads
+and gates are code-verified in [BOTS_API.md](BOTS_API.md); the frontend
+integration contract is [FRONTEND_PROMPT.md](FRONTEND_PROMPT.md).
 
 ## Table of Contents
 
 1. [Authentication](#authentication)
 2. [User Management](#user-management)
 3. [Trading Bots](#trading-bots)
-4. [signal bots](#webhook-alerts)
+4. [signal bots](#signal-bots)
 5. [Grid Bots](#grid-bots)
 6. [Martingale Bots](#martingale-bots)
 7. [Quantum AI Bots](#quantum-ai-bots)
@@ -127,22 +132,27 @@ POST /api/auth/refresh-token/
 
 ### Get User Profile
 ```http
-GET /api/auth/profile/
+GET /api/auth/user/
 Authorization: Bearer {access_token}
 ```
 
-**Response (200):**
+Returns the flat `UserSerializer` shape (same object embedded as `user` in
+login/register responses):
 ```json
 {
   "id": "uuid",
-  "user_email": "trader@example.com",
-  "user_full_name": "John Doe",
+  "email": "trader@example.com",
+  "username": "trader123",
+  "first_name": "John",
+  "last_name": "Doe",
+  "full_name": "John Doe",
+  "phone_number": "+1234567890",
+  "is_email_verified": true,
+  "timezone": "UTC",
   "subscription_plan": "premium",
   "max_bots_allowed": 15,
-  "timezone": "UTC",
-  "demo_trading_enabled": true,
-  "email_notifications": true,
   "is_subscription_active": true,
+  "referral_code": "ABC123",
   "total_trades_executed": 1250,
   "total_volume_traded": "250000.00"
 }
@@ -150,25 +160,36 @@ Authorization: Bearer {access_token}
 
 ### Update Profile
 ```http
-PUT /api/auth/profile/update/
+PUT /api/auth/user/
+PATCH /api/auth/user/
 Authorization: Bearer {access_token}
 ```
+
+Writable fields: `email`, `username`, `first_name`, `last_name`,
+`phone_number`, `timezone`. Read-only (server-computed): `subscription_plan`,
+`max_bots_allowed`, `is_subscription_active`, `referral_code`,
+`total_trades_executed`, `total_volume_traded`, `two_factor_enabled`,
+`terms_accepted_at`, `privacy_version` (`apps/authentication/serializers.py`
+`UserSerializer.read_only_fields`).
 
 **Request Body:**
 ```json
 {
   "timezone": "America/New_York",
-  "demo_trading_enabled": false,
-  "email_notifications": true,
-  "sms_notifications": false,
-  "trading_preferences": {
-    "default_exchange": "binance",
-    "risk_tolerance": "moderate"
-  }
+  "first_name": "John",
+  "last_name": "Doe"
 }
 ```
 
 ## Trading Bots
+
+> **Payloads superseded (2026-10-02); routes corrected (2026-10-07).** The
+> code-verified reference for the `/api/bots/` surface is
+> **[BOTS_API.md](BOTS_API.md)** — payloads, subscription gates, and error
+> contract. Non-existent routes previously shown here (`quantum-ai-bots`,
+> `grid/{bot_id}/start`, `webhooks/tradingview/…`, `auth/profile/`) were fixed
+> on 2026-10-07 against `urls.py`. Use BOTS_API.md for anything bots-related;
+> this section is a convenience summary only.
 
 ### signal bots
 
@@ -186,7 +207,7 @@ Authorization: Bearer {access_token}
     {
       "id": "webhook_uuid",
       "bot_name": "BTC Scalper",
-      "webhook_url": "https://api.torgovo.com/api/webhooks/tradingview/webhook_uuid",
+      "webhook_url": "https://api.torgovo.com/api/webhooks/custombot/",
       "secret_key": "generated_secret_key",
       "exchange_name": "binance",
       "trading_pair": "BTC/USDT",
@@ -225,7 +246,7 @@ Authorization: Bearer {access_token}
 ```json
 {
   "id": "new_webhook_uuid",
-  "webhook_url": "https://api.torgovo.com/api/webhooks/tradingview/new_webhook_uuid",
+  "webhook_url": "https://api.torgovo.com/api/webhooks/custombot/",
   "secret_key": "generated_secret_key",
   "message": "Webhook alert created successfully"
 }
@@ -279,7 +300,7 @@ Authorization: Bearer {access_token}
   "base_amount": "50.00",
   "favor_levels": 3,
   "against_levels": 3,
-  "level_spacing_percent": "1.5",
+  "favor_level_qty": "10.00",
   "take_profit_percent": "6.0",
   "stop_loss_percent": "4.0"
 }
@@ -287,33 +308,24 @@ Authorization: Bearer {access_token}
 
 #### Start Grid Bot
 ```http
-POST /api/bots/grid/{bot_id}/start/
+POST /api/bots/grid-bots/{id}/start/
 Authorization: Bearer {access_token}
 ```
 
-**Response (200):**
+**Response (200)** — flat body (see BOTS_API.md §2B):
 ```json
-{
-  "message": "Grid bot started successfully",
-  "bot_id": "grid_bot_uuid",
-  "status": "running"
-}
+{"success": true, "message": "Grid bot started successfully"}
 ```
 
 #### Stop Grid Bot
 ```http
-POST /api/bots/grid/{bot_id}/stop/
+POST /api/bots/grid-bots/{id}/stop/
 Authorization: Bearer {access_token}
 ```
 
-**Response (200):**
+**Response (200)** — flat body:
 ```json
-{
-  "message": "Grid bot stopped successfully",
-  "bot_id": "grid_bot_uuid",
-  "status": "stopped",
-  "final_profit_loss": "15.50"
-}
+{"success": true, "message": "Grid bot stopped successfully"}
 ```
 
 ### Martingale Bots
@@ -333,7 +345,6 @@ Authorization: Bearer {access_token}
   "base_amount": "25.00",
   "favor_levels": 3,
   "against_levels": 3,
-  "level_spacing_percent": "2.0",
   "multiplier_factor": "2.0",
   "take_profit_percent": "10.0",
   "stop_loss_percent": "6.0"
@@ -342,25 +353,28 @@ Authorization: Bearer {access_token}
 
 ### Quantum AI Bots
 
-#### Create Quantum AI Bot
+#### Create Quantum AI Investment
 ```http
-POST /api/bots/quantum-ai-bots/
+POST /api/bots/quantum-investments/
 Authorization: Bearer {access_token}
 ```
+
+Requires active subscription with `bot_type="quantum_ai"` (else 403).
+Writable fields: `fund`, `amount`, `status` (`pending` default | `active` |
+`withdrawn` | `cancelled`) — BOTS_API.md §8.
 
 **Request Body:**
 ```json
 {
-  "bot_name": "AI Portfolio Manager",
-  "auto_compound": true,
-  "compound_frequency": "weekly",
-  "risk_level": "moderate"
+  "fund": "fund-uuid",
+  "amount": "1000.00",
+  "status": "pending"
 }
 ```
 
 #### Get Blockchain Addresses for Deposits
 ```http
-GET /api/bots/blockchain-addresses/
+GET /api/investments/bots/blockchain-addresses/
 Authorization: Bearer {access_token}
 ```
 
@@ -385,42 +399,48 @@ Authorization: Bearer {access_token}
 
 #### Submit Deposit
 ```http
-POST /api/bots/quantum-ai/{bot_id}/deposit/
+POST /api/investments/bots/quantum-ai/{bot_id}/deposit/
 Authorization: Bearer {access_token}
 Content-Type: multipart/form-data
 ```
 
 **Form Data:**
-- `amount`: "1000.00"
-- `coin_type`: "USDT"
-- `blockchain`: "BEP20"
+- `amount`: "1000.00" (required, > 0)
+- `coin_type`: "USDT" (required, uppercased server-side)
+- `blockchain`: "BEP20" (required, uppercased server-side)
 - `from_address`: "0xuser...address"
-- `transaction_hash`: "0x1234...abcd"
+- `transaction_hash`: "0x1234...abcd" (tx-hash **or** `screenshot` required —
+  else 400; duplicate tx-hash → 409)
 - `screenshot`: [file]
 
 ## Exchange Integration
 
 ### List Supported Exchanges
 ```http
-GET /api/exchanges/
+GET /api/exchanges/list/
 Authorization: Bearer {access_token}
 ```
 
-**Response (200):**
+**Response (200)** (`apps/trading/views.py:list_exchanges`):
 ```json
 {
-  "exchanges": [
+  "success": true,
+  "data": [
     {
       "name": "binance",
       "display_name": "Binance",
-      "status": "active",
-      "supported_features": ["spot", "futures", "margin"]
+      "is_active": true,
+      "supports_testnet": true,
+      "supported_features": ["spot", "futures", "margin"],
+      "fee_rates": {}
     },
     {
       "name": "bybit",
       "display_name": "Bybit",
-      "status": "active",
-      "supported_features": ["spot", "linear", "inverse"]
+      "is_active": true,
+      "supports_testnet": true,
+      "supported_features": ["spot", "linear", "inverse"],
+      "fee_rates": {}
     }
   ]
 }
@@ -476,7 +496,8 @@ Authorization: Bearer {access_token}
 
 ### EMA Indicator
 ```http
-POST /api/indicators/ema/
+POST /api/bots/indicators/ema/
+X-Webhook-Token: {webhook_token}
 Content-Type: application/json
 ```
 
@@ -502,7 +523,8 @@ Content-Type: application/json
 
 ### RSI Indicator
 ```http
-POST /api/indicators/rsi/
+POST /api/bots/indicators/rsi/
+X-Webhook-Token: {webhook_token}
 Content-Type: application/json
 ```
 
@@ -521,30 +543,26 @@ Content-Type: application/json
 
 ## TradingView Webhook Integration
 
-### Webhook URL Format
+### Webhook URL
 ```
-https://api.torgovo.com/api/webhooks/tradingview/{webhook_id}/
+https://api.torgovo.com/api/webhooks/custombot/
 ```
+Global URL for every signal bot (`SignalBot.save()` sets
+`webhook_url = {SITE_URL}/api/webhooks/custombot/`); the bot is selected from
+the payload.
 
 ### Webhook Message Format
+Required: `bot_id`, `secret` (body-secret mode — or `X-Signature` HMAC header
+instead), `side`/`action`/`direction` (`buy`|`sell`, long/short aliases
+mapped), `timestamp`. Optional: `position_size`, `order_id`.
+(`apps/webhooks/views.py` SignalBotWebhookView)
 ```json
 {
+  "bot_id": "25bbfa8f-38fd-4afc-bf63-25dc209977e1",
   "secret": "generated_secret_key",
-  "max_lag": "300",
-  "timestamp": "1642248600",
-  "trigger_price": "45000.50",
-  "tv_exchange": "binance",
-  "tv_instrument": "BTCUSDT",
   "action": "buy",
-  "bot_uuid": "25bbfa8f-38fd-4afc-bf63-25dc209977e1",
-  "strategy_info": {
-    "market_position": "long",
-    "market_position_size": "1.5"
-  },
-  "order": {
-    "amount": "1.5",
-    "currency_type": "base"
-  }
+  "timestamp": "1642248600",
+  "position_size": "1.5"
 }
 ```
 
@@ -552,7 +570,7 @@ https://api.torgovo.com/api/webhooks/tradingview/{webhook_id}/
 
 ### Get User Orders
 ```http
-GET /api/users/my-orders/
+GET /api/investments/users/my-orders/
 Authorization: Bearer {access_token}
 ```
 
@@ -569,7 +587,7 @@ Authorization: Bearer {access_token}
 ```json
 {
   "count": 154,
-  "next": "https://api.torgovo.com/api/users/my-orders/?page=2",
+  "next": "https://api.torgovo.com/api/investments/users/my-orders/?page=2",
   "previous": null,
   "results": [
     {
@@ -623,9 +641,8 @@ Authorization: Bearer {access_token}
 
 ## Rate Limiting
 
-- **Free Users**: 100 requests per minute
-- **Premium Users**: 1000 requests per minute
-- **Enterprise Users**: 3000 requests per minute
+- **Anonymous**: 100 requests per hour
+- **Authenticated Users**: 1000 requests per hour
 
 Rate limit headers are included in responses:
 - `X-RateLimit-Limit`: Your rate limit
@@ -657,23 +674,27 @@ Real-time updates will be available via WebSocket for:
 
 Connect to: `wss://api.torgovo.com/ws/`
 
-## SDK & Libraries
-
-Official SDKs are available for:
-- **Python**: `pip install torgovo-python`
-- **JavaScript**: `npm install torgovo-js`
-- **React**: `npm install torgovo-react`
-
 ## Support
 
-- **Documentation**: https://docs.torgovo.com
-- **API Status**: https://status.torgovo.com
-- **Support Email**: support@torgovo.com
-- **Telegram Community**: https://t.me/torgovo_community
+> **Note:** Official SDKs and dedicated support pages are planned but not yet available.
 
 ## Changelog
 
-### v1.0.0 (2024-01-15)
+### v1.0.1 (2026-10-07 — Step 3 route verification)
+- Removed nonexistent Swagger claim (`/api/docs/` not mounted).
+- `auth/profile/` → `auth/user/` with real flat `UserSerializer` shape + writable fields.
+- Signal-bot webhook URL → `webhooks/custombot/`; webhook payload corrected to
+  required `bot_id`/`secret`/`action`/`timestamp`.
+- Grid start/stop → `grid-bots/{id}/start|stop/` with flat success bodies;
+  legacy `grid/{bot_id}/…` routes removed (broken, see BOTS_API.md §3).
+- `quantum-ai-bots` → `quantum-investments` with real `fund`/`amount`/`status` payload.
+- `bots/blockchain-addresses` & `bots/quantum-ai/…/deposit` → `investments/bots/…`.
+- Indicator webhooks → `bots/indicators/ema|rsi/` + `X-Webhook-Token`.
+- `users/my-orders` → `investments/users/my-orders`; `exchanges/` → `exchanges/list/`
+  with real `{"success","data"}` shape; dropped non-writable `level_spacing_percent`
+  from grid/martingale create bodies.
+
+### v1.0.0
 - Initial release with core trading features
 - signal bots integration
 - Grid and Martingale trading bots
@@ -683,4 +704,4 @@ Official SDKs are available for:
 
 ---
 
-**© 2024 Torgovo Crypto Trading Platform. All rights reserved.**
+**© 2026 Torgovo Crypto Trading Platform. All rights reserved.**

@@ -36,110 +36,31 @@ Response: `{"access", "refresh", "user": {"id", "email", "username"}}`
 
 ## Bot Management
 
-### SignalBot
+Full code-verified reference (routes, payloads, gates, error contract, known
+gaps): **[BOTS_API.md](BOTS_API.md)**. Summary of the live surface:
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/bots/signal-bots/` | GET | List user's SignalBots |
-| `/api/bots/signal-bots/` | POST | Create SignalBot |
-| `/api/bots/signal-bots/{id}/` | GET | Retrieve details |
-| `/api/bots/signal-bots/{id}/` | PATCH | Partial update |
-| `/api/bots/signal-bots/{id}/` | DELETE | Soft-delete |
-| `/api/bots/signal-bots/{id}/start/` | POST | Start bot |
-| `/api/bots/signal-bots/{id}/stop/` | POST | Stop bot |
-| `/api/bots/signal-bots/{id}/get-signals/` | GET | View signals |
-| `/api/bots/signal-bots/{id}/orders/` | GET | View orders |
+| Prefix | Methods | Notes |
+|--------|---------|-------|
+| `/api/bots/signal-bots/`, `/{id}/` | GET, POST, PUT, PATCH, DELETE | CRUD; POST needs active `custom` subscription; DELETE = soft-delete |
+| `/api/bots/signal-bots/{id}/toggle_active/` | POST | Owner/staff only |
+| `/api/bots/grid-bots/`, `/{id}/` | GET, POST, PUT, PATCH, DELETE | POST needs active `grid` subscription (1 bot per subscription) |
+| `/api/bots/grid-bots/{id}/start/`, `/stop/` | POST | Executor control (flat success/error bodies) |
+| `/api/bots/martingale-bots/`, `/{id}/` | GET, POST, PUT, PATCH, DELETE | POST needs active `martingale` subscription |
+| `/api/bots/martingale-bots/{id}/start/`, `/stop/` | POST | Executor control |
+| `/api/bots/quantum-funds/`, `/{id}/` | GET | Read-only, staff only (`IsAdminUser`) |
+| `/api/bots/quantum-investments/`, `/{id}/` | GET, POST, PUT, PATCH, DELETE | POST needs active `quantum_ai` subscription |
+| `/api/bots/quantum-investments/balance/` | GET | Totals of active investments (unpaginated) |
+| `/api/bots/pair-configs/`, `/{id}/` | GET, POST, PUT, PATCH, DELETE | POST needs active subscription for the posted `bot_type` |
+| `/api/bots/orders/`, `/{id}/`, `/recent/` | GET | Read-only order history (recent = latest 50) |
+| `/api/bots/indicators/`, `/{id}/` | GET, POST, PUT, PATCH, DELETE | Indicator rows CRUD |
+| `/api/bots/indicators/ema/`, `/rsi/`, `/bb/` | POST | TradingView webhooks; auth via `X-Webhook-Token` |
 
-**Create SignalBot:**
-```json
-{
-  "name": "My EMA Bot",
-  "symbol": "BTC/USDT",
-  "exchange_id": 1,
-  "exchange": 1,
-  "signal_type": "webhook",
-  "rsi_period": 14,
-  "rsi_overbought": 70,
-  "rsi_oversold": 30,
-  "ema_short_period": 9,
-  "ema_long_period": 21,
-  "bb_period": 20,
-  "bb_std_dev": 2,
-  "trade_direction": "both",
-  "amount": "0.001"
-}
-```
-
-### GridBot
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/bots/grid-bots/` | GET | List |
-| `/api/bots/grid-bots/` | POST | Create |
-| `/api/bots/grid-bots/{id}/` | GET/PATCH/DELETE | CRUD |
-| `/api/bots/grid-bots/{id}/start/` | POST | Start |
-| `/api/bots/grid-bots/{id}/stop/` | POST | Stop |
-| `/api/bots/grid-bots/{id}/grid-status/` | GET | Grid order status |
-
-**Create GridBot:**
-```json
-{
-  "name": "BTC Grid",
-  "symbol": "BTC/USDT",
-  "exchange_id": 1,
-  "upper_price": "70000",
-  "lower_price": "60000",
-  "grid_count": 10,
-  "total_investment": "1000"
-}
-```
-
-### MartingaleBot
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/bots/martingale-bots/` | GET | List |
-| `/api/bots/martingale-bots/` | POST | Create |
-| `/api/bots/martingale-bots/{id}/` | GET/PATCH/DELETE | CRUD |
-| `/api/bots/martingale-bots/{id}/start/` | POST | Start |
-| `/api/bots/martingale-bots/{id}/stop/` | POST | Stop |
-
-**Create MartingaleBot:**
-```json
-{
-  "name": "ETH Martingale",
-  "symbol": "ETH/USDT",
-  "exchange_id": 1,
-  "base_order_size": "0.01",
-  "safety_order_size": "0.02",
-  "max_safety_orders": 3,
-  "price_deviation": 1.0,
-  "take_profit": 1.5
-}
-```
-
-### QuantumAIBot (Admin)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/bots/quantum-ai-bots/` | GET | List |
-| `/api/bots/quantum-ai-bots/` | POST | Create |
-| `/api/bots/quantum-ai-bots/{id}/` | GET/PATCH/DELETE | CRUD |
-| `/api/bots/quantum-ai-bots/{id}/start/` | POST | Start |
-| `/api/bots/quantum-ai-bots/{id}/stop/` | POST | Stop |
-| `/api/bots/quantum-ai-bots/{id}/performance/` | GET | P/L metrics |
-
-**Create QuantumAIBot:**
-```json
-{
-  "name": "Quantum Pool A",
-  "symbol": "BTC/USDT",
-  "exchange_id": 1,
-  "min_investment": "100",
-  "max_investors": 1000,
-  "profit_share_percentage": 20
-}
-```
+**Not part of this surface:** legacy aliases
+`/api/bots/grid/{bot_id}/start|stop/` and
+`/api/bots/martingale/{bot_id}/start|stop/` are declared but broken
+(url kwarg mismatch → HTTP 500). There are no
+`signal-bots/{id}/start|stop|get-signals|orders`, `grid-status`,
+or `quantum-ai-bots/*` routes.
 
 ---
 
@@ -256,14 +177,31 @@ Returns indicator data from the latest processed signal.
 
 ## Error Response Format
 
+Produced by the global DRF exception handler `core.exceptions.custom_exception_handler`:
+
 ```json
 {
-  "detail": "Error message",
-  "code": "validation_error",
-  "field_errors": {
-    "email": ["This field is required."]
-  }
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed. Please check your input.",
+    "details": {"email": ["This field is required."]},
+    "field_errors": {"email": ["This field is required."]}
+  },
+  "timestamp": "2026-10-02T12:00:00.123456+00:00"
 }
 ```
+
+- `field_errors` only when errors are field-keyed; `details` carries the raw
+  DRF detail; with `DEBUG=True` a `debug` object is appended.
+- Codes: `AUTHENTICATION_REQUIRED`/`AUTHENTICATION_FAILED` (401),
+  `PERMISSION_DENIED` (403), `VALIDATION_ERROR` (400), `RESOURCE_NOT_FOUND` (404),
+  `METHOD_NOT_ALLOWED` (405), `RATE_LIMIT_EXCEEDED` (429),
+  `INTERNAL_SERVER_ERROR` (500), plus trading-specific codes
+  (`EXCHANGE_API_ERROR`, `INSUFFICIENT_BALANCE`, …).
+
+**Exceptions:** bot action endpoints (`start`, `stop`, `toggle_active`) return a
+flat `{"error": "..."}` body on failure and `{"success": true, "message": "..."}`
+on success, and indicator webhook endpoints use `{"status": "success|error", ...}`
+— see [BOTS_API.md](BOTS_API.md) §2.
 
 Status codes: 200 OK, 201 Created, 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 429 Too Many Requests.

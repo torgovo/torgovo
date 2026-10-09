@@ -249,7 +249,7 @@ flowchart TB
 
     subgraph "Fund"
         FUND_DB[(QuantumAIFund)]
-        INV[(QuantumAIInvestment)]
+        INV[(InvestorPortfolio)]
     end
 
     subgraph "Smoothing Engine"

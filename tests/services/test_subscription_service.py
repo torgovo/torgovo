@@ -306,7 +306,7 @@ class TestGetDashboardStats:
             assert result["total_revenue"] == Decimal("0")
 
 
-class TestCreateQuantumAIInvestment:
+class TestCreateInvestorPortfolio:
     def test_creates_investment_with_active_fund(self):
         mock_user = MagicMock()
         mock_user.email = "test@example.com"
@@ -319,7 +319,7 @@ class TestCreateQuantumAIInvestment:
         with patch("services.subscription_service.QuantumAIFund.objects.filter") as mock_filter:
             mock_filter.return_value.first.return_value = mock_fund
             with patch(
-                "services.subscription_service.QuantumAIInvestment.objects.create"
+                "services.subscription_service.InvestorPortfolio.objects.create"
             ) as mock_create:
                 mock_investment = MagicMock()
                 mock_investment.amount = Decimal("100")
@@ -357,7 +357,7 @@ class TestCreateQuantumAIInvestment:
         with patch("services.subscription_service.QuantumAIFund.objects.filter") as mock_filter:
             mock_filter.return_value.first.return_value = mock_fund
             with patch(
-                "services.subscription_service.QuantumAIInvestment.objects.create"
+                "services.subscription_service.InvestorPortfolio.objects.create"
             ) as mock_create:
                 mock_investment = MagicMock()
                 mock_investment.calculate_share_percentage.return_value = Decimal("5.0")

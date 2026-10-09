@@ -15,13 +15,13 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from apps.referrals.models import Referral
 from apps.referrals.views import ReferralRegistrationMixin
 
 # Import CustomUser from users app (AUTH_USER_MODEL = 'users.CustomUser')
 from apps.users.models import CustomUser
 from core.exceptions import TradingBotException
 from core.utils import get_client_ip
+from services.two_factor import encrypt_totp_secret
 
 from .models import EmailVerification, LoginAttempt
 from .serializers import (
@@ -33,6 +33,9 @@ from .serializers import (
     PhoneVerificationConfirmSerializer,
     PhoneVerificationSerializer,
     RefreshTokenSerializer,
+    TwoFAConfirmSerializer,
+    TwoFADisableSerializer,
+    TwoFASetupSerializer,
     UserLoginSerializer,
     UserRegistrationSerializer,
     UserSerializer,
@@ -85,7 +88,9 @@ class UserRegistrationView(ReferralRegistrationMixin, generics.CreateAPIView):
             referral_code = ""
 
             if not serializer.validated_data.get("referral_code") and referral_from_query:
-                if Referral.objects.filter(code=referral_from_query).exists():
+                # User-level referral_code is the source of truth — a valid
+                # code must not depend on a Referral row existing (A2)
+                if CustomUser.objects.filter(referral_code=referral_from_query).exists():
                     referral_code = referral_from_query
 
             user = serializer.save()
@@ -383,6 +388,7 @@ class PhoneVerificationRequestView(generics.CreateAPIView):
 
     serializer_class = PhoneVerificationSerializer
     permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = "phone_verification"
 
     def create(self, request, *args, **kwargs):
         """Send phone verification code."""
@@ -413,7 +419,9 @@ class PhoneVerificationRequestView(generics.CreateAPIView):
         """Send SMS with verification code."""
         # In production, integrate with SMS service like Twilio
         # SECURITY (CRIT-6): NEVER log the OTP code — only log that SMS was sent.
-        # The code is stored hashed in DB; logging it defeats the purpose.
+        # NOTE (S-2): the code is stored as a salted PBKDF2 HASH at rest
+        # (PhoneVerification.code); the raw code lives only transiently on the
+        # in-memory instance at generation. These logs must not echo it back.
         masked_phone = phone_verification.phone_number[:5] + "***"
         logger.info(f"Verification SMS dispatched to {masked_phone}")
 
@@ -646,3 +654,84 @@ class RefreshTokenView(APIView):
             raise TradingBotException(
                 message="Token refresh failed.", error_code="TOKEN_REFRESH_ERROR"
             )
+
+
+class TwoFASetupView(APIView):
+    """Provision a TOTP secret for the authenticated user.
+
+    Returns the base32 secret + ``otpauth://`` URI once for the
+    authenticator-app scan. Enrollment is only committed once the user
+    confirms with a generated code (see TwoFAConfirmView).
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = "two_factor"
+
+    def post(self, request):
+        """Generate (and store encrypted) a fresh TOTP secret."""
+        from services.two_factor import build_otpauth_uri, generate_totp_secret
+
+        serializer = TwoFASetupSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+
+        secret = generate_totp_secret()
+        request.user.totp_secret = encrypt_totp_secret(secret)
+        request.user.save(update_fields=["totp_secret"])
+        logger.info(f"2FA setup issued for user {request.user.id}")
+
+        return Response(
+            {
+                "secret": secret,
+                "otpauth_uri": build_otpauth_uri(secret, request.user.get_username()),
+                "message": "Scan the QR code or add the secret to your authenticator app, "
+                "then confirm with the /2fa/confirm/ endpoint.",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class TwoFAConfirmView(APIView):
+    """Confirm TOTP enrollment by validating a generated one-time code.
+
+    Only runs after TwoFASetupView; each confirm call against a not-yet
+    enabled account is throttled to resist code brute-forcing.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = "two_factor"
+
+    def post(self, request):
+        """Turn on two_factor_enabled when the passed code verifies."""
+        serializer = TwoFAConfirmSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+
+        request.user.two_factor_enabled = True
+        request.user.save(update_fields=["two_factor_enabled"])
+        logger.info(f"2FA enabled for user {request.user.id}")
+
+        return Response(
+            {"message": "Two-factor authentication enabled."},
+            status=status.HTTP_200_OK,
+        )
+
+
+class TwoFADisableView(APIView):
+    """Disable TOTP 2FA (requires current password + a valid TOTP code)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = "two_factor"
+
+    def post(self, request):
+        """Disable 2FA and wipe the stored secret after combined auth."""
+        serializer = TwoFADisableSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+
+        request.user.two_factor_enabled = False
+        request.user.totp_secret = ""
+        request.user.save(update_fields=["two_factor_enabled", "totp_secret"])
+        logger.info(f"2FA disabled for user {request.user.id}")
+
+        return Response(
+            {"message": "Two-factor authentication disabled."},
+            status=status.HTTP_200_OK,
+        )

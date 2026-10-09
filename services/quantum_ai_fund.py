@@ -15,7 +15,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from apps.bots.models import QuantumAIFund, QuantumAIInvestment, ReserveFund
+from apps.bots.models import InvestorPortfolio, QuantumAIFund, ReserveFund
 from apps.payments.models import PaymentTransaction
 from apps.users.models import UserBalance
 
@@ -78,7 +78,7 @@ class QuantumAIFundService:
         """Accrue smoothed profit to each active investor (locked)."""
         fund = QuantumAIFund.objects.select_for_update().get(id=fund_id)
         investments = (
-            QuantumAIInvestment.objects.filter(fund=fund, status="active")
+            InvestorPortfolio.objects.filter(fund=fund, status="active")
             .select_for_update()
             .select_related("user")
         )
@@ -166,7 +166,7 @@ class QuantumAIFundService:
             payout_date = timezone.now()
 
         fund = QuantumAIFund.objects.select_for_update().get(id=fund_id)
-        investments = QuantumAIInvestment.objects.filter(
+        investments = InvestorPortfolio.objects.filter(
             fund=fund, accrued_profit__gt=0
         ).select_for_update()
 
@@ -212,7 +212,7 @@ class QuantumAIFundService:
     @staticmethod
     def get_user_dashboard(user):
         """Get user's Quantum AI investment dashboard (smoothed view)."""
-        investments = QuantumAIInvestment.objects.filter(user=user).select_related("fund")
+        investments = InvestorPortfolio.objects.filter(user=user).select_related("fund")
 
         total_invested = sum(i.amount for i in investments)
         total_profit_paid = sum(i.total_payouts for i in investments)

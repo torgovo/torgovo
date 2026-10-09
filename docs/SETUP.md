@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.12+
 - PostgreSQL 15+
 - Redis 7+
 - Docker + docker-compose (optional, for containerized setup)
@@ -22,12 +22,10 @@ source venv/bin/activate
 
 ```bash
 pip install -r requirements/base.txt
-pip install -r requirements/dev.txt    # development extras
+pip install -r requirements/development.txt    # development extras (pytest, flake8, etc.)
 ```
 
 ### 3. Configure environment
-
-Copy the example env file:
 
 ```bash
 cp .env.example .env
@@ -51,29 +49,23 @@ python manage.py migrate
 python manage.py createsuperuser
 ```
 
-### 5. Load seed data (optional)
-
-```bash
-python manage.py loaddata fixtures/initial_plans.json
-```
-
-### 6. Start services
+### 5. Start services
 
 ```bash
 # Terminal 1: Django dev server
 python manage.py runserver
 
 # Terminal 2: Celery worker
-celery -A config worker -l info
+celery -A config.celery worker -l info
 
 # Terminal 3: Celery beat
-celery -A config beat -l info
+celery -A config.celery beat -l info
 
 # Terminal 4: Redis (if not running as service)
 redis-server
 ```
 
-### 7. Verify
+### 6. Verify
 
 ```bash
 python manage.py check
@@ -83,68 +75,90 @@ curl http://localhost:8000/ht/    # health check
 ## Docker Development Setup
 
 ```bash
-docker-compose -f deploy/docker-compose.yml up -d
-docker-compose -f deploy/docker-compose.yml exec web python manage.py migrate
-docker-compose -f deploy/docker-compose.yml exec web python manage.py createsuperuser
+docker compose up -d
+docker compose exec web python manage.py migrate
+docker compose exec web python manage.py createsuperuser
 ```
 
 ## Running Tests
 
 ```bash
-# All tests
-python manage.py test
+# All tests (use project venv, NOT system python)
+.venv/bin/python -m pytest -q
 
 # Specific app
-python manage.py test apps.bots
-python manage.py test apps.trading
-python manage.py test apps.webhooks
+.venv/bin/python -m pytest tests/bots/
+.venv/bin/python -m pytest tests/trading/
+.venv/bin/python -m pytest tests/payments/
 
 # With coverage
-coverage run --source='.' manage.py test
-coverage report
+.venv/bin/python -m pytest --cov=. -q
 ```
+
+> **Note:** The project uses `.venv/bin/python` (not system python) because system python lacks `pytest-asyncio`.
 
 ## Project Structure
 
 ```
 torgovo2/
 +-- apps/
-|   +-- bots/             Bot models, views, admin, indicator views
-|   +-- trading/          Trading engine, strategies, exchange adapters
-|   +-- exchanges/        Exchange/TradingPair/ExchangeCredentials models
-|   +-- webhooks/         TradingView signal webhook receiver
-|   +-- payments/         Payment processing, subscriptions
-|   +-- subscriptions/    Telegram signal subscriptions
-|   +-- authentication/   JWT, OAuth, OTP
-|   +-- investments/      Quantum AI deposit/display
+|   +-- authentication/   JWT, OAuth, OTP, email verification
+|   +-- bots/             Bot models (Signal, Grid, Martingale, QuantumAI), views, admin
+|   +-- exchanges/        Exchange, TradingPair, ExchangeCredentials models
+|   +-- investments/      InvestorPortfolio, InvestorDeposit, fund display
+|   +-- payments/         Payment processing, subscriptions, InvestorDeposit
 |   +-- referrals/        Referral system
+|   +-- subscriptions/    Telegram signal subscriptions
+|   +-- trading/          Trading engine, strategies, exchange adapters, Celery tasks
 |   +-- users/            User profiles, admin dashboards
-+-- config/               Django settings, URLs, Celery, ASGI
-+-- core/                 Base models, utils, middleware, pagination
-+-- services/             BotExecutorService, QuantumAIFundService
-+-- deploy/               Docker compose, scripts, monitoring
+|   +-- webhooks/         TradingView signal webhook receiver
++-- config/               Django settings (base/dev/prod/test), URLs, Celery, ASGI
++-- core/                 Base models (SoftDeleteModel, SiteConfig, AuditLog), utils, middleware
 +-- docs/                 Documentation
-+-- trading/              Legacy code (DO NOT MODIFY — reference only)
++-- nginx.conf            Nginx reverse proxy configuration
++-- docker-compose.yml    Development compose (volume mounts, runserver)
++-- docker-compose.prod.yml  Production compose (gunicorn, no mounts)
++-- Dockerfile            Python 3.12 slim image
 ```
+
+## Key Models
+
+| Model | Location | Purpose |
+|-------|----------|---------|
+| `InvestorPortfolio` | `apps.bots` | User investment in Quantum AI fund |
+| `InvestorDeposit` | `apps.payments` | Individual deposit records |
+| `QuantumAIFund` | `apps.bots` | Fund configuration + profit distribution |
+| `QuantumAIBot` | `apps.bots` | Automated fund trading bot |
+| `SignalBot` | `apps.bots` | TradingView webhook signal bots |
+| `GridBot` | `apps.bots` | Grid trading bots |
+| `MartingaleBot` | `apps.bots` | Martingale strategy bots |
+| `BotOrder` | `apps.bots` | All trading orders |
+| `ExchangeCredentials` | `apps.exchanges` | Fernet-encrypted API keys |
+| `SiteConfig` | `core` | Site-wide settings (cached with `lru_cache`) |
+| `AuditLog` | `core` | Audit trail (auto-cleaned after 90 days) |
 
 ## Common Tasks
 
 ### Create a new migration
-
 ```bash
 python manage.py makemigrations <app_name>
 ```
 
 ### Collect static files
-
 ```bash
 python manage.py collectstatic
 ```
 
 ### Management commands
-
 ```bash
-# Encrypt existing plaintext QuantumAIFund keys
+# Encrypt existing plaintext Quantum AI fund keys
 python manage.py encrypt_quantum_fund_keys --dry-run
 python manage.py encrypt_quantum_fund_keys
+```
+
+### Pre-deploy checks
+```bash
+python manage.py check
+python manage.py check --deploy
+python manage.py makemigrations --check
 ```

@@ -309,3 +309,156 @@ class TestQty:
         assert qty == 0.002
         assert favor == 0.001
         assert against == 0.0005
+
+
+class TestTradeIntegrity:
+    """Phase 1 (persistence): BotOrder trade-record integrity (migration 0017).
+
+    Locks the four guarantees a restart depends on: real fill price, bot
+    linkage, open/closed status and entry reason + realized P/L.
+    """
+
+    # ---- price resolution (pure units, no DB) -----------------------------
+
+    def test_extract_fill_price_reads_exchange_fields(self):
+        from apps.trading.engines.order_service import _extract_fill_price
+
+        assert _extract_fill_price({"average": "49900.5"}) == 49900.5
+        assert _extract_fill_price({"price": 50000}) == 50000.0
+        assert _extract_fill_price({"fillPrice": 1.25}) == 1.25
+        # unified fill price (average) is more authoritative than order price
+        assert _extract_fill_price({"price": 10, "average": 20}) == 20.0
+
+    def test_extract_fill_price_rejects_zero_garbage_non_dict(self):
+        from apps.trading.engines.order_service import _extract_fill_price
+
+        assert _extract_fill_price({"price": 0}) is None
+        assert _extract_fill_price({"price": "abc"}) is None
+        assert _extract_fill_price({"price": None}) is None
+        assert _extract_fill_price({"ref": "a"}) is None
+        assert _extract_fill_price("raw-string") is None
+        assert _extract_fill_price(None) is None
+
+    def test_resolve_price_precedence_explicit_then_exchange_then_config(self):
+        from apps.trading.engines.order_service import _resolve_price
+
+        config = {"current_price": 50000.0}
+        # explicit argument wins
+        assert _resolve_price(100.0, {"average": 90.0}, config) == 100.0
+        # exchange fill beats the config fallback
+        assert _resolve_price(None, {"average": 90.0}, config) == 90.0
+        # config fallback kept for legacy callers
+        assert _resolve_price(None, None, config) == 50000.0
+        # nothing known -> 0 (never a crash, never a false fill)
+        assert _resolve_price(None, None, {}) == 0.0
+        assert _resolve_price("junk", {"price": "junk"}, {}) == 0.0
+
+    # ---- persistence: price ----------------------------------------------
+
+    def test_exchange_fill_price_beats_config_fallback(self, db, no_order_sync):
+        service = _make_service(
+            pair_config={"quantity": 0.002},
+            bot_config={"bot_name": "grid", "current_price": 50000.0},
+        )
+        order = service.save_order("Buy", "entry", {"average": 49900.5, "ref": "x"})
+        assert float(order.Price) == 49900.5
+
+    def test_config_price_used_when_exchange_silent(self, db, no_order_sync):
+        service = _make_service(
+            bot_config={"bot_name": "grid", "current_price": 50000.0},
+        )
+        order = service.save_order("Buy", "entry", {"ref": "a"})
+        assert order.Price == 50000.0
+
+    def test_price_is_zero_when_nothing_known(self, db, no_order_sync):
+        service = _make_service(bot_config={"bot_name": "grid"})
+        order = service.save_order("Buy", "entry")
+        assert float(order.Price) == 0.0
+
+    # ---- persistence: defaults -------------------------------------------
+
+    def test_defaults_are_closed_unlinked_no_reason_no_pnl(self, db, no_order_sync):
+        service = _make_service(bot_config={"bot_name": "grid"})
+        order = service.save_order("Buy", "entry")
+        assert order.Status == "closed"
+        assert order.Reason is None
+        assert order.Realized_PnL is None
+        assert order.bot_type is None
+        assert order.bot_id is None
+        assert order.grid_bot_id is None
+        assert order.signal_bot_id is None
+        assert order.martingale_bot_id is None
+
+    def test_entry_persists_open_status_and_reason(self, db, no_order_sync):
+        service = _make_service(pair_config={"quantity": 0.002}, bot_config={"bot_name": "grid"})
+        order = service.save_order(
+            "Buy", "entry", None, reason="EMA + RSI BUY LONG (CASE1)", status="open"
+        )
+        assert order.Status == "open"
+        assert order.Reason == "EMA + RSI BUY LONG (CASE1)"
+        assert order.Realized_PnL is None
+
+    def test_exit_persists_closed_status_and_realized_pnl(self, db, no_order_sync):
+        service = _make_service(bot_config={"bot_name": "grid"})
+        order = service.save_order("Sell", "exit", None, status="closed", pnl=12.5)
+        assert order.Status == "closed"
+        assert float(order.Realized_PnL) == 12.5
+
+    # ---- persistence: bot linkage ----------------------------------------
+
+    def test_bot_id_and_bot_type_persisted_from_config(self, db, no_order_sync):
+        service = _make_service(
+            bot_config={"bot_name": "grid", "bot_type": "grid", "bot_id": "4242"}
+        )
+        order = service.save_order("Buy", "entry")
+        assert order.bot_type == "grid"
+        assert order.bot_id == "4242"
+        # unresolvable id -> linkage skipped, order still written
+        assert order.grid_bot_id is None
+
+    def test_resolvable_grid_bot_fk_is_wired(self, db, user, no_order_sync):
+        from decimal import Decimal
+
+        from apps.bots.models import GridBot
+
+        bot = GridBot.objects.create(
+            user=user,
+            bot_name="Grid 1",
+            exchange_name="binance",
+            trading_pair="ETH/USDT",
+            base_amount=Decimal("100"),
+            favor_levels=3,
+            against_levels=3,
+        )
+        service = _make_service(
+            bot_config={
+                "bot_name": "Grid 1",
+                "bot_type": "grid",
+                "bot_id": str(bot.id),
+            }
+        )
+        order = service.save_order("Buy", "entry")
+        assert order.grid_bot_id == bot.id
+        assert order.bot_id == str(bot.id)
+        assert order.bot_type == "grid"
+
+    def test_quantum_ai_gets_no_polymorphic_fk(self, db, no_order_sync):
+        """quantum_ai_investment points at InvestorPortfolio, not QuantumAIBot."""
+        service = _make_service(
+            bot_config={"bot_name": "QBot", "bot_type": "quantum_ai", "bot_id": "77"}
+        )
+        order = service.save_order("Buy", "entry")
+        assert order.bot_type == "quantum_ai"
+        assert order.bot_id == "77"
+        assert order.quantum_ai_investment_id is None
+        assert order.grid_bot_id is None
+
+    def test_broken_linkage_never_loses_the_order(self, db, no_order_sync):
+        """A bad FK resolution must fall back to bot_id/bot_type, not 500."""
+        service = _make_service(
+            bot_config={"bot_name": "grid", "bot_type": "grid", "bot_id": "not-an-id"}
+        )
+        order = service.save_order("Buy", "entry")
+        assert order is not None
+        assert order.bot_id == "not-an-id"
+        assert order.grid_bot_id is None

@@ -3,7 +3,7 @@ Signals for authentication app
 """
 
 import logging
-import random
+import secrets
 import string
 
 from django.conf import settings
@@ -11,12 +11,19 @@ from django.contrib.auth.signals import user_logged_in, user_logged_out
 from django.core.mail import send_mail
 from django.dispatch import receiver
 
+from core.utils import get_client_ip
+
 logger = logging.getLogger(__name__)
 
 
 def generate_otp_code(length=6):
-    """Generate OTP code."""
-    return "".join(random.choices(string.digits, k=length))
+    """Generate OTP code using a cryptographically secure RNG.
+
+    SECURITY (S-2): random.choices() (Mersenne Twister) is predictable; a
+    leaked timestamp+seed window could let an attacker brute-force OTPs.
+    secrets.choice() reads from the OS CSPRNG.
+    """
+    return "".join(secrets.choice(string.digits) for _ in range(length))
 
 
 @receiver(user_logged_in)
@@ -57,16 +64,6 @@ def log_user_logout(sender, request, user, **kwargs):
         )
     except Exception as e:
         logger.warning("Failed to log logout activity: %s", e)
-
-
-def get_client_ip(request):
-    """Get client IP address from request."""
-    x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-    if x_forwarded_for:
-        ip = x_forwarded_for.split(",")[0].strip()
-    else:
-        ip = request.META.get("REMOTE_ADDR")
-    return ip
 
 
 def send_welcome_email(user):

@@ -6,8 +6,8 @@ from apps.payments.models import (
     BlockchainAddress,
     BotSubscription,
     BotSubscriptionPlan,
+    InvestorDeposit,
     PaymentTransaction,
-    QuantumAIDeposit,
     ReferralPayout,
     SubscriptionPlan,
     WithdrawalRequest,
@@ -16,8 +16,8 @@ from apps.payments.serializers import (
     BlockchainAddressSerializer,
     BotSubscriptionPlanSerializer,
     BotSubscriptionSerializer,
+    InvestorDepositSerializer,
     PaymentTransactionSerializer,
-    QuantumAIDepositSerializer,
     ReferralPayoutSerializer,
     SubscriptionPlanSerializer,
     WithdrawalRequestSerializer,
@@ -59,9 +59,9 @@ class TestSubscriptionPlanSerializer:
 
 
 @pytest.mark.django_db
-class TestQuantumAIDepositSerializer:
+class TestInvestorDepositSerializer:
     def test_serialize_deposit(self, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("500.00000000"),
             currency="USDT",
@@ -69,7 +69,7 @@ class TestQuantumAIDepositSerializer:
             from_address="0xabc",
             transaction_hash="0xtxhash123",
         )
-        serializer = QuantumAIDepositSerializer(deposit)
+        serializer = InvestorDepositSerializer(deposit)
         assert serializer.data["user_email"] == user.email
         assert Decimal(serializer.data["amount"]) == Decimal("500.00000000")
         assert serializer.data["currency"] == "USDT"
@@ -77,7 +77,7 @@ class TestQuantumAIDepositSerializer:
         assert "is_expired" in serializer.data
 
     def test_read_only_fields(self, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("100"),
             currency="BTC",
@@ -85,7 +85,7 @@ class TestQuantumAIDepositSerializer:
             from_address="1abc",
             transaction_hash="0xtxhash456",
         )
-        serializer = QuantumAIDepositSerializer(deposit)
+        serializer = InvestorDepositSerializer(deposit)
         assert "user_email" in serializer.data
         assert "verified_by" in serializer.data
         assert "verified_at" in serializer.data

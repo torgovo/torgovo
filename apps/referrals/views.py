@@ -6,9 +6,9 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Sum
-from rest_framework import permissions, serializers, status
+from rest_framework import permissions, serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -17,22 +17,14 @@ from apps.referrals.models import Referral
 User = get_user_model()
 
 
-class ReferralStatsSerializer(serializers.Serializer):
-    """Serializer for referral stats response"""
-
-    referral_code = serializers.CharField(max_length=20)
-    total_referrals = serializers.IntegerField(read_only=True)
-    total_bonus_usdt = serializers.DecimalField(max_digits=20, decimal_places=8, read_only=True)
-    referral_link = serializers.SerializerMethodField()
-
-    def get_referral_link(self, obj):
-        return f"{settings.SITE_URL}/signup?ref={obj['referral_code']}"
-
-
 class ApplyReferralCodeSerializer(serializers.Serializer):
     """Serializer for applying referral code"""
 
     referral_code = serializers.CharField(max_length=20)
+
+    def validate_referral_code(self, value):
+        # Normalize to the format codes are generated/stored in (A2)
+        return value.upper().strip()
 
 
 class MyReferralStatsView(APIView):
@@ -55,11 +47,16 @@ class MyReferralStatsView(APIView):
                 status="pending",
             )
 
-        # Calculate stats
+        # Calculate stats. total_referrals = users who actually signed up with
+        # this code (one Referral row per successful referral); rejected/fraud
+        # rows are excluded. The old status="paid" filter never matched at
+        # runtime (nothing sets "paid"), so the counter was always 0 (A3).
         referrals_made = Referral.objects.filter(referrer=user)
         stats = {
             "referral_code": referral.code,
-            "total_referrals": referrals_made.filter(status="paid").count(),
+            "total_referrals": referrals_made.filter(referred_user__isnull=False)
+            .exclude(status="rejected")
+            .count(),
             "total_bonus_usdt": referrals_made.aggregate(total=Sum("bonus_amount"))["total"]
             or Decimal("0"),
             "referral_link": f"{settings.SITE_URL}/signup?ref={referral.code}",
@@ -77,42 +74,54 @@ class ApplyReferralCodeView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        # A14: every guard below raises so custom_exception_handler renders
+        # the uniform {"error": {code, message, details}, "timestamp"} envelope
+        # instead of a one-off flat {"error": "..."} body.
         serializer = ApplyReferralCodeSerializer(data=request.data)
         if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            raise serializers.ValidationError(serializer.errors)
 
         referral_code = serializer.validated_data["referral_code"]
 
-        # Find the referrer by code
-        referrer_referral = Referral.objects.filter(code=referral_code).first()
-        if not referrer_referral:
-            return Response({"error": "Invalid referral code"}, status=status.HTTP_400_BAD_REQUEST)
+        # Find the referrer by their user-level referral code (unique source of
+        # truth) — works even if the referrer never opened my-stats/ before (A2)
+        referrer = User.objects.filter(referral_code=referral_code).first()
+        if not referrer:
+            raise serializers.ValidationError("Invalid referral code")
 
         # Prevent self-referral
-        if referrer_referral.referrer_id == request.user.id:
-            return Response(
-                {"error": "Cannot apply your own referral code"}, status=status.HTTP_400_BAD_REQUEST
-            )
+        if referrer.id == request.user.id:
+            raise serializers.ValidationError("Cannot apply your own referral code")
 
-        # Check if user already has a referrer
-        existing_referral = Referral.objects.filter(referred_user=request.user).first()
-        if existing_referral:
-            return Response(
-                {"error": "Referral code already applied"}, status=status.HTTP_400_BAD_REQUEST
-            )
+        # One referral per user ("new user only"): reject users who already
+        # have a referrer — via registration or a previous apply/ (A2)
+        if (
+            request.user.referred_by_id is not None
+            or Referral.objects.filter(referred_user=request.user).exists()
+        ):
+            raise serializers.ValidationError("Referral code already applied")
 
-        # Update the referral record to mark this user as referred
-        referrer_referral.referred_user = request.user
-        referrer_referral.status = "pending"
-        referrer_referral.save()
-
-        # Populate referred_by on the new user
-        self._set_referred_by(request.user, referrer_referral.referrer)
+        # Unlimited applicants: create ONE NEW Referral row per referred user.
+        # Never claim/overwrite an existing row — other applicants keep theirs.
+        try:
+            with transaction.atomic():
+                Referral.objects.create(
+                    referrer=referrer,
+                    code=referrer.referral_code,
+                    referred_user=request.user,
+                    status="pending",
+                    bonus_amount=Decimal("0"),
+                )
+                # Populate referred_by on the new user
+                self._set_referred_by(request.user, referrer)
+        except IntegrityError:
+            # OneToOne(referred_user) backstop: referred concurrently (A2)
+            raise serializers.ValidationError("Referral code already applied")
 
         return Response(
             {
                 "message": "Referral code applied successfully",
-                "referrer": referrer_referral.referrer.email,
+                "referrer": referrer.email,
             }
         )
 
@@ -132,7 +141,9 @@ class ReferralRegistrationMixin:
     def apply_referral_after_registration(self, user, code):
         """Apply referral code after successful registration.
 
-        Idempotent, guarded against self-referral and duplicate referrers.
+        Creates ONE NEW Referral row per referred user — a code can be used by
+        unlimited different new signups (A2). Idempotent, guarded against
+        self-referral and double-referral.
         Silent on failure — registration must never fail because of a referral.
         """
         if not code:
@@ -146,34 +157,32 @@ class ReferralRegistrationMixin:
         if user.referred_by_id is not None:
             return
 
-        try:
-            referral = Referral.objects.select_related("referrer").get(code=code)
-        except Referral.DoesNotExist:
+        # Source of truth for a code is the user-level referral_code (the old
+        # Referral.objects.get(code=...) breaks with one row per referral)
+        referrer = User.objects.filter(referral_code=code.upper().strip()).first()
+        if referrer is None:
             return
-
-        referrer = referral.referrer
 
         # Guard: self-referral
         if referrer == user:
             return
 
-        # Guard: referred_user already claimed
-        if referral.referred_user_id is not None:
+        try:
+            with transaction.atomic():
+                # One row per successful referral — never claim/overwrite an
+                # existing row (the old "claimed -> skip" dropped signups 2+)
+                Referral.objects.create(
+                    referrer=referrer,
+                    code=referrer.referral_code,
+                    referred_user=user,
+                    status="pending",
+                )
+
+                user.referred_by = referrer
+                user.save(update_fields=["referred_by"])
+        except IntegrityError:
+            # Already referred (race with apply/) — treat as silent no-op
             return
-
-        with transaction.atomic():
-            # Lock the row for atomic claim
-            referral = Referral.objects.select_for_update().get(pk=referral.pk)
-
-            # Re-check under lock
-            if referral.referred_user_id is not None:
-                return
-
-            referral.referred_user = user
-            referral.save(update_fields=["referred_user"])
-
-            user.referred_by = referrer
-            user.save(update_fields=["referred_by"])
 
         return {
             "referral_applied": True,

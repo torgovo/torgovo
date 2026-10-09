@@ -39,6 +39,10 @@ class GridPositionMonitor:
         *,
         create_order_cb: Callable,
         close_all_orders_cb: Callable,
+        stop_cb: Optional[Callable] = None,
+        # Phase 3: fired once per loop iteration; the engine-side writer
+        # self-throttles (5s), so both loops share one snapshot cadence.
+        snapshot_cb: Optional[Callable] = None,
     ):
         self.adapter = adapter
         self.symbol = symbol
@@ -48,6 +52,12 @@ class GridPositionMonitor:
 
         self._create_order_cb = create_order_cb
         self._close_all_orders_cb = close_all_orders_cb
+        # Phase 6a: fired when a cross-process stop request is detected. Wired
+        # by BotEngine so it can release its registries WITHOUT joining threads
+        # (this callback runs inside a monitor thread).
+        self._stop_cb = stop_cb
+        # Phase 3: crash-consistency tick (never raises — see snapshot_engine).
+        self._snapshot_cb = snapshot_cb
 
         self.monitoring = False
         self.bot_running = False
@@ -70,7 +80,9 @@ class GridPositionMonitor:
         self.last_trade_pnl = 0.0
 
         self._heartbeat_counter = 0
-        self._heartbeat_interval = 60
+        # Phase 5 (CHG-5-1): 60 -> 10 iterations (~10s at ~1s/iter) so the
+        # model heartbeat outruns the 30s stale cutoff by a 3x margin.
+        self._heartbeat_interval = 10
 
         self._last_sl: Optional[float] = None
         self._last_tp: Optional[float] = None
@@ -177,6 +189,53 @@ class GridPositionMonitor:
             logger.warning(f"Heartbeat update failed for {bot_id}: {e}")
 
     # =========================================================================
+    # CROSS-PROCESS STOP  (Phase 6a)
+    # =========================================================================
+
+    def _check_remote_stop(self) -> bool:
+        """
+        Poll the Redis stop flag set by ``tasks.stop_bot`` (Phase 6a).
+
+        The stop request usually arrives on a *different* Celery worker than
+        the one running this engine, so the in-process registry cannot be
+        reached directly. Both monitor loops call this every iteration, giving
+        a worst-case stop latency of one loop sleep (1s grid / 5s SLTP).
+
+        On detection it tears down both loops (``monitoring = False`` is read
+        by the grid loop, and ``_stop_event`` by the SL/TP loop) and invokes
+        the injected ``stop_cb`` so the owning engine can release registries.
+
+        Never raises: a Redis outage must not kill monitoring, and the durable
+        stop signal is the DB ``is_running`` flag written by ``tasks.stop_bot``.
+        """
+        bot_id = self.bot_config.get("bot_id")
+        if not bot_id:
+            return False
+
+        try:
+            from apps.trading.engines.execution import stop_requested
+
+            if not stop_requested(bot_id):
+                return False
+        except Exception as e:
+            logger.debug(f"stop flag check failed for {bot_id}: {e}")
+            return False
+
+        logger.info(f"Stop request detected for {bot_id} — halting monitor threads")
+        # Set BOTH flags: the grid loop only checks `monitoring`, the SL/TP
+        # loop checks `monitoring and not _stop_event`.
+        self.monitoring = False
+        self.bot_running = False
+        self._stop_event.set()
+
+        if self._stop_cb is not None:
+            try:
+                self._stop_cb()
+            except Exception as e:
+                logger.warning(f"stop_cb failed for {bot_id}: {e}")
+        return True
+
+    # =========================================================================
     # FETCH PRICE
     # =========================================================================
 
@@ -272,9 +331,15 @@ class GridPositionMonitor:
         while self.monitoring:
             try:
                 close_old_connections()
+                # Phase 6a: cross-process stop flag (Redis) — ~1s worst case.
+                if self._check_remote_stop():
+                    break
                 self._heartbeat_counter += 1
                 if self._heartbeat_counter % self._heartbeat_interval == 0:
                     self._update_heartbeat()
+                # Phase 3: throttled snapshot tick (self-calls guard cadence).
+                if self._snapshot_cb:
+                    self._snapshot_cb()
 
                 open_orders = self.adapter.fetch_open_orders(self.symbol)
                 current_buy_prices = set(
@@ -517,9 +582,17 @@ class GridPositionMonitor:
 
         while self.monitoring and not self._stop_event.is_set():
             try:
+                # Phase 6a: cross-process stop flag (Redis) — ~5s worst case.
+                if self._check_remote_stop():
+                    break
                 self._heartbeat_counter += 1
-                if self._heartbeat_counter % 12 == 0:
+                # Phase 5 (CHG-5-1): 12 -> 2 iterations (5s wait x2 = 10s),
+                # matching the price-loop heartbeat cadence.
+                if self._heartbeat_counter % 2 == 0:
                     self._update_heartbeat()
+                # Phase 3: throttled snapshot tick (grid loop shares the throttle).
+                if self._snapshot_cb:
+                    self._snapshot_cb()
                 if self._heartbeat_counter % 4 == 0:
                     self._refresh_sltp_if_changed()
                 loss_profit_percentage = self._check_loss_profit_percent()

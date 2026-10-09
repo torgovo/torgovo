@@ -13,6 +13,64 @@ from typing import Any, Optional
 
 logger = logging.getLogger("trading.engines")
 
+# Exchange response keys that carry the executed price, most authoritative first.
+# (CCXT unifies to `price`/`average`; adapters/exchanges add their own extras.)
+_FILL_PRICE_KEYS = (
+    "average",  # CCXT unified avg fill price
+    "fillPrice",
+    "avgPrice",
+    "price",  # CCXT unified order price
+    "entryPrice",
+)
+
+# bot_type -> (model import path, BotOrder FK field).  ``quantum_ai`` is
+# deliberately absent: BotOrder.quantum_ai_investment points at
+# InvestorPortfolio, NOT QuantumAIBot, so wiring it by pk would corrupt rows.
+_BOT_FK_MAP = {
+    "grid": ("apps.bots.models", "GridBot", "grid_bot"),
+    "martingale": ("apps.bots.models", "MartingaleBot", "martingale_bot"),
+    "signal": ("apps.bots.models", "SignalBot", "signal_bot"),
+}
+
+
+def _extract_fill_price(details: Any) -> Optional[float]:
+    """Return the executed price from an exchange order response, or None.
+
+    Phase 1 fix: ``bot_config["current_price"]`` is never written anywhere in
+    the engine (it is a read-only *engine* attribute), so Price used to be
+    persisted as 0 for every order.  The exchange response is the truth.
+    """
+    if not isinstance(details, dict):
+        return None
+    for key in _FILL_PRICE_KEYS:
+        raw = details.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _resolve_price(explicit: Optional[float], details: Any, bot_config: dict) -> float:
+    """explicit arg -> exchange fill price -> bot_config fallback -> 0."""
+    for candidate in (explicit, _extract_fill_price(details)):
+        if candidate in (None, ""):
+            continue
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    try:
+        return float(bot_config.get("current_price") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
 
 class BotOrderService:
     """
@@ -124,8 +182,45 @@ class BotOrderService:
     # SAVE ORDER  (DB persistence)
     # =========================================================================
 
+    def _link_bot_fk(self, order_kwargs: dict) -> None:
+        """Populate the polymorphic BotOrder FK for this bot (Phase 1).
+
+        Additive: only writes when the bot_type is mappable and the row
+        resolves.  ``quantum_ai`` is intentionally not mapped — see
+        ``_BOT_FK_MAP``.  Any failure is logged and swallowed so the order
+        row is still persisted (with ``bot_id``/``bot_type`` as fallback).
+        """
+        bot_type = order_kwargs.get("bot_type")
+        bot_id = order_kwargs.get("bot_id")
+        if not bot_type or not bot_id:
+            return
+        mapping = _BOT_FK_MAP.get(bot_type)
+        if not mapping:
+            return
+        try:
+            module_name, model_name, field_name = mapping
+            import importlib
+
+            model = getattr(importlib.import_module(module_name), model_name)
+            instance = model.objects.filter(id=bot_id).first()
+            if instance is not None:
+                order_kwargs[field_name] = instance
+        except Exception as exc:  # noqa: BLE001 — linkage must never lose a trade
+            logger.warning(f"Could not link BotOrder to {bot_type} {bot_id}: {exc}")
+
     def save_order(
-        self, side: str, description: str, details: Any = None, indicators: Optional[dict] = None
+        self,
+        side: str,
+        description: str,
+        details: Any = None,
+        indicators: Optional[dict] = None,
+        *,
+        # Phase 1 (persistence): all additive/optional — existing callers and
+        # tests keep working unchanged.
+        price: Optional[float] = None,
+        reason: Optional[str] = None,
+        status: Optional[str] = None,
+        pnl: Optional[float] = None,
     ) -> Any:
         from django.utils import timezone
 
@@ -134,7 +229,9 @@ class BotOrderService:
 
             user_id = self.bot_config.get("user_id")
             bot_name = self.bot_config.get("bot_name", "unnamed")
-            current_price = self.bot_config.get("current_price", 0)
+            # Phase 1: never trust the unset bot_config["current_price"] first —
+            # resolve the real fill price (explicit -> exchange -> fallback -> 0).
+            current_price = _resolve_price(price, details, self.bot_config)
 
             order_kwargs = {
                 "Pair": self.symbol,
@@ -146,7 +243,17 @@ class BotOrderService:
                 "Exchange": self.bot_config.get("exchange_name", "Bybit"),
                 "Description": f"[{bot_name}] {description}",
                 "Details": details if isinstance(details, dict) else {"raw": str(details)},
+                # Phase 1: trade-record integrity (additive columns, 0017)
+                "bot_type": self.bot_config.get("bot_type") or None,
+                "bot_id": str(self.bot_config.get("bot_id") or "") or None,
+                "Reason": reason,
+                "Status": status or "closed",
+                "Realized_PnL": pnl,
             }
+
+            # Best-effort polymorphic FK wiring (grid/martingale/signal only).
+            # Never let linkage failure lose the trade record itself.
+            self._link_bot_fk(order_kwargs)
 
             if user_id:
                 from django.contrib.auth import get_user_model

@@ -6,7 +6,7 @@
 | KPI | Definition | Baseline | Target | Owner |
 |-----|------------|----------|--------|-------|
 | Test coverage | % lines covered by `tests/` (`pytest --cov`) | 89% (Phase-3 measurement, web/backend) | ≥ 90% | QA |
-| CI green rate | % of CI runs passing (last 30) | 100% (1859+ passed, 13 skipped) | ≥ 98% | Dev |
+| CI green rate | % of CI runs passing (last 30) | 100% (1949+ passed, 13 skipped) | ≥ 98% | Dev |
 | Bot uptime | % of running bots without engine error per week | TBD (first measured week) | ≥ 99% | Trading |
 | Trades executed | Total executed trades per week | TBD | Trending up | Product |
 | Subscription conversion | Signups → active paid subscriptions % | TBD | ≥ 5% | Marketing |

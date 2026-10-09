@@ -9,6 +9,7 @@ from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import Http404
 from rest_framework import status
+from rest_framework.exceptions import APIException
 from rest_framework.response import Response
 from rest_framework.views import exception_handler
 
@@ -122,6 +123,10 @@ def get_error_message(exception, context):
             return exception.detail
         elif isinstance(exception.detail, dict) and "non_field_errors" in exception.detail:
             return exception.detail["non_field_errors"][0]
+        elif isinstance(exception.detail, dict) and "message" in exception.detail:
+            # A14: exceptions raised with an explicit human-readable message
+            # (e.g. Conflict payloads carrying subscription_id/status).
+            return str(exception.detail["message"])
         elif isinstance(exception.detail, list):
             return str(exception.detail[0])
         elif isinstance(exception.detail, dict):
@@ -202,6 +207,20 @@ def get_timestamp():
 
 
 # Custom exception classes
+class Conflict(APIException):
+    """A14: uniform HTTP 409 routed through custom_exception_handler.
+
+    Detail may be a plain string or a dict with a ``message`` key plus
+    extra payload (e.g. subscription_id/status) — both land in the
+    standard ``{"error": {code, message, details}, "timestamp"}`` envelope.
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    error_code = "CONFLICT"
+    default_detail = "Conflict with the current state of the resource."
+    default_code = "conflict"
+
+
 class TradingBotException(Exception):
     """Base exception for trading bot errors."""
 
@@ -244,7 +263,7 @@ class BotLimitException(TradingBotException):
         super().__init__(message=message, error_code="BOT_LIMIT_EXCEEDED", status_code=429)
 
 
-class QuantumAIDepositException(TradingBotException):
+class InvestorDepositException(TradingBotException):
     """Exception for Quantum AI deposit errors."""
 
     def __init__(self, message, deposit_amount=None):
@@ -258,3 +277,7 @@ class WebhookException(TradingBotException):
     def __init__(self, message, webhook_id=None):
         self.webhook_id = webhook_id
         super().__init__(message=message, error_code="WEBHOOK_ERROR", status_code=400)
+
+
+# InvestorDepositException (was QuantumAIDepositException)
+QuantumAIDepositException = InvestorDepositException

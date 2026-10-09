@@ -71,6 +71,11 @@ class ExchangeCredentials(SoftDeleteModel):
     )
     is_active = models.BooleanField(default=True)
     is_testnet = models.BooleanField(default=True, help_text="Use testnet/sandbox mode")
+    is_demo = models.BooleanField(
+        default=False,
+        help_text="Use demo trading (simulated funds, real API keys). "
+        "Distinct from testnet which uses separate testnet API keys.",
+    )
     permissions = models.JSONField(
         default=dict, help_text="Trading permissions (spot, futures, margin, etc.)"
     )
@@ -119,6 +124,7 @@ class ExchangeCredentials(SoftDeleteModel):
             "secret_key": decrypt_api_key(self.secret_key),
             "passphrase": decrypt_api_key(self.passphrase) if self.passphrase else None,
             "is_testnet": self.is_testnet,
+            "is_demo": self.is_demo,
         }
 
     def has_permission(self, permission):

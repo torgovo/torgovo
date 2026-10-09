@@ -9,9 +9,29 @@ from apps.trading.engines.execution import (
     _mark_bot_starting,
     _mark_bot_stopped,
     _running_bots,
+    _running_engines,
     run_bot,
     stop_bot,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_running_registries():
+    """run_bot() registers engines/flags and only stop_bot() clears them.
+
+    The TestRunBotFunction tests drive the real run_bot() with a mocked
+    BotEngine, so nothing ever calls stop_bot() — entries for q1/g1/m1/s1
+    would leak into module-level state and pollute later tests (discovered
+    by tests/persistence/test_shutdown_signals.py). Snapshot + restore both
+    registries around every test in this module.
+    """
+    engines = dict(_running_engines)
+    bots = dict(_running_bots)
+    yield
+    _running_engines.clear()
+    _running_engines.update(engines)
+    _running_bots.clear()
+    _running_bots.update(bots)
 
 
 @pytest.fixture

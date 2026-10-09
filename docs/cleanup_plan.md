@@ -12,13 +12,10 @@ This plan focuses on remaining work that still needs pairing, ordering, and exec
 ## Phase 1 — Reduce Duplication & Runtime Risk
 1. Audit `trading/` vs `apps/trading/` + `trading/strategies/` vs `apps/trading/strategies/`.
 2. Pick a single import path for non-legacy code; keep the other layer as a shim only if needed.
-3. Empty `trading/manager.py` code paths are unused and confusing; either wire them back in or move the code out.
-4. Delete duplicate bot classes from `apps/investments/models.py` if they are redundant with `apps/bots/models.py`.
+3. Delete duplicate bot classes from `apps/investments/models.py` if they are redundant with `apps/bots/models.py`.
 
 ## Phase 2 — Decide QuantumAI Ownership
-1. Compare `apps/trading/strategies/quantum_ai.py`, `trading/strategies/quantum_ai.py`, and bot_engine logic.
-2. Make one canonical implementation; move tests and serializers under `apps/bots/` if needed.
-3. Update `docs/latest_details.md` and `docs/CODEBASE.md` so they match the owner.
+**DONE:** QuantumAI logic lives in `bot_engine.py` (canonical). `apps/trading/strategies/quantum_ai.py` exists as the strategy class and is used by the engine.
 
 ## Phase 3 — Minimize Document Drift
 1. Make one authoritative tracker: prefer `docs/todo.md`.

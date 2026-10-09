@@ -64,7 +64,7 @@ class SubscriptionPlan(TimeStampedModel):
         }
 
 
-class QuantumAIDeposit(SoftDeleteModel):
+class InvestorDeposit(SoftDeleteModel):  # Original name: QuantumAIDeposit (renamed for clarity)
     """
     Enhanced deposit model for Quantum AI bot funding.
     """
@@ -193,7 +193,7 @@ class QuantumAIDeposit(SoftDeleteModel):
         AuditLog.objects.create(
             user=verified_by_user,
             action="deposit_approved",
-            resource_type="QuantumAIDeposit",
+            resource_type="InvestorDeposit",
             resource_id=str(self.id),
             new_values={"status": "approved", "usdt_amount": str(self.usdt_amount)},
             description=f"Approved deposit of {self.amount} {self.currency} from {self.user.email}",
@@ -215,7 +215,7 @@ class QuantumAIDeposit(SoftDeleteModel):
         AuditLog.objects.create(
             user=verified_by_user,
             action="deposit_rejected",
-            resource_type="QuantumAIDeposit",
+            resource_type="InvestorDeposit",
             resource_id=str(self.id),
             new_values={"status": "rejected", "reason": reason},
             description=(
@@ -304,8 +304,10 @@ class WithdrawalRequest(SoftDeleteModel):
     processing_fee = models.DecimalField(max_digits=10, decimal_places=8, default=0)
     total_amount = models.DecimalField(max_digits=20, decimal_places=8)
 
-    # Verification
-    two_factor_code = models.CharField(max_length=6, blank=True)
+    # Verification (two_factor_code removed — SEC-2: was dead weight.
+    # The actual TOTP verification uses CustomUser.totp_secret via
+    # services/two_factor.py. The serializer still accepts the field
+    # for API compatibility; views pop it before save.)
     email_verification_token = models.CharField(max_length=64, blank=True)
     admin_approved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

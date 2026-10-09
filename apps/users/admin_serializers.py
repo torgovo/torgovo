@@ -91,10 +91,10 @@ class UserAdminDetailSerializer(serializers.ModelSerializer):
 
     def get_total_deposits(self, obj):
         """Get total deposited amount for Quantum AI."""
-        from apps.payments.models import QuantumAIDeposit
+        from apps.payments.models import InvestorDeposit
 
         deposit_deposits = (
-            QuantumAIDeposit.objects.filter(user=obj, status="approved").aggregate(
+            InvestorDeposit.objects.filter(user=obj, status="approved").aggregate(
                 total=models.Sum("usdt_amount")
             )["total"]
             or 0

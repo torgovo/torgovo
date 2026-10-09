@@ -4,9 +4,17 @@ import pytest
 from django.urls import reverse
 from rest_framework import status
 
+from apps.exchanges import urls as legacy_exchange_urls
 from apps.exchanges.models import Exchange, ExchangeCredentials, TradingPair
 from apps.investments.models import ExchangeRate, ExchangeStatus
 from apps.payments.models import BlockchainAddress
+from apps.trading import views as trading_views
+
+
+def test_legacy_exchange_urls_delegate_to_trading_source_of_truth():
+    assert legacy_exchange_urls.list_exchanges is trading_views.list_exchanges
+    assert legacy_exchange_urls.get_exchange_symbols is trading_views.get_exchange_symbols
+    assert legacy_exchange_urls.get_exchange_rates is trading_views.get_exchange_rates
 
 
 @pytest.mark.django_db

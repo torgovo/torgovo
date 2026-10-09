@@ -1,12 +1,12 @@
 -r base.txt
 
 # Production Server
-gunicorn==21.2.0
+gunicorn==22.0.0
 whitenoise==6.6.0
 
 # Error tracking and monitoring
-sentry-sdk==1.38.0
-sentry-sdk[django]==1.38.0
+sentry-sdk==1.45.1
+sentry-sdk[django]==1.45.1
 
 # Performance optimization
 django-storages==1.14.2

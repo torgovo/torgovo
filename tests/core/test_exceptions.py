@@ -22,7 +22,7 @@ from core.exceptions import (
     ExchangeAPIException,
     InsufficientBalanceException,
     InvalidOrderException,
-    QuantumAIDepositException,
+    InvestorDepositException,
     TradingBotException,
     WebhookException,
     custom_exception_handler,
@@ -88,15 +88,15 @@ class TestCustomExceptionClasses:
         assert exc.current_bots is None
         assert exc.max_bots is None
 
-    def test_quantum_ai_deposit_exception(self):
-        exc = QuantumAIDepositException("Deposit failed", deposit_amount=500.0)
+    def test_investor_deposit_exception(self):
+        exc = InvestorDepositException("Deposit failed", deposit_amount=500.0)
         assert exc.message == "Deposit failed"
         assert exc.error_code == "DEPOSIT_ERROR"
         assert exc.status_code == 400
         assert exc.deposit_amount == 500.0
 
-    def test_quantum_ai_deposit_exception_defaults(self):
-        exc = QuantumAIDepositException("Failed")
+    def test_investor_deposit_exception_defaults(self):
+        exc = InvestorDepositException("Failed")
         assert exc.deposit_amount is None
 
     def test_webhook_exception(self):
@@ -119,7 +119,7 @@ class TestCustomExceptionClasses:
         assert issubclass(InsufficientBalanceException, TradingBotException)
         assert issubclass(InvalidOrderException, TradingBotException)
         assert issubclass(BotLimitException, TradingBotException)
-        assert issubclass(QuantumAIDepositException, TradingBotException)
+        assert issubclass(InvestorDepositException, TradingBotException)
         assert issubclass(WebhookException, TradingBotException)
 
 

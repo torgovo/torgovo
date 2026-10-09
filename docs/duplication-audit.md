@@ -43,7 +43,7 @@
 | `apps/investments/` | Portfolio display — modern Order, Position, TechnicalIndicator, UserBalance, ExchangeRate |
 | `apps/users/` | CustomUser model + per-currency UserBalance |
 | `apps/authentication/` | JWT auth, OTP, UserProfile (extends CustomUser — but mostly duplicates fields) |
-| `apps/payments/` | Subscription plans, deposits (QuantumAIDeposit), BlockchainAddress, WithdrawalRequest, BotSubscription, ReferralPayout |
+| `apps/payments/` | Subscription plans, deposits (InvestorDeposit), BlockchainAddress, WithdrawalRequest, BotSubscription, ReferralPayout |
 | `apps/webhooks/` | Webhook receiver — signal bot webhook + indicator GET calculators |
 
 ### Key Design Decisions
@@ -65,7 +65,7 @@
 | 3 | UserProfile fully duplicates CustomUser fields | Medium | `authentication` ↔ `users` | **Phase 3:** Delete `UserProfile` + table (resolved by Phase 0 plan limits) |
 | 4 | Two UserBalance models (different scope) | Low | `users` ↔ `investments` | **Phase 1:** Rename `investments.UserBalance` → `InvestmentBalance` (RenameModel only, no SQL) |
 | 5 | Two Order models (different eras, different purpose) | Low | `bots` ↔ `investments` | **Phase 1:** Rename `bots.Order` → `BotOrder` (RenameModel only, no SQL) |
-| 6 | Two deposit models (different features) | Low | `payments` ↔ `bots` | Keep `payments.QuantumAIDeposit`, deprecate `bots.QuantumDeposit` (no active work needed) |
+| 6 | Two deposit models (different features) | Low | `payments` ↔ `bots` | Keep `payments.InvestorDeposit`, deprecate `bots.QuantumDeposit` (no active work needed) |
 | 7 | Exchange choices in 5+ locations | Medium | Cross-cutting | **Phase 4:** Centralize to `apps.exchanges.models.ExchangeCredentials.EXCHANGE_CHOICES` |
 
 ---
@@ -237,7 +237,7 @@ limits = {'free': 3, 'basic': 5, 'premium': 15, 'enterprise': 50}
 |--------|-------------|---------------------|
 | File | `apps/bots/models.py:957` | `apps/investments/models.py:136` |
 | Table | `bots_orders` | `investments_order` |
-| FK targets | `PairConfig`, `Indicator`, `SignalBot`, `GridBot`, `MartingaleBot`, `QuantumAIInvestment` | `Exchange`, `TradingPair` |
+| FK targets | `PairConfig`, `Indicator`, `SignalBot`, `GridBot`, `MartingaleBot`, `InvestorPortfolio` | `Exchange`, `TradingPair` |
 | Unique fields | `Category`, `Exchange` (CharField), `Details` (JSON), `Time`, `Pair` | `filled_quantity`, `average_price`, `status` (choices), `profit_loss`, `executed_at` |
 | Convention | CamelCase | snake_case |
 | `user` FK | Nullable | Required |
@@ -253,7 +253,7 @@ Same class name, different schema, different FKs, different purpose — identica
 
 ## 8. Two Deposit Models
 
-| Aspect | `payments.QuantumAIDeposit` | `bots.QuantumDeposit` |
+| Aspect | `payments.InvestorDeposit` | `bots.QuantumDeposit` |
 |--------|---------------------------|----------------------|
 | Table | `payments_quantum_deposits` | `bots_quantum_deposits` |
 | Risk scoring | ✅ `risk_score` (0-100), `flagged_for_review` | ❌ None |
@@ -262,7 +262,7 @@ Same class name, different schema, different FKs, different purpose — identica
 | Verification | ✅ `verified_by`, `verified_at`, `verification_method` | ✅ `reviewed_by`, `reviewed_at` |
 | Audit | ✅ Creates `AuditLog` on approve/reject | ❌ None |
 
-**Verdict:** Keep `payments.QuantumAIDeposit` (fully featured). Deprecate `bots.QuantumDeposit` — mark with a comment, leave data in place. No active development.
+**Verdict:** Keep `payments.InvestorDeposit` (fully featured). Deprecate `bots.QuantumDeposit` — mark with a comment, leave data in place. No active development.
 
 ---
 
@@ -594,7 +594,7 @@ python -m pytest tests/ -v --nomigrations
 | `apps/webhooks/urls.py` | Remove calculator routes |
 | `apps/authentication/models.py:17` | `UserProfile` — delete (Phase 3) |
 | `apps/users/models.py:203` | `CustomUser.save()` — add `SiteConfig` lookup (Phase 0) |
-| `apps/payments/models.py:68` | `QuantumAIDeposit` — canonical deposit model (keep) |
+| `apps/payments/models.py:68` | `InvestorDeposit` — canonical deposit model (keep) |
 | `tests/investments/test_views.py:328` | `TestIndicatorManualViews` — delete (Phase 2a) |
 | `tests/test_security_fixes.py:148` | `TestOldAdminViewsAuthZ` — delete (Phase 2c) |
 

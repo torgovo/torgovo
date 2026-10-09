@@ -26,6 +26,15 @@ ALLOWED_HOSTS = config(
     "ALLOWED_HOSTS", default="", cast=lambda v: [s.strip() for s in v.split(",")]
 )
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
+# Public site origin — used to build user-facing links (e.g. referral links).
+# Production: https://torgovo.com (frontend also reachable via torgovo.vercel.app).
+SITE_URL = config("SITE_URL", default="https://torgovo.com")
+
+# Compliance / Consent versions (COMPLIANCE Phase-1)
+# Bump when the legal documents change; consents recorded against an older
+# version are considered stale and must be re-accepted in-app.
+PRIVACY_POLICY_VERSION = "2026-08-1"
+TERMS_VERSION = "2026-08-1"
 
 # Application definition
 DJANGO_APPS = [
@@ -66,6 +75,7 @@ LOCAL_APPS = [
     "apps.users",
     "apps.investments",
     "apps.referrals",
+    "apps.analytics",
     "core",
 ]
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -83,6 +93,7 @@ MIDDLEWARE = [
     "core.middleware.RequestBodyLimitMiddleware",
     "core.middleware.SecurityHeadersMiddleware",
     "core.middleware.CorrelationIDMiddleware",
+    "core.middleware.AuthRateLimitMiddleware",
     "core.middleware.RateLimitMiddleware",
     "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
@@ -209,6 +220,8 @@ REST_FRAMEWORK = {
         "password_reset": "10/hour",
         "webhook": "120/min",
         "withdrawal": "5/hour",
+        "phone_verification": "5/hour",
+        "two_factor": "5/hour",
     },
 }
 
@@ -282,6 +295,9 @@ LOGGING = {
         "cred_redact": {
             "()": "core.logging_filters.CredentialRedactionFilter",
         },
+        "request_id": {
+            "()": "core.request_id_filter.RequestIDFilter",
+        },
     },
     "formatters": {
         "verbose": {
@@ -292,6 +308,9 @@ LOGGING = {
             "format": "{levelname} {message}",
             "style": "{",
         },
+        "json": {
+            "()": "core.json_formatter.JSONFormatter",
+        },
     },
     "handlers": {
         "file": {
@@ -301,13 +320,22 @@ LOGGING = {
             "maxBytes": 1024 * 1024 * 15,  # 15MB
             "backupCount": 10,
             "formatter": "verbose",
-            "filters": ["cred_redact"],
+            "filters": ["cred_redact", "request_id"],
         },
         "console": {
             "level": "INFO",
             "class": "logging.StreamHandler",
             "formatter": "simple",
-            "filters": ["cred_redact"],
+            "filters": ["cred_redact", "request_id"],
+        },
+        "json_file": {
+            "level": "INFO",
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": BASE_DIR / "logs" / "django-json.log",
+            "maxBytes": 1024 * 1024 * 15,  # 15MB
+            "backupCount": 10,
+            "formatter": "json",
+            "filters": ["cred_redact", "request_id"],
         },
     },
     "root": {
@@ -379,16 +407,9 @@ EXCHANGE_CONFIG = {
     "RETRY_DELAY": 1,  # seconds
 }
 
-# Trading Bot Configuration
-BOT_CONFIG = {
-    "MAX_BOTS_PER_FREE_USER": 3,
-    "MAX_BOTS_PER_PREMIUM_USER": 15,
-    "MAX_BOTS_PER_ENTERPRISE_USER": 50,
-    "MIN_TRADE_AMOUNT": 1.0,  # USDT
-    "MAX_TRADE_AMOUNT": 100000.0,  # USDT
-    "DEFAULT_STOP_LOSS_PERCENT": 5.0,
-    "DEFAULT_TAKE_PROFIT_PERCENT": 10.0,
-}
+# Bot limits are managed via SiteConfig in DB (core/models.py:135)
+# The old BOT_CONFIG dict was removed — SiteConfig.get_plan_limit() is the
+# single source of truth, runtime-configurable without redeploy.
 
 # Quantum AI Configuration
 QUANTUM_AI_CONFIG = {

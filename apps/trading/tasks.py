@@ -85,11 +85,23 @@ def start_bot(bot_id: str, bot_type: str = "grid"):
 @shared_task
 def stop_bot(bot_id: str, bot_type: str = "grid"):
     """
-    Stop a trading bot (updates is_running state).
+    Stop a trading bot AND signal its running engine (Phase 6a).
+
+    Cooperating steps — previously this task only flipped the DB flags,
+    so the engine's monitor threads kept running and a subsequent start hit
+    "already running in this process":
+
+      1. Redis stop flag — reaches the engine even when it lives on a
+         *different* Celery worker (the monitor loops poll it every 1s/5s).
+      2. execution.stop_bot — in-process fast path: joins the threads, saves
+         engine state to Redis, pops the registries, writes DB flags.
+      3. Guarded DB write — durable is_running/stopped_at for every bot type
+         (this is the only path that covers ``signal``).
+      4. Phase 3: runtime snapshot -> stopped (best-effort).
 
     Args:
         bot_id: UUID of the bot
-        bot_type: 'grid' or 'martingale'
+        bot_type: 'grid', 'martingale', 'signal' or 'quantum_ai'
     """
     from django.utils import timezone
 
@@ -98,9 +110,40 @@ def stop_bot(bot_id: str, bot_type: str = "grid"):
         if bot is None:
             return {"success": False, "error": f"Bot not found: {bot_id}"}
 
-        bot.is_running = False
-        bot.stopped_at = timezone.now()
-        bot.save(update_fields=["is_running", "stopped_at"])
+        from .engines import execution
+
+        # 1. Cross-process signal — must come first so the owning worker
+        #    starts tearing down while we do the DB work.
+        execution.request_stop(bot_id)
+
+        # 2. In-process teardown (no-op when the engine runs elsewhere).
+        try:
+            execution.stop_bot(bot_id, bot_type=bot_type)
+        except Exception as e:
+            logger.error(f"In-process stop failed for {bot_id}: {e}")
+
+        # 3. Durable flags — idempotent, and skipped naturally for models
+        #    without these columns (e.g. SignalBot).
+        update_fields = []
+        if hasattr(bot, "is_running"):
+            bot.is_running = False
+            update_fields.append("is_running")
+        if hasattr(bot, "stopped_at"):
+            bot.stopped_at = timezone.now()
+            update_fields.append("stopped_at")
+        if update_fields:
+            bot.save(update_fields=update_fields)
+
+        # 4. Phase 3: mark the runtime snapshot STOPPED (single clean-stop
+        #    site — _on_remote_stop deliberately writes no DB state). A
+        #    failure here must not fail the stop: the durable flags above
+        #    already landed and the row just keeps its previous status.
+        try:
+            from . import state as runtime_state
+
+            runtime_state.set_status(bot_type, bot_id, runtime_state.STOPPED)
+        except Exception as e:
+            logger.warning(f"Runtime-state stop flush failed for {bot_id}: {e}")
 
         logger.info(f"Bot {bot_id} ({bot_type}) stopped")
         return {"success": True, "status": "stopped"}
@@ -162,19 +205,21 @@ def check_all_active_bots():
 @shared_task
 def check_stale_bots():
     """
-    Find bots that are marked running but haven't sent a heartbeat in > 5 minutes.
+    Find bots that are marked running but haven't sent a heartbeat in > 30 seconds.
 
     - If an open position exists on the exchange → restart in restore_mode
       (attaches monitoring threads without placing new entry orders)
     - If no open position → mark is_running=False so normal restart works next time
 
-    Runs every 2 minutes via Celery Beat.
+    Runs every 30 seconds via Celery Beat (Phase 5 / CHG-5-2, CHG-5-3).
     """
     from datetime import timedelta
 
     from django.utils import timezone
 
-    cutoff = timezone.now() - timedelta(minutes=5)
+    # Phase 5 (CHG-5-2): 5 min -> 30 s. Heartbeats are written every ~10s
+    # (CHG-5-1), so 30s gives a 3x margin before a healthy bot could be reaped.
+    cutoff = timezone.now() - timedelta(seconds=30)
     models_to_check = [
         ("grid", "GridBot"),
         ("martingale", "MartingaleBot"),
@@ -200,7 +245,7 @@ def check_stale_bots():
                 is_running=True, is_deleted=False, last_heartbeat__lt=cutoff
             )
 
-            # Bots that have never sent a heartbeat but started > 5 min ago
+            # Bots that have never sent a heartbeat but started > 30s ago
             never_heartbeat = model.objects.filter(
                 is_running=True,
                 is_deleted=False,
@@ -272,7 +317,7 @@ def _handle_stale_bot(bot, bot_type):
             adapter = get_adapter(
                 exchange_name=exchange_name,
                 credentials=creds,
-                demo_mode=credentials.is_testnet,
+                demo_mode=credentials.is_demo or credentials.is_testnet,
             )
             position = adapter.fetch_position(trading_pair)
             has_position = position and float(position.get("contracts", 0)) > 0
@@ -407,7 +452,7 @@ def distribute_quantum_ai_profits():
     Flow:
     1. For each active QuantumAIFund, calculate distributable profit
        (total_profit * shown_percentage / 100)
-    2. For each active QuantumAIInvestment in that fund, credit their share
+    2. For each active InvestorPortfolio in that fund, credit their share
     3. Record a QuantumWeeklyProfit entry for audit trail
     4. Reset fund.total_profit to 0 after distribution
 
@@ -418,7 +463,7 @@ def distribute_quantum_ai_profits():
     from django.db import transaction
     from django.utils import timezone
 
-    from apps.bots.models import QuantumAIFund, QuantumAIInvestment, QuantumWeeklyProfit
+    from apps.bots.models import InvestorPortfolio, QuantumAIFund, QuantumWeeklyProfit
 
     funds = QuantumAIFund.objects.filter(is_active=True, is_deleted=False)
     total_distributions = 0
@@ -444,7 +489,7 @@ def distribute_quantum_ai_profits():
                 f"smoothed {smoothed_return_pct:.2f}%, distributing {distributable} USDT"
             )
 
-            active_investments = QuantumAIInvestment.objects.filter(
+            active_investments = InvestorPortfolio.objects.filter(
                 fund=locked_fund, status="active", is_deleted=False
             ).select_for_update()
 

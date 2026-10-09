@@ -29,11 +29,17 @@ class RequestLoggingMiddleware(MiddlewareMixin):
         """Log incoming requests."""
 
         # Skip logging for static files and health checks
-        if request.path.startswith("/static/") or request.path == "/health/":
+        if request.path.startswith("/static/") or request.path in ("/health/", "/ht/", "/metrics"):
             return None
 
         request.start_time = time.time()
         request.request_id = str(uuid.uuid4())
+
+        # Propagate request_id to the logging filter so all log lines
+        # during this request carry the same correlation ID.
+        from core.request_id_filter import RequestIDFilter
+
+        RequestIDFilter.set_request_id(request.request_id)
 
         # Log request details
         user_info = "Anonymous"
@@ -66,8 +72,17 @@ class RequestLoggingMiddleware(MiddlewareMixin):
             duration = time.time() - request.start_time
             request_id = getattr(request, "request_id", "unknown")
 
+            # Clear request_id from logging filter after response
+            from core.request_id_filter import RequestIDFilter
+
+            RequestIDFilter.clear_request_id()
+
             # Skip logging for static files and health checks
-            if request.path.startswith("/static/") or request.path == "/health/":
+            if request.path.startswith("/static/") or request.path in (
+                "/health/",
+                "/ht/",
+                "/metrics",
+            ):
                 return response
 
             status_info = f"{response.status_code} {response.reason_phrase}"
@@ -336,3 +351,65 @@ class CorrelationIDMiddleware(MiddlewareMixin):
             response["X-Correlation-ID"] = request.correlation_id
 
         return response
+
+
+class AuthRateLimitMiddleware(MiddlewareMixin):
+    """
+    Stricter per-IP rate limiting for authentication endpoints.
+
+    Prevents brute-force attacks on OTP request/verify, login, and
+    registration endpoints. Uses the same Redis-backed cache as
+    RateLimitMiddleware but with tighter limits (10 req/min per IP).
+    """
+
+    AUTH_RATE_LIMIT = 10  # requests per minute per IP
+    AUTH_WINDOW = 60  # seconds
+
+    # Endpoints that handle authentication
+    AUTH_PATHS = (
+        "/api/auth/otp/request/",
+        "/api/auth/otp/verify/",
+        "/api/auth/login/",
+        "/api/auth/register/",
+    )
+
+    def process_request(self, request):
+        if not any(request.path.startswith(p) for p in self.AUTH_PATHS):
+            return None
+
+        client_ip = self._get_ip(request)
+        current_time = int(time.time() // self.AUTH_WINDOW)
+        cache_key = f"auth_rate:{client_ip}:{current_time}"
+
+        try:
+            count = cache.incr(cache_key)
+        except ValueError:
+            if cache.add(cache_key, 1, timeout=self.AUTH_WINDOW):
+                count = 1
+            else:
+                count = cache.incr(cache_key)
+        except Exception:
+            return None  # cache unavailable — don't block auth
+
+        if count > self.AUTH_RATE_LIMIT:
+            logger.warning(
+                f"Auth rate limit exceeded for IP {client_ip}: {count}/{self.AUTH_RATE_LIMIT}",
+                extra={"client_ip": client_ip, "path": request.path},
+            )
+            return JsonResponse(
+                {
+                    "error": {
+                        "code": "AUTH_RATE_LIMIT_EXCEEDED",
+                        "message": "Too many authentication attempts. Please try again later.",
+                    }
+                },
+                status=429,
+            )
+        return None
+
+    @staticmethod
+    def _get_ip(request):
+        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+        if x_forwarded_for:
+            return x_forwarded_for.split(",")[0].strip()
+        return request.META.get("REMOTE_ADDR", "unknown")

@@ -31,7 +31,7 @@ Every requirement below reflects implemented behavior, not planned features.
 - **SignalBot** — webhook-driven manual/auto entries, monthly signal limits, positions via condition updates.
 - **GridBot** — grid levels both favor/against, dynamic SL/TP placement, loss/profit percent monitoring; start/stop via `grid/<id>/start|stop/`.
 - **MartingaleBot** — martingale step sizing, start/stop endpoints.
-- **Quantum AI** — `QuantumAIFund` + `ReserveFund` (smoothing/reserve accounting), `QuantumAIBot`, `QuantumAIInvestment` (profit sharing), `QuantumDeposit`/`QuantumDepositWallet`, `QuantumWeeklyProfit` distributions.
+- **Quantum AI** — `QuantumAIFund` + `ReserveFund` (smoothing/reserve accounting), `QuantumAIBot`, `InvestorPortfolio` (profit sharing), `InvestorDeposit`/`QuantumDepositWallet`, `QuantumWeeklyProfit` distributions.
 - Configuration: `PairConfig` (per-pair strategy config) and `Indicator` presets.
 - Order book: `ActiveOrder`, `BotOrder`.
 - Indicator compute endpoints: `indicators/ema/`, `indicators/rsi/`, `indicators/bb/` (live values via CCXT OHLCV).
@@ -56,10 +56,10 @@ Every requirement below reflects implemented behavior, not planned features.
 ## 7. Payments & subscriptions (`apps/payments` + `services/subscription_service.py`)
 - `SubscriptionPlan`, `BotSubscriptionPlan`, `BotSubscription` (approval workflow).
 - Admin approve/reject deposits (`admin/deposits/<id>/approve|reject/`) and bot subscriptions.
-- Create deposit for Quantum AI (`quantum-ai/<bot_id>/deposit/`), `QuantumAIDeposit`.
+- Create deposit for Quantum AI (`quantum-ai/<bot_id>/deposit/`), `InvestorDeposit`.
 - `WithdrawalRequest` + admin processing; `PaymentTransaction` ledger; `ReferralPayout`.
 - `BlockchainAddress` management + list endpoint.
-- **SubscriptionService** — approve (creates `QuantumAIInvestment` for the plan amount), reject (records reason), pending list, dashboard stats.
+- **SubscriptionService** — approve (creates `InvestorPortfolio` for the plan amount), reject (records reason), pending list, dashboard stats.
 
 ## 8. Referrals (`apps/referrals`)
 - Apply referral code `apply/` (CSPRNG codes, self-referral/duplicate/idempotency guards).

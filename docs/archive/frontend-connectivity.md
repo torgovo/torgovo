@@ -722,7 +722,7 @@ interface Order {
   signal_bot: string | null;
   grid_bot: string | null;
   martingale_bot: string | null;
-  quantum_ai_investment: string | null;
+  investor_portfolio: string | null;
   description: string;
   details: Record<string, any>;
   created_at: string;
@@ -796,7 +796,7 @@ interface UserBalance {
 ### 6.8 Deposit / Withdrawal
 
 ```typescript
-interface QuantumAIDeposit {
+interface InvestorDeposit {
   id: string;
   user: string;
   bot_name: string;

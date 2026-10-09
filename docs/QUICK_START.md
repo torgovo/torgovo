@@ -78,7 +78,7 @@ curl http://localhost:8000/health/
 # Test authentication
 curl -X POST http://localhost:8000/api/auth/register/ \
   -H "Content-Type: application/json" \
-  -d '{"email":"test@example.com","password":"SecurePass123!","full_name":"Test User"}'
+  -d '{"phone":"+923001234567","username":"testuser","email":"test@example.com","password":"SecurePass123!","password_confirm":"SecurePass123!","terms_accepted":true,"privacy_policy_accepted":true}'
 ```
 
 ## 🛠 Common Commands

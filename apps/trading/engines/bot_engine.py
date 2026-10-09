@@ -29,6 +29,9 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
+# Phase 3: snapshot/restore helpers (module-level is cycle-free —
+# apps/trading/state.py imports only apps.trading.models).
+from apps.trading import state as runtime_state
 from core.telegram_service import TelegramService
 
 from .execution import BotExecutor
@@ -109,6 +112,12 @@ class BotEngine:
             bot_config=self.config,
             create_order_cb=self.order_service.create_order,
             close_all_orders_cb=self.close_all_orders,
+            # Phase 6a: fired from inside a monitor thread when another
+            # worker requested a stop via Redis. Must NOT join threads.
+            stop_cb=self._on_remote_stop,
+            # Phase 3: called each loop iteration; _snapshot_tick self-
+            # throttles (5s) and never raises, so loops stay safe.
+            snapshot_cb=self._snapshot_tick,
         )
 
         self._stop_event = threading.Event()
@@ -152,7 +161,9 @@ class BotEngine:
 
         # Heartbeat tracking
         self._heartbeat_counter = 0
-        self._heartbeat_interval = 60  # update DB every 60 iterations
+        # Phase 5 (CHG-5-1): kept in sync with GridPositionMonitor (10
+        # iterations ~10s); the monitor loops own the actual DB writes.
+        self._heartbeat_interval = 10
 
         # SL/TP change tracking (last known values placed on exchange)
         self._last_sl: Optional[float] = None
@@ -226,6 +237,100 @@ class BotEngine:
             f"PrevRSI_Color: {self.RSI_prev_color}"
         )
 
+    def _send_signal_notification(self, event_type, reason, side, price, details=None):
+        """
+        Send a Telegram signal notification to the user.
+        event_type: 'entry', 'exit_tp', 'exit_sl', 'close'
+        """
+        try:
+            from django.contrib.auth import get_user_model
+
+            User = get_user_model()
+            user_id = self.config.get("user_id")
+            if not user_id:
+                return
+            user = User.objects.get(id=user_id)
+
+            if not getattr(user, "telegram_token", None) or not getattr(
+                user, "telegram_chat_id", None
+            ):
+                return
+
+            emoji_map = {
+                "entry": "🟢" if side.upper() == "BUY" else "🔴",
+                "exit_tp": "💰",
+                "exit_sl": "🛑",
+                "close": "⏹️",
+            }
+            emoji = emoji_map.get(event_type, "📊")
+            label_map = {
+                "entry": "SIGNAL",
+                "exit_tp": "TP HIT",
+                "exit_sl": "SL HIT",
+                "close": "POSITION CLOSED",
+            }
+            label = label_map.get(event_type, event_type.upper())
+
+            message = (
+                f"{emoji} **{label}**\n\n"
+                f"**Symbol:** {self.symbol}\n"
+                f"**Side:** {side.upper()}\n"
+                f"**Price:** {price}\n"
+                f"**Reason:** {reason}\n"
+                f"**Exchange:** {self.config.get('exchange_name', 'N/A')}\n"
+                f"**Strategy:** {self.config.get('strategy', 'trading')}\n"
+                f"**Indicators:** {self.get_indicator_data()}\n"
+            )
+            if details:
+                message += f"**Details:** {details}\n"
+
+            TelegramService.send_message(user.telegram_token, user.telegram_chat_id, message)
+        except Exception as e:
+            logger.debug(f"Failed to send signal notification: {e}")
+
+    def _send_channel_notification(self, event_type, side, price):
+        """
+        Send a plain-text notification to the user's Telegram channel (broadcast).
+        Uses channel_token and channel_chat_id fields on the user model.
+        """
+        try:
+            from django.contrib.auth import get_user_model
+            from django.utils import timezone as _tz
+
+            User = get_user_model()
+            user_id = self.config.get("user_id")
+            if not user_id:
+                return
+            user = User.objects.get(id=user_id)
+
+            if not getattr(user, "channel_token", None) or not getattr(
+                user, "channel_chat_id", None
+            ):
+                return
+
+            now = _tz.localtime(_tz.now())
+            label_map = {
+                "entry": "OPEN",
+                "exit_tp": "TP HIT",
+                "exit_sl": "SL HIT",
+                "close": "CLOSE",
+            }
+            label = label_map.get(event_type, event_type.upper())
+            exchange = self.config.get("exchange_name", "N/A")
+
+            message = (
+                f"Timezone: GMT+5\n"
+                f"{now}\n"
+                f"Exchange: {exchange}\n"
+                f"{label} {side.upper()}\n"
+                f"Symbol: {self.symbol}\n"
+                f"Price: {price}"
+            )
+
+            TelegramService.send_channel_message(user, message)
+        except Exception as e:
+            logger.debug(f"Failed to send channel notification: {e}")
+
     # =========================================================================
     # RESET STATE (from oldbybit.py reset_trading_state — exact copy)
     # =========================================================================
@@ -256,6 +361,21 @@ class BotEngine:
         """Wait for all monitoring threads to finish"""
         self.grid_monitor.stop_all()
 
+    def _notify_stopped(self) -> None:
+        """Send the Telegram "bot stopped" notice (guarded — creds optional)."""
+        try:
+            from django.contrib.auth import get_user_model
+
+            User = get_user_model()
+            user_id = self.config.get("user_id")
+            if user_id:
+                user = User.objects.get(id=user_id)
+                TelegramService.notify_bot_stopped(
+                    user, self.config.get("strategy", "trading"), reason="Bot stopped"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to send Telegram stop notification: {e}")
+
     def stop_bot(self):
         """Properly stop the bot and clean up all threads"""
         logger.info(f"Stopping bot for {self.symbol}")
@@ -264,6 +384,52 @@ class BotEngine:
         self._wait_for_threads()
         self.bot_running = False
         logger.info(f"Bot stopped for {self.symbol}")
+        self._notify_stopped()
+
+    def _on_remote_stop(self) -> None:
+        """
+        Phase 6a teardown driven by a cross-process stop request.
+
+        Invoked from GridPositionMonitor._check_remote_stop, i.e. *inside* a
+        monitor thread, so it must NEVER join threads — that would deadlock
+        the caller. The monitor loops' flags are already cleared by the poll;
+        this adds the engine-level flags and registry cleanup so a restart in
+        the same worker is not blocked by the "already running here" guard.
+
+        DB flags are NOT written here: they are persisted by the worker that
+        received ``tasks.stop_bot``.
+        """
+        bot_id = self.config.get("bot_id")
+        logger.info(f"Remote stop handled for {self.symbol} (bot {bot_id})")
+
+        # Engine-level flags (the monitor instance's flags were set by the
+        # poll that invoked this callback).
+        self.monitoring = False
+        self.bot_running = False
+        self._stop_event.set()
+
+        if bot_id:
+            from apps.trading.engines import execution
+
+            execution._mark_bot_stopped(str(bot_id))
+            with execution._running_engines_lock:
+                execution._running_engines.pop(str(bot_id), None)
+
+        self._notify_stopped()
+
+    # =========================================================================
+    # PHASE 3: SNAPSHOT TICK (crash-consistent persistence)
+    # =========================================================================
+
+    def _snapshot_tick(self, force: bool = False) -> bool:
+        """Write this engine's volatile state to BotRuntimeState.
+
+        Wired into GridPositionMonitor as ``snapshot_cb`` (both monitor
+        loops) and called with ``force=True`` at lifecycle points in
+        ``startBot``. The helper throttles (5s) and swallows DB errors —
+        nothing here may ever propagate into a monitor thread.
+        """
+        return runtime_state.snapshot_engine(self, force=force)
 
     # =========================================================================
     # MAIN EXECUTION: startBot() from oldbybit.py — exact copy of logic
@@ -281,7 +447,15 @@ class BotEngine:
             logger.info(
                 f"{self.bot_name} starting in RESTORE MODE — attaching to existing position"
             )
+            # Phase 4 (CHG-4-2): apply the persisted snapshot BEFORE
+            # attaching — the payload restores reason/indicators/P&L/count,
+            # then attach overwrites side/count/levels with live exchange
+            # truth. No row/payload -> False -> identical cold start.
+            runtime_state.restore_engine(self)
             self._start_monitoring_for_existing_position()
+            # Phase 3: capture post-attach state so a second crash mid-
+            # monitoring restarts from this point, not from a colder one.
+            self._snapshot_tick(force=True)
             return
 
         # Send Telegram notification
@@ -317,7 +491,22 @@ class BotEngine:
                 data = self.prepare_order_data(side, self.current_price)
                 logger.info(f"data of the grid: {data}")
                 detail = self.calculated_grid_orders(data)
-                self.save_order(side.upper(), signal.reason, detail)
+                # Phase 1: mark live trade + persist the structured entry reason
+                self.save_order(
+                    side.upper(),
+                    signal.reason,
+                    detail,
+                    reason=signal.reason,
+                    status="open",
+                )
+                self._send_signal_notification(
+                    "entry",
+                    signal.reason,
+                    side,
+                    self.current_price,
+                    details=str(self.pair_config.get("Stop_Loss", "")),
+                )
+                self._send_channel_notification("entry", side, self.current_price)
 
         elif self.BuyTrade:
             signal = self.strategy._check_buy_exit_conditions(
@@ -325,6 +514,19 @@ class BotEngine:
             )
             if signal:
                 logger.info(f"TP/Exit signal: {signal.reason}")
+                pnl = self.grid_monitor.Percentage
+                self._send_signal_notification(
+                    "exit_tp" if "TP" in signal.reason.upper() else "exit_sl",
+                    signal.reason,
+                    "Buy",
+                    self.current_price,
+                    details=f"PnL: {pnl}%",
+                )
+                self._send_channel_notification(
+                    "exit_tp" if "TP" in signal.reason.upper() else "exit_sl",
+                    "Buy",
+                    self.current_price,
+                )
                 self.close_all_orders(signal.reason)
 
         elif self.SellTrade:
@@ -333,7 +535,24 @@ class BotEngine:
             )
             if signal:
                 logger.info(f"TP/Exit signal: {signal.reason}")
+                pnl = self.grid_monitor.Percentage
+                self._send_signal_notification(
+                    "exit_tp" if "TP" in signal.reason.upper() else "exit_sl",
+                    signal.reason,
+                    "Sell",
+                    self.current_price,
+                    details=f"PnL: {pnl}%",
+                )
+                self._send_channel_notification(
+                    "exit_tp" if "TP" in signal.reason.upper() else "exit_sl",
+                    "Sell",
+                    self.current_price,
+                )
                 self.close_all_orders(signal.reason)
+
+        # Phase 3: force a snapshot NOW — entries/exits must never wait for
+        # the next monitor tick (worst-case blind window stays ~5s).
+        self._snapshot_tick(force=True)
 
     # Alias for webhook compatibility
     def execute_once(self):
@@ -364,7 +583,15 @@ class BotEngine:
             self.PrevReason = self.reason
             self.reason = "Custom BUY"
             detail = self.calculated_grid_orders(data)
-            await sync_to_async(self.save_order)("BUY", "CUSTOM BUY ORDER", details=detail)
+            await sync_to_async(self.save_order)(
+                "BUY",
+                "CUSTOM BUY ORDER",
+                details=detail,
+                reason="Custom BUY",
+                status="open",
+            )
+            self._send_signal_notification("entry", "Custom BUY", "Buy", self.current_price)
+            self._send_channel_notification("entry", "Buy", self.current_price)
             self.update_conditions()
         else:
             logger.info("Already Bought")
@@ -380,7 +607,15 @@ class BotEngine:
             self.PrevReason = self.reason
             self.reason = "Custom SELL"
             detail = self.calculated_grid_orders(data)
-            await sync_to_async(self.save_order)("SELL", "CUSTOM SELL ORDER", details=detail)
+            await sync_to_async(self.save_order)(
+                "SELL",
+                "CUSTOM SELL ORDER",
+                details=detail,
+                reason="Custom SELL",
+                status="open",
+            )
+            self._send_signal_notification("entry", "Custom SELL", "Sell", self.current_price)
+            self._send_channel_notification("entry", "Sell", self.current_price)
             self.update_conditions()
         else:
             logger.info("Already Sold")
@@ -389,6 +624,15 @@ class BotEngine:
         from asgiref.sync import sync_to_async
 
         if self.BuyTrade or self.SellTrade:
+            pnl = self.grid_monitor.Percentage
+            self._send_signal_notification(
+                "close",
+                "Custom CLOSE",
+                self.current_side,
+                self.current_price,
+                details=f"PnL: {pnl}%",
+            )
+            self._send_channel_notification("close", self.current_side, self.current_price)
             await sync_to_async(self.close_all_orders)(description="CUSTOM CLOSE ORDER")
         else:
             logger.info("No Trade in Record")
@@ -456,10 +700,24 @@ class BotEngine:
         logger.info(f"Thread ID: {thread_id} | Fetched current price: {self.current_price}")
         return self.current_price
 
-    def save_order(self, side, description, details=None):
-        """Save order via BotOrderService and track count."""
+    def save_order(
+        self, side, description, details=None, *, reason=None, status=None, pnl=None, price=None
+    ):
+        """Save order via BotOrderService and track count.
+
+        Phase 1 (persistence): optional trade-integrity kwargs are forwarded
+        to BotOrderService — entry call sites pass ``reason``/``status="open"``,
+        exit call sites pass ``status="closed"``/``pnl``.
+        """
         result = self.order_service.save_order(
-            side, description, details, indicators=self._get_indicators()
+            side,
+            description,
+            details,
+            indicators=self._get_indicators(),
+            reason=reason,
+            status=status,
+            pnl=pnl,
+            price=price,
         )
         if result:
             self.orders_executed += 1
@@ -496,7 +754,14 @@ class BotEngine:
             self.Unrealized_Pnl = result["pnl"]
             self.Percentage = result["percentage"]
             self.last_trade_pnl = result["pnl"]
-            self.save_order(result["side"], description, result["detail"])
+            # Phase 1: closing record carries realized P/L + closed status
+            self.save_order(
+                result["side"],
+                description,
+                result["detail"],
+                status="closed",
+                pnl=result["pnl"],
+            )
             return result["detail"]
         return None
 

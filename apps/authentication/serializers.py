@@ -5,12 +5,11 @@ Serializers for authentication app
 from datetime import timedelta
 
 from django.contrib.auth import authenticate
+from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
-
-from apps.referrals.models import Referral
 
 # Import CustomUser from users app (AUTH_USER_MODEL = 'users.CustomUser')
 from apps.users.models import CustomUser
@@ -27,6 +26,11 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     referral_code = serializers.CharField(
         required=False, allow_blank=True, max_length=20, write_only=True
     )
+    # COMPLIANCE Phase-1: GDPR consent capture. Both are mandatory and must
+    # be truthy; a false/missing value rejects registration so we never
+    # create an account the user did not agree to our policies under.
+    terms_accepted = serializers.BooleanField(write_only=True)
+    privacy_policy_accepted = serializers.BooleanField(write_only=True)
 
     class Meta:
         model = CustomUser
@@ -39,7 +43,21 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             "last_name",
             "phone_number",
             "referral_code",
+            "terms_accepted",
+            "privacy_policy_accepted",
         )
+
+    def validate_terms_accepted(self, value):
+        """Reject registration unless the user accepted the Terms of Service."""
+        if not value:
+            raise serializers.ValidationError("You must accept the Terms of Service.")
+        return value
+
+    def validate_privacy_policy_accepted(self, value):
+        """Reject registration unless the user accepted the Privacy Policy."""
+        if not value:
+            raise serializers.ValidationError("You must accept the Privacy Policy.")
+        return value
 
     def validate_email(self, value):
         """Validate email uniqueness."""
@@ -64,7 +82,10 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         if not value:
             return value
         normalized = value.upper().strip()
-        if not Referral.objects.filter(code=normalized).exists():
+        # User-level referral_code is the source of truth — a valid code must
+        # not depend on a Referral row existing (referrer may never have
+        # opened my-stats/). Referral rows are now one-per-successful-signup (A2).
+        if not CustomUser.objects.filter(referral_code=normalized).exists():
             raise serializers.ValidationError("Invalid referral code.")
         return normalized
 
@@ -79,8 +100,19 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         validated_data.pop("password_confirm")
         password = validated_data.pop("password")
         referral_code = validated_data.pop("referral_code", "")
+        # Consent fields are write-only; never stored on the model directly.
+        # Instead we stamp the acceptance timestamp + policy version so the
+        # consent record is anchored to the exact policy document agreed to.
+        validated_data.pop("terms_accepted", None)
+        validated_data.pop("privacy_policy_accepted", None)
+
+        from django.conf import settings
+        from django.utils import timezone
 
         user = CustomUser.objects.create_user(password=password, **validated_data)
+        user.terms_accepted_at = timezone.now()
+        user.privacy_version = settings.PRIVACY_POLICY_VERSION
+        user.save(update_fields=["terms_accepted_at", "privacy_version"])
 
         # Store referral_code on instance for the view to process after save
         self._referral_code = referral_code
@@ -137,6 +169,8 @@ class UserSerializer(serializers.ModelSerializer):
             "last_login",
             "timezone",
             "two_factor_enabled",
+            "terms_accepted_at",
+            "privacy_version",
             "subscription_plan",
             "max_bots_allowed",
             "is_subscription_active",
@@ -151,6 +185,18 @@ class UserSerializer(serializers.ModelSerializer):
             "date_joined",
             "last_login",
             "two_factor_enabled",
+            # COMPLIANCE Phase-1: consent metadata is server-set, read-only.
+            "terms_accepted_at",
+            "privacy_version",
+            # SECURITY (S-1): these billing/quota fields are server-computed.
+            # A self-PATCH of subscription_plan/is_subscription_active granted
+            # premium without payment via CustomUser.save(); never writable.
+            "subscription_plan",
+            "max_bots_allowed",
+            "is_subscription_active",
+            "referral_code",
+            "total_trades_executed",
+            "total_volume_traded",
         )
 
 
@@ -199,9 +245,14 @@ class PhoneVerificationSerializer(serializers.Serializer):
         # Invalidate existing codes
         PhoneVerification.objects.filter(user=user, is_verified=False).update(is_verified=True)
 
-        return PhoneVerification.objects.create(
-            user=user, code=code, phone_number=phone_number, expires_at=expires_at
+        # SECURITY (S-2): store a salted PBKDF2 hash of the code, never the raw value.
+        # The raw code is attached transiently (in-memory only, never persisted or logged)
+        # as a seam for a future real SMS send.
+        verification = PhoneVerification.objects.create(
+            user=user, code=make_password(code), phone_number=phone_number, expires_at=expires_at
         )
+        verification.raw_code = code
+        return verification
 
 
 class PhoneVerificationConfirmSerializer(serializers.Serializer):
@@ -227,7 +278,9 @@ class PhoneVerificationConfirmSerializer(serializers.Serializer):
             if verification.attempts >= verification.max_attempts:
                 raise serializers.ValidationError("Too many attempts. Please request a new code.")
 
-            if verification.code != code:
+            # SECURITY (S-2): code is stored as a salted hash; verify via check_password
+            # (internally constant-time against the hash output).
+            if not check_password(code, verification.code):
                 verification.increment_attempt()
                 raise serializers.ValidationError("Invalid verification code.")
 
@@ -371,8 +424,14 @@ class GoogleAuthSerializer(serializers.Serializer):
 
             tokeninfo = tokeninfo_resp.json()
 
-            # Audience check — reject tokens issued for other applications
-            if google_client_id and tokeninfo.get("aud") != google_client_id:
+            # SEC-1: Audience check — fail-closed if client ID is missing or mismatched.
+            # Without this guard, any Google OAuth token from any app could
+            # authenticate a user on Torgovo (CRIT-1 in security audit v2).
+            if not google_client_id:
+                raise serializers.ValidationError(
+                    "Google OAuth is not configured. Set GOOGLE_CLIENT_ID."
+                )
+            if tokeninfo.get("aud") != google_client_id:
                 raise serializers.ValidationError(
                     "Token audience mismatch — token was not issued for this application."
                 )
@@ -437,3 +496,67 @@ class RefreshTokenSerializer(serializers.Serializer):
             return token
         except Exception:
             raise serializers.ValidationError("Invalid refresh token.")
+
+
+class TwoFASetupSerializer(serializers.Serializer):
+    """Serializer for initiating TOTP 2FA provisioning (returns secret + URI).
+
+    Requires the user's current password as a re-auth control so a
+    session hijacker cannot silently enroll an attacker's authenticator.
+    """
+
+    password = serializers.CharField(write_only=True)
+
+    def validate_password(self, value):
+        """Re-authorize the session with the current password."""
+        user = self.context["request"].user
+        if not user.check_password(value):
+            raise serializers.ValidationError("Password is incorrect.")
+        return value
+
+
+class TwoFAConfirmSerializer(serializers.Serializer):
+    """Serializer for confirming TOTP 2FA enrollment.
+
+    Verifies a one-time code generated from the just-provisioned secret;
+    only on success is ``two_factor_enabled`` flipped True.
+    """
+
+    code = serializers.CharField(max_length=6)
+
+    def validate(self, attrs):
+        """Verify code against the stored (encrypted) TOTP secret."""
+        from services.two_factor import decrypt_totp_secret, verify_totp_code
+
+        user = self.context["request"].user
+        secret = decrypt_totp_secret(user.totp_secret)
+        if secret is None:
+            raise serializers.ValidationError("No 2FA secret provisioned. Run setup first.")
+        if not verify_totp_code(secret, attrs.get("code")):
+            raise serializers.ValidationError("Invalid or expired verification code.")
+        return attrs
+
+
+class TwoFADisableSerializer(serializers.Serializer):
+    """Serializer for disabling TOTP 2FA.
+
+    Requires the current password AND a valid TOTP code (belt-and-braces:
+    a stolen password alone is not enough to weaken account security).
+    """
+
+    password = serializers.CharField(write_only=True)
+    code = serializers.CharField(max_length=6)
+
+    def validate(self, attrs):
+        """Re-auth with password, then verify the TOTP code."""
+        from services.two_factor import decrypt_totp_secret, verify_totp_code
+
+        user = self.context["request"].user
+        if not user.check_password(attrs.get("password")):
+            raise serializers.ValidationError("Password is incorrect.")
+        if not getattr(user, "two_factor_enabled", False):
+            raise serializers.ValidationError("Two-factor authentication is not enabled.")
+        secret = decrypt_totp_secret(user.totp_secret)
+        if secret is None or not verify_totp_code(secret, attrs.get("code")):
+            raise serializers.ValidationError("Invalid or expired verification code.")
+        return attrs

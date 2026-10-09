@@ -4,24 +4,17 @@ Portfolio/display views — orders, positions, balances, indicators, profile.
 Bot CRUD and trading execution belong in apps.bots.
 """
 
-import hmac as _hmac
 import logging
 from decimal import Decimal
 
 import django_filters
-from django.db import transaction as db_transaction
 from django.db.models import Sum
-from django.http import Http404
-from django.shortcuts import get_object_or_404
-from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
-from apps.exchanges.models import Exchange, TradingPair
 
 from .models import InvestmentBalance, Order, Position, TechnicalIndicator
 from .serializers import (
@@ -145,158 +138,6 @@ class UserBalanceViewSet(viewsets.ModelViewSet):
         )
 
 
-# ==================== WEBHOOK HANDLERS ====================
-
-
-class TradingViewWebhookView(APIView):
-    """
-    Handle TradingView webhook alerts. Looks up the bot by webhook_id
-    on apps.bots.SignalBot (the real webhook bot model), validates via
-    constant-time HMAC, and records the order in the investments Order model.
-    """
-
-    permission_classes = [permissions.AllowAny]
-    throttle_scope = "webhook"
-
-    def post(self, request, webhook_id):
-        from apps.bots.models import SignalBot
-
-        try:
-            bot = SignalBot.objects.get(bot_id=webhook_id, is_active=True)
-
-            # Verify secret key in constant time
-            secret = str(request.data.get("secret", ""))
-            expected = str(bot.secret_key or "")
-            if not expected or not _hmac.compare_digest(secret, expected):
-                logger.warning(f"Invalid webhook secret for {webhook_id}")
-                return Response({"error": "Invalid secret key"}, status=status.HTTP_403_FORBIDDEN)
-
-            # Process the trade
-            action = request.data.get("action", "").lower()
-            amount = Decimal(str(request.data.get("order", {}).get("amount", bot.default_amount)))
-
-            if action in ["buy", "sell"]:
-                self.execute_trade(bot, action, amount, request.data)
-                bot.last_triggered = timezone.now()
-                bot.save()
-
-                return Response(
-                    {
-                        "status": "success",
-                        "message": f"Webhook processed: {action} {amount} {bot.trading_pair}",
-                        "bot_id": str(bot.id),
-                    }
-                )
-
-            return Response({"error": "Invalid action"}, status=status.HTTP_400_BAD_REQUEST)
-
-        except SignalBot.DoesNotExist:
-            return Response({"error": "Bot not found"}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            logger.error(f"Webhook error: {str(e)}")
-            return Response(
-                {"error": "Internal error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-    def execute_trade(self, bot, action, amount, data):
-        with db_transaction.atomic():
-            Order.objects.create(
-                user=bot.user,
-                exchange=Exchange.objects.filter(name=bot.exchange_name).first(),
-                trading_pair=TradingPair.objects.filter(symbol=bot.trading_pair).first(),
-                order_type="market",
-                side=action,
-                quantity=amount,
-                price=Decimal("0"),
-                description=f"TradingView webhook: {data.get('strategy_info', {})}",
-            )
-            bot.total_trades += 1
-            bot.save()
-
-
-class EMAWebhookView(APIView):
-    """
-    Handle EMA indicator webhooks. Restricted to staff/admin.
-    Stores indicator in TechnicalIndicator model.
-    """
-
-    permission_classes = [permissions.IsAdminUser]
-
-    def post(self, request):
-        try:
-            data = request.data
-            pair = data.get("pair")
-            exchange_name = data.get("exchange")
-            ema_value = data.get("EMA200")
-
-            exchange = get_object_or_404(Exchange, name=exchange_name)
-            trading_pair = get_object_or_404(TradingPair, symbol=pair, exchange_name=exchange_name)
-
-            TechnicalIndicator.objects.create(
-                indicator_type="EMA",
-                trading_pair=trading_pair,
-                exchange=exchange,
-                values={"EMA200": ema_value},
-                triggered_at=timezone.now(),
-            )
-
-            return Response(
-                {"status": "success", "message": f"EMA processed for {pair}", "EMA": ema_value}
-            )
-
-        except Http404:
-            raise
-        except Exception as e:
-            logger.error(f"EMA webhook error: {str(e)}", exc_info=True)
-            return Response(
-                {"error": "An internal error occurred"}, status=status.HTTP_400_BAD_REQUEST
-            )
-
-
-class RSIWebhookView(APIView):
-    """
-    Handle RSI indicator webhooks. Restricted to staff/admin.
-    Stores indicator in TechnicalIndicator model.
-    """
-
-    permission_classes = [permissions.IsAdminUser]
-
-    def post(self, request):
-        try:
-            data = request.data
-            pair = data.get("pair")
-            exchange_name = data.get("exchange")
-            rsi_value = float(data.get("RSI", 0))
-            color = data.get("color")
-            prev_color = data.get("prev_color")
-
-            exchange = get_object_or_404(Exchange, name=exchange_name)
-            trading_pair = get_object_or_404(TradingPair, symbol=pair, exchange_name=exchange_name)
-
-            prev_rsi = data.get("PrevRSI")
-            TechnicalIndicator.objects.create(
-                indicator_type="RSI",
-                trading_pair=trading_pair,
-                exchange=exchange,
-                values={"RSI": rsi_value, "PrevRSI": prev_rsi},
-                color=color,
-                prev_color=prev_color,
-                triggered_at=timezone.now(),
-            )
-
-            return Response(
-                {"status": "success", "message": f"RSI processed for {pair}", "RSI": rsi_value}
-            )
-
-        except Http404:
-            raise
-        except Exception as e:
-            logger.error(f"RSI webhook error: {str(e)}", exc_info=True)
-            return Response(
-                {"error": "An internal error occurred"}, status=status.HTTP_400_BAD_REQUEST
-            )
-
-
 class UserOrdersView(APIView):
     """Get user's order history"""
 
@@ -383,14 +224,14 @@ class BlockchainAddressesView(APIView):
         return Response(addresses)
 
 
-class QuantumAIDepositView(APIView):
-    """Handle Quantum AI deposit submission (creates pending QuantumAIDeposit)."""
+class InvestorDepositView(APIView):
+    """Handle Quantum AI deposit submission (creates pending InvestorDeposit)."""
 
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, bot_id):
         from apps.bots.models import QuantumAIBot as BotsQuantumAIBot
-        from apps.payments.models import QuantumAIDeposit
+        from apps.payments.models import InvestorDeposit
 
         try:
             BotsQuantumAIBot.objects.get(id=bot_id)
@@ -425,13 +266,13 @@ class QuantumAIDepositView(APIView):
 
             if (
                 transaction_hash
-                and QuantumAIDeposit.objects.filter(transaction_hash=transaction_hash).exists()
+                and InvestorDeposit.objects.filter(transaction_hash=transaction_hash).exists()
             ):
                 return Response(
                     {"error": "Transaction hash already submitted"}, status=status.HTTP_409_CONFLICT
                 )
 
-            deposit = QuantumAIDeposit.objects.create(
+            deposit = InvestorDeposit.objects.create(
                 user=request.user,
                 amount=amount,
                 currency=coin_type,

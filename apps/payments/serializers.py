@@ -10,8 +10,8 @@ from .models import (
     BlockchainAddress,
     BotSubscription,
     BotSubscriptionPlan,
+    InvestorDeposit,
     PaymentTransaction,
-    QuantumAIDeposit,
     ReferralPayout,
     SubscriptionPlan,
     WithdrawalRequest,
@@ -42,9 +42,9 @@ class SubscriptionPlanSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at", "updated_at"]
 
 
-class QuantumAIDepositSerializer(serializers.ModelSerializer):
+class InvestorDepositSerializer(serializers.ModelSerializer):
     """
-    Serializer for QuantumAIDeposit model.
+    Serializer for InvestorDeposit model.
     """
 
     user_email = serializers.EmailField(source="user.email", read_only=True)
@@ -52,7 +52,7 @@ class QuantumAIDepositSerializer(serializers.ModelSerializer):
     is_expired = serializers.BooleanField(read_only=True)
 
     class Meta:
-        model = QuantumAIDeposit
+        model = InvestorDeposit
         fields = [
             "id",
             "user",
@@ -142,6 +142,12 @@ class WithdrawalRequestSerializer(serializers.ModelSerializer):
 
     user_email = serializers.EmailField(source="user.email", read_only=True)
 
+    # SEC-2: two_factor_code is NOT a model field (removed — dead weight).
+    # It is consumed by the view directly from request.data and verified
+    # against CustomUser.totp_secret via services/two_factor.py. Declared
+    # here so DRF accepts it in the request body without error.
+    two_factor_code = serializers.CharField(write_only=True, required=True)
+
     class Meta:
         model = WithdrawalRequest
         fields = [
@@ -187,7 +193,6 @@ class WithdrawalRequestSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         extra_kwargs = {
-            "two_factor_code": {"write_only": True, "required": True},
             "email_verification_token": {"write_only": True, "required": False},
         }
 

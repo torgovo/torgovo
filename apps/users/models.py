@@ -85,6 +85,34 @@ class CustomUser(AbstractUser):
 
     push_notifications = models.BooleanField(default=True, help_text=_("Send push notifications"))
 
+    # Telegram notifications
+    telegram_token = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=_("Telegram bot token for trade notifications"),
+    )
+    telegram_chat_id = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text=_("Telegram chat ID for trade notifications"),
+    )
+
+    # Telegram channel notifications (separate from personal DM)
+    channel_token = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=_("Telegram bot token for channel broadcast notifications"),
+    )
+    channel_chat_id = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text=_("Telegram channel chat ID for broadcast notifications"),
+    )
+
     # Trading Statistics (auto-updated)
     total_trades_executed = models.PositiveIntegerField(
         default=0, help_text=_("Total number of trades executed by all bots")
@@ -148,6 +176,14 @@ class CustomUser(AbstractUser):
     is_phone_verified = models.BooleanField(default=False, help_text=_("Phone verification status"))
 
     two_factor_enabled = models.BooleanField(default=False)
+    totp_secret = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=_(  # noqa: E501
+            "Fernet-encrypted TOTP secret (see services/two_factor.py); never plaintext."
+        ),
+    )
     last_login_ip = models.GenericIPAddressField(null=True, blank=True)
 
     timezone = models.CharField(
@@ -175,6 +211,24 @@ class CustomUser(AbstractUser):
         unique=True,
         editable=False,
         help_text=_("Token used to authenticate webhook calls from TradingView"),
+    )
+
+    # GDPR consent tracking (COMPLIANCE Phase-1)
+    # When the user accepted the Terms & Privacy Policy. NULL for accounts
+    # created before consent tracking existed (grandfathered); such users must
+    # re-consent before restricted actions (see compliance flows).
+    terms_accepted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=_("When the user accepted the Terms of Service and Privacy Policy"),
+    )
+
+    # Version of the Privacy Policy / Terms accepted at registration. Lets us
+    # detect users whose consent was given against an older policy document.
+    privacy_version = models.CharField(
+        max_length=20,
+        default="2026-08-1",
+        help_text=_("Version of the accepted Privacy Policy/Terms (ISO date)"),
     )
 
     # Timestamps
@@ -206,13 +260,17 @@ class CustomUser(AbstractUser):
                 from django.apps import apps
 
                 Referral = apps.get_model("referrals", "Referral")
-                Referral.objects.update_or_create(
-                    referrer=self,
-                    defaults={
-                        "code": self.referral_code,
-                        "status": "pending",
-                    },
-                )
+                # Ensure a code row exists for this referrer — but ONLY create
+                # when there is none. update_or_create(referrer=self, ...) raises
+                # MultipleObjectsReturned as soon as the referrer has 2+ rows
+                # (one row per successful referral, A2) and would also stomp
+                # status/code on event rows. exists()+create never touches rows.
+                if not Referral.objects.filter(referrer=self).exists():
+                    Referral.objects.create(
+                        referrer=self,
+                        code=self.referral_code,
+                        status="pending",
+                    )
 
     def _generate_referral_code(self):
         import secrets

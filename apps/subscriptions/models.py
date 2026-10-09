@@ -80,7 +80,17 @@ class TelegramChannel(TimeStampedModel):
     member_count = models.PositiveIntegerField(default=0)
     is_private = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
-    required_plan_id = models.PositiveIntegerField(null=True, blank=True)
+    # A11: FK to the plan this channel is gated on (was a dead
+    # PositiveIntegerField that could never match the always-UUID plan pk —
+    # see docs/diagrams/06_DATABASE_ERD.md which documents it as a UUID FK).
+    # NULL = channel is unrestricted and granted to every approved subscriber.
+    required_plan = models.ForeignKey(
+        TelegramSignalPlan,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="required_by_channels",
+    )
     admin_bot_token = models.CharField(max_length=255, blank=True)
 
     class Meta:
@@ -237,6 +247,15 @@ class TelegramSubscription(SoftDeleteModel):
         self.end_date = timezone.now().date() + timedelta(days=days)
         self.admin_notes = notes
         self.save()
+
+        # A11: assign channels server-side on approval — the user can no
+        # longer self-assign via the API. A channel is granted when it is
+        # active AND its required_plan_id either matches this plan or is
+        # unset (unrestricted channel available to every subscriber).
+        eligible_channels = TelegramChannel.objects.filter(is_active=True).filter(
+            models.Q(required_plan_id__isnull=True) | models.Q(required_plan_id=self.plan_id)
+        )
+        self.channels.set(eligible_channels)
 
     def reject(self, admin_user, reason=""):
         """Reject subscription"""

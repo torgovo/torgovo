@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from apps.bots.models import QuantumAIFund, QuantumAIInvestment, ReserveFund
+from apps.bots.models import InvestorPortfolio, QuantumAIFund, ReserveFund
 from services.quantum_ai_fund import QuantumAIFundService
 
 pytestmark = pytest.mark.django_db
@@ -297,11 +297,11 @@ class TestAccrueSmoothedProfit:
         mock_fund.id = "fund-1"
         mock_fund.total_deposits = Decimal("10000")
 
-        inv1 = MagicMock(spec=QuantumAIInvestment)
+        inv1 = MagicMock(spec=InvestorPortfolio)
         inv1.amount = Decimal("3000")  # 30% share
         inv1.accrued_profit = Decimal("0")
 
-        inv2 = MagicMock(spec=QuantumAIInvestment)
+        inv2 = MagicMock(spec=InvestorPortfolio)
         inv2.amount = Decimal("7000")  # 70% share
         inv2.accrued_profit = Decimal("0")
 
@@ -317,7 +317,7 @@ class TestAccrueSmoothedProfit:
 
         with patch("services.quantum_ai_fund.QuantumAIFund.objects", mock_mgr):
             with patch(
-                "services.quantum_ai_fund.QuantumAIInvestment.objects.filter", return_value=mock_qs
+                "services.quantum_ai_fund.InvestorPortfolio.objects.filter", return_value=mock_qs
             ):
                 QuantumAIFundService._accrue_smoothed_profit("fund-1", Decimal("10"))
 
@@ -345,7 +345,7 @@ class TestAccrueSmoothedProfit:
 
         with patch("services.quantum_ai_fund.QuantumAIFund.objects", mock_mgr):
             with patch(
-                "services.quantum_ai_fund.QuantumAIInvestment.objects.filter", return_value=mock_qs
+                "services.quantum_ai_fund.InvestorPortfolio.objects.filter", return_value=mock_qs
             ):
                 # Should not raise
                 QuantumAIFundService._accrue_smoothed_profit("fund-1", Decimal("10"))
@@ -355,7 +355,7 @@ class TestAccrueSmoothedProfit:
         mock_fund.id = "fund-1"
         mock_fund.total_deposits = Decimal("0")
 
-        inv = MagicMock(spec=QuantumAIInvestment)
+        inv = MagicMock(spec=InvestorPortfolio)
         inv.amount = Decimal("1000")
 
         mock_qs = MagicMock()
@@ -369,7 +369,7 @@ class TestAccrueSmoothedProfit:
 
         with patch("services.quantum_ai_fund.QuantumAIFund.objects", mock_mgr):
             with patch(
-                "services.quantum_ai_fund.QuantumAIInvestment.objects.filter", return_value=mock_qs
+                "services.quantum_ai_fund.InvestorPortfolio.objects.filter", return_value=mock_qs
             ):
                 QuantumAIFundService._accrue_smoothed_profit("fund-1", Decimal("10"))
                 # Zero deposit means no value to distribute — no save called
@@ -381,13 +381,13 @@ class TestProcessPayouts:
         mock_fund = MagicMock()
         mock_fund.id = "fund-1"
 
-        inv1 = MagicMock(spec=QuantumAIInvestment)
+        inv1 = MagicMock(spec=InvestorPortfolio)
         inv1.accrued_profit = Decimal("500")
         inv1.total_payouts = Decimal("0")
         inv1.user.email = "user1@test.com"
         inv1.user.id = 1
 
-        inv2 = MagicMock(spec=QuantumAIInvestment)
+        inv2 = MagicMock(spec=InvestorPortfolio)
         inv2.accrued_profit = Decimal("300")
         inv2.total_payouts = Decimal("0")
         inv2.user.email = "user2@test.com"
@@ -401,7 +401,7 @@ class TestProcessPayouts:
         ) as mock_fund_sfu:
             mock_fund_sfu.return_value.get.return_value = mock_fund
             with patch(
-                "services.quantum_ai_fund.QuantumAIInvestment.objects.filter"
+                "services.quantum_ai_fund.InvestorPortfolio.objects.filter"
             ) as mock_inv_filter:
                 mock_inv_filter.return_value.select_for_update.return_value = mock_inv_qs
                 with patch(
@@ -420,13 +420,13 @@ class TestProcessPayouts:
         mock_fund = MagicMock()
         mock_fund.id = "fund-1"
 
-        inv_good = MagicMock(spec=QuantumAIInvestment)
+        inv_good = MagicMock(spec=InvestorPortfolio)
         inv_good.accrued_profit = Decimal("100")
         inv_good.total_payouts = Decimal("0")
         inv_good.user.email = "good@test.com"
         inv_good.user.id = 1
 
-        inv_bad = MagicMock(spec=QuantumAIInvestment)
+        inv_bad = MagicMock(spec=InvestorPortfolio)
         inv_bad.accrued_profit = Decimal("200")
         inv_bad.total_payouts = Decimal("0")
         inv_bad.user.email = "bad@test.com"
@@ -445,7 +445,7 @@ class TestProcessPayouts:
         ) as mock_fund_sfu:
             mock_fund_sfu.return_value.get.return_value = mock_fund
             with patch(
-                "services.quantum_ai_fund.QuantumAIInvestment.objects.filter"
+                "services.quantum_ai_fund.InvestorPortfolio.objects.filter"
             ) as mock_inv_filter:
                 mock_inv_filter.return_value.select_for_update.return_value = mock_inv_qs
                 with patch(
@@ -470,7 +470,7 @@ class TestProcessPayouts:
         ) as mock_fund_sfu:
             mock_fund_sfu.return_value.get.return_value = mock_fund
             with patch(
-                "services.quantum_ai_fund.QuantumAIInvestment.objects.filter"
+                "services.quantum_ai_fund.InvestorPortfolio.objects.filter"
             ) as mock_inv_filter:
                 mock_inv_filter.return_value.select_for_update.return_value = []
                 result = QuantumAIFundService.process_payouts("fund-1")
@@ -480,7 +480,7 @@ class TestProcessPayouts:
 
 class TestGetUserDashboard:
     def test_dashboard_smoothed_view(self):
-        mock_investment = MagicMock(spec=QuantumAIInvestment)
+        mock_investment = MagicMock(spec=InvestorPortfolio)
         mock_investment.amount = Decimal("1000")
         mock_investment.total_payouts = Decimal("200")
         mock_investment.accrued_profit = Decimal("50")
@@ -492,7 +492,7 @@ class TestGetUserDashboard:
         mock_qs.select_related.return_value = [mock_investment]
 
         with patch(
-            "services.quantum_ai_fund.QuantumAIInvestment.objects.filter", return_value=mock_qs
+            "services.quantum_ai_fund.InvestorPortfolio.objects.filter", return_value=mock_qs
         ):
             result = QuantumAIFundService.get_user_dashboard("testuser")
 
@@ -505,7 +505,7 @@ class TestGetUserDashboard:
         mock_qs.select_related.return_value = []
 
         with patch(
-            "services.quantum_ai_fund.QuantumAIInvestment.objects.filter", return_value=mock_qs
+            "services.quantum_ai_fund.InvestorPortfolio.objects.filter", return_value=mock_qs
         ):
             result = QuantumAIFundService.get_user_dashboard("testuser")
             assert result["total_invested"] == 0
@@ -516,7 +516,64 @@ class TestGetUserDashboard:
         mock_qs.select_related.return_value = []
 
         with patch(
-            "services.quantum_ai_fund.QuantumAIInvestment.objects.filter", return_value=mock_qs
+            "services.quantum_ai_fund.InvestorPortfolio.objects.filter", return_value=mock_qs
         ):
             result = QuantumAIFundService.get_user_dashboard("testuser")
             assert result["roi_percentage"] == Decimal("0")
+
+
+class TestProcessFundPayoutsTask:
+    """FIN-1: Tests for the process_fund_payouts Celery task."""
+
+    def test_task_calls_process_payouts_for_each_fund(self):
+        """Task iterates active funds and calls process_payouts on each."""
+        from apps.investments.tasks import process_fund_payouts
+
+        mock_fund = MagicMock()
+        mock_fund.id = "fund-1"
+        mock_fund.name = "Test Fund"
+        mock_fund.is_active = True
+        mock_fund.is_deleted = False
+
+        with (
+            patch("apps.bots.models.QuantumAIFund") as MockFund,
+            patch("services.quantum_ai_fund.QuantumAIFundService") as MockService,
+        ):
+            MockFund.objects.filter.return_value = [mock_fund]
+            MockService.process_payouts.return_value = {
+                "payout_count": 5,
+                "total_paid": Decimal("100.00"),
+            }
+
+            result = process_fund_payouts()
+
+            MockService.process_payouts.assert_called_once_with("fund-1")
+            assert result["funds_processed"] == 1
+            assert result["total_payouts"] == 5
+            assert result["total_paid"] == Decimal("100.00")
+
+    def test_task_continues_on_fund_failure(self):
+        """If one fund fails, other funds are still processed."""
+        from apps.investments.tasks import process_fund_payouts
+
+        mock_fund1 = MagicMock()
+        mock_fund1.id = "fund-1"
+        mock_fund1.name = "Fund One"
+        mock_fund2 = MagicMock()
+        mock_fund2.id = "fund-2"
+        mock_fund2.name = "Fund Two"
+
+        with (
+            patch("apps.bots.models.QuantumAIFund") as MockFund,
+            patch("services.quantum_ai_fund.QuantumAIFundService") as MockService,
+        ):
+            MockFund.objects.filter.return_value = [mock_fund1, mock_fund2]
+            MockService.process_payouts.side_effect = [
+                Exception("DB error"),
+                {"payout_count": 2, "total_paid": Decimal("50.00")},
+            ]
+
+            result = process_fund_payouts()
+
+            assert result["funds_processed"] == 1
+            assert result["total_payouts"] == 2

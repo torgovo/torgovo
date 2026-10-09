@@ -292,6 +292,14 @@ class TestTelegramServiceNotifyBotStarted:
         mock_send_message.assert_not_called()
 
     @patch.object(TelegramService, "send_message")
+    def test_notify_bot_started_user_without_attrs(self, mock_send_message):
+        # CustomUser has no telegram_token/chat_id fields — must not raise
+        user = object()
+        result = TelegramService.notify_bot_started(user, "GridBot", {})
+        assert result is False
+        mock_send_message.assert_not_called()
+
+    @patch.object(TelegramService, "send_message")
     def test_notify_bot_started_default_pair_exchange(self, mock_send_message):
         mock_send_message.return_value = True
         user = MagicMock()
@@ -348,6 +356,14 @@ class TestTelegramServiceNotifyBotStopped:
         user.telegram_token = "tok"
         user.telegram_chat_id = None
 
+        result = TelegramService.notify_bot_stopped(user, "Bot")
+        assert result is False
+        mock_send_message.assert_not_called()
+
+    @patch.object(TelegramService, "send_message")
+    def test_notify_bot_stopped_user_without_attrs(self, mock_send_message):
+        # CustomUser has no telegram_token/chat_id fields — must not raise
+        user = object()
         result = TelegramService.notify_bot_stopped(user, "Bot")
         assert result is False
         mock_send_message.assert_not_called()

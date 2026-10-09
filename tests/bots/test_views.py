@@ -626,10 +626,10 @@ class TestQuantumInvestmentViewSet:
     def test_list_investments(
         self, auth_client, quantum_investment_url, quantum_ai_subscription, quantum_fund
     ):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
         user = auth_client.handler._force_user
-        QuantumAIInvestment.objects.create(
+        InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("500"),
@@ -643,10 +643,10 @@ class TestQuantumInvestmentViewSet:
     def test_balance_endpoint(
         self, auth_client, quantum_investment_url, quantum_ai_subscription, quantum_fund
     ):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
         user = auth_client.handler._force_user
-        QuantumAIInvestment.objects.create(
+        InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("1000"),
@@ -668,10 +668,10 @@ class TestQuantumInvestmentViewSet:
         quantum_ai_subscription,
         quantum_fund,
     ):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
         user = auth_client.handler._force_user
-        QuantumAIInvestment.objects.create(
+        InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("500"),
@@ -690,10 +690,10 @@ class TestQuantumInvestmentViewSet:
         quantum_ai_subscription,
         quantum_fund,
     ):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
         user = auth_client.handler._force_user
-        inv = QuantumAIInvestment.objects.create(
+        inv = InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("500"),

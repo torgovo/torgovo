@@ -215,7 +215,7 @@ classDiagram
         +is_below_target()
         +can_cover()
     }
-    class QuantumAIInvestment {
+    class InvestorPortfolio {
         +FK~CustomUser~ user
         +FK~QuantumAIFund~ fund
         +FK~BotSubscription~ subscription
@@ -448,7 +448,7 @@ classDiagram
     SignalBot --> CustomUser : user
     GridBot --> CustomUser : user
     MartingaleBot --> CustomUser : user
-    QuantumAIInvestment --> CustomUser : user
+    InvestorPortfolio --> CustomUser : user
     QuantumDeposit --> CustomUser : user
     Order --> CustomUser : user
     Indicator --> CustomUser : user
@@ -464,14 +464,14 @@ classDiagram
     SignalBot --> BotSubscription : subscription
     GridBot --> BotSubscription : subscription
     MartingaleBot --> BotSubscription : subscription
-    QuantumAIInvestment --> BotSubscription : subscription
+    InvestorPortfolio --> BotSubscription : subscription
     PairConfig --> BotSubscription : subscription
     BotSubscription --> BotSubscriptionPlan : plan
 
     %% Quantum AI relationships
     QuantumAIBot --> QuantumAIFund : fund
     ReserveFund --> QuantumAIFund : fund
-    QuantumAIInvestment --> QuantumAIFund : fund
+    InvestorPortfolio --> QuantumAIFund : fund
     QuantumWeeklyProfit --> QuantumAIFund : fund
     QuantumDeposit --> QuantumDepositWallet : wallet
 
@@ -518,4 +518,4 @@ classDiagram
 3. **Model ownership by domain** — `apps/exchanges` owns trading data (Exchange, TradingPair, ExchangeCredentials), `apps/investments` owns display data (SupportedBlockchain, ExchangeRate, ExchangeStatus), `apps/trading` imports rather than duplicates
 4. **SoftDeleteModel everywhere** — all production models soft-delete to prevent data loss
 5. **Encrypted credentials** — API keys are encrypted at rest via `core.utils.encrypt_api_key()`, decrypted only at use time
-6. **BotSubscription as central subscription hub** — referenced by SignalBot, GridBot, MartingaleBot, QuantumAIInvestment, PairConfig, and TelegramSignalSubscription
+6. **BotSubscription as central subscription hub** — referenced by SignalBot, GridBot, MartingaleBot, InvestorPortfolio, PairConfig, and TelegramSignalSubscription

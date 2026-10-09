@@ -59,7 +59,7 @@ class PhoneVerification(TimeStampedModel):
         on_delete=models.CASCADE,
         related_name="phone_verifications",
     )
-    code = models.CharField(max_length=6)
+    code = models.CharField(max_length=128)
     phone_number = models.CharField(max_length=20)
     is_verified = models.BooleanField(default=False)
     verified_at = models.DateTimeField(null=True, blank=True)

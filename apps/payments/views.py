@@ -26,16 +26,16 @@ from .models import (
     BlockchainAddress,
     BotSubscription,
     BotSubscriptionPlan,
+    InvestorDeposit,
     PaymentTransaction,
-    QuantumAIDeposit,
     SubscriptionPlan,
     WithdrawalRequest,
 )
 from .serializers import (
     BlockchainAddressSerializer,
     BotSubscriptionSerializer,
+    InvestorDepositSerializer,
     PaymentTransactionSerializer,
-    QuantumAIDepositSerializer,
     SubscriptionPlanSerializer,
     WithdrawalRequestSerializer,
 )
@@ -199,15 +199,15 @@ class AdminRejectSubscriptionView(APIView):
 class QuantumDepositViewSet(viewsets.ModelViewSet):
     """ViewSet for managing Quantum AI deposits."""
 
-    queryset = QuantumAIDeposit.objects.all()
-    serializer_class = QuantumAIDepositSerializer
+    queryset = InvestorDeposit.objects.all()
+    serializer_class = InvestorDepositSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         if self.request.user.is_staff:
-            return QuantumAIDeposit.objects.all().order_by("-created_at")
-        return QuantumAIDeposit.objects.filter(user=self.request.user).order_by("-created_at")
+            return InvestorDeposit.objects.all().order_by("-created_at")
+        return InvestorDeposit.objects.filter(user=self.request.user).order_by("-created_at")
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
@@ -218,7 +218,7 @@ class QuantumDepositViewSet(viewsets.ModelViewSet):
         if not request.user.is_staff:
             return Response({"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN)
 
-        pending_deposits = QuantumAIDeposit.objects.filter(status="pending").order_by("-created_at")
+        pending_deposits = InvestorDeposit.objects.filter(status="pending").order_by("-created_at")
         serializer = self.get_serializer(pending_deposits, many=True)
         return Response(serializer.data)
 
@@ -258,9 +258,8 @@ class WithdrawalRequestViewSet(viewsets.ModelViewSet):
         if not getattr(user, "is_email_verified", False):
             raise serializers.ValidationError("Email verification required before withdrawing.")
 
-        # 2FA gate — code is REQUIRED. The actual TOTP/SMS check should
-        # live in a dedicated service; here we at least enforce presence
-        # and length, and reject if the user has 2FA disabled.
+        # 2FA gate — code is REQUIRED and must actually verify against the
+        # user's stored TOTP secret (S-3 fix: was presence/length-only).
         code = (request.data.get("two_factor_code") or "").strip()
         if not code or len(code) < 4:
             raise serializers.ValidationError("two_factor_code is required for withdrawals.")
@@ -268,6 +267,17 @@ class WithdrawalRequestViewSet(viewsets.ModelViewSet):
             raise serializers.ValidationError(
                 "Enable 2FA on your account before requesting withdrawals."
             )
+
+        from services.two_factor import decrypt_totp_secret, verify_totp_code
+
+        secret = decrypt_totp_secret(getattr(user, "totp_secret", ""))
+        if secret is None or not verify_totp_code(secret, code, window=1):
+            raise serializers.ValidationError("Invalid or expired two_factor_code.")
+
+        # SEC-2: two_factor_code is a serializer-only field (not on the model).
+        # Pop it from validated_data so ModelSerializer.create() doesn't pass
+        # it to WithdrawalRequest.objects.create().
+        serializer.validated_data.pop("two_factor_code", None)
 
         amount = serializer.validated_data.get("amount")
         from decimal import Decimal as _D
@@ -413,14 +423,14 @@ class CreateDepositView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(
-        request_body=QuantumAIDepositSerializer, responses={201: QuantumAIDepositSerializer}
+        request_body=InvestorDepositSerializer, responses={201: InvestorDepositSerializer}
     )
     def post(self, request, bot_id):
         """Create a deposit for the specified bot."""
         try:
             bot = get_object_or_404(QuantumAIFund, id=bot_id)
 
-            serializer = QuantumAIDepositSerializer(data=request.data)
+            serializer = InvestorDepositSerializer(data=request.data)
             if serializer.is_valid():
                 serializer.save(user=request.user, quantum_bot=bot)
 
@@ -463,7 +473,7 @@ class ApproveDepositView(APIView):
     def post(self, request, deposit_id):
         """Approve a deposit."""
         try:
-            deposit = get_object_or_404(QuantumAIDeposit, id=deposit_id)
+            deposit = get_object_or_404(InvestorDeposit, id=deposit_id)
 
             if deposit.status != "pending":
                 return Response(
@@ -509,7 +519,7 @@ class RejectDepositView(APIView):
     def post(self, request, deposit_id):
         """Reject a deposit."""
         try:
-            deposit = get_object_or_404(QuantumAIDeposit, id=deposit_id)
+            deposit = get_object_or_404(InvestorDeposit, id=deposit_id)
 
             if deposit.status != "pending":
                 return Response(

@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 import pytest
+from django.db import models
 from django.utils import timezone
 
 from apps.subscriptions.models import (
@@ -421,3 +422,101 @@ class TestSignalStatisticsModel:
         SignalStatistics.objects.create(plan=plan, date=date, total_signals=1)
         with pytest.raises(Exception):
             SignalStatistics.objects.create(plan=plan, date=date, total_signals=2)
+
+
+# ============================================================================
+# A11 — approve() assigns plan-eligible channels server-side
+# ============================================================================
+
+
+@pytest.mark.django_db
+class TestApproveChannelAssignment:
+    """A11: channels are granted on approval by required_plan_id, never
+    via user-supplied API payload."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, db, user, admin_user):
+        self.user = user
+        self.admin = admin_user
+        self.plan = TelegramSignalPlan.objects.create(
+            name="Pro",
+            slug="pro",
+            description="Pro",
+            price_monthly=Decimal("49.99"),
+            price_quarterly=Decimal("129.99"),
+            price_yearly=Decimal("499.99"),
+        )
+        self.other_plan = TelegramSignalPlan.objects.create(
+            name="Basic",
+            slug="basic",
+            description="Basic",
+            price_monthly=Decimal("9.99"),
+            price_quarterly=Decimal("24.99"),
+            price_yearly=Decimal("99.99"),
+        )
+        # Eligible: active + matches this plan
+        self.plan_channel = TelegramChannel.objects.create(
+            name="Pro Signals",
+            channel_id="pro_signals",
+            channel_type="signals",
+            invite_link="https://t.me/pro_signals",
+            description="Pro only",
+            is_active=True,
+            required_plan=self.plan,
+        )
+        # Eligible: active + unrestricted (no required plan)
+        self.free_channel = TelegramChannel.objects.create(
+            name="General",
+            channel_id="general",
+            channel_type="general",
+            invite_link="https://t.me/general",
+            description="Everyone",
+            is_active=True,
+            required_plan=None,
+        )
+        # Not eligible: requires a different plan
+        self.other_plan_channel = TelegramChannel.objects.create(
+            name="Basic Signals",
+            channel_id="basic_signals",
+            channel_type="signals",
+            invite_link="https://t.me/basic_signals",
+            description="Basic only",
+            is_active=True,
+            required_plan=self.other_plan,
+        )
+        # Not eligible: inactive even though unrestricted
+        self.inactive_channel = TelegramChannel.objects.create(
+            name="Archived",
+            channel_id="archived",
+            channel_type="general",
+            invite_link="https://t.me/archived",
+            description="Off",
+            is_active=False,
+            required_plan=None,
+        )
+        self.sub = TelegramSubscription.objects.create(
+            user=self.user,
+            plan=self.plan,
+            telegram_handle="tg_user",
+            amount_paid=Decimal("49.99"),
+            status="pending_approval",
+        )
+
+    def test_approve_assigns_only_eligible_channels(self):
+        self.sub.approve(self.admin)
+        self.sub.refresh_from_db()
+        assigned = set(self.sub.channels.values_list("id", flat=True))
+        assert assigned == {self.plan_channel.id, self.free_channel.id}
+        assert self.other_plan_channel.id not in assigned
+        assert self.inactive_channel.id not in assigned
+
+    def test_approval_is_idempotent_for_channels(self):
+        """Re-running assignment logic must not duplicate through rows."""
+        self.sub.approve(self.admin)
+        before = TelegramSubscriptionChannel.objects.filter(subscription=self.sub).count()
+        eligible = TelegramChannel.objects.filter(is_active=True).filter(
+            models.Q(required_plan_id__isnull=True) | models.Q(required_plan_id=self.sub.plan_id)
+        )
+        self.sub.channels.set(eligible)
+        after = TelegramSubscriptionChannel.objects.filter(subscription=self.sub).count()
+        assert before == after == 2

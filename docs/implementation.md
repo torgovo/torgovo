@@ -1,3 +1,5 @@
+> **Note:** This is the original spec document from early development. Some details are outdated. See ARCHITECTURE.md and SETUP.md for current implementation details.
+
 # Torgovo - Crypto Trading Bot Platform
 
 ## Tech Stack
@@ -10,12 +12,11 @@
 A subscription-based platform where users create and manage cryptocurrency trading bots that execute trades on multiple exchanges (Binance, Bybit, OKX, MEXC, Coinbase) via CCXT library. The system handles webhooks from TradingView, manages investments, and provides referral rewards.
 
 ## User Registration & Setup
-- Register via Gmail OAuth or phone (SMS OTP)
+- Register via email + username + password (OAuth available but not primary flow)
+- Phone (SMS OTP) is optional
 - Auto-generate on signup:
-  - Unique webhook URL for receiving trade signals
-  - JSON message template with fields: `bot_id, buy_sell, symbol, exchange, amount, timestamp, secret_key`
-  - `secret_key` for webhook authentication (403 if invalid)
   - Unique referral code
+- Webhook URLs and secret keys are per-bot (created when user creates a SignalBot), not per-user
 
 ## Four Bot Types
 
@@ -71,7 +72,7 @@ A subscription-based platform where users create and manage cryptocurrency tradi
 
 ## Webhook Flow (Critical)
 
-**Endpoint:** `POST /webhooks/custom_bots/` (or `/quantum_bots/`, `/grid_bots/` etc.)
+**Endpoint:** `POST /api/webhooks/custombot/` (single shared endpoint for all bot types)
 
 **Process:**
 1. Receive JSON from TradingView: `{bot_id, buy_sell, symbol, exchange, amount, timestamp, secret_key}`
@@ -80,10 +81,10 @@ A subscription-based platform where users create and manage cryptocurrency tradi
 4. Process async:
    - Custom bots: execute trade immediately
    - Other bots: add to queue, bot manager handles execution
-5. Log every trade to database: `TradeLog(user_id, bot_id, exchange, symbol, amount, buy_sell, timestamp, outcome)`
+5. Log every trade to database: `BotOrder(user_id, bot_id, exchange, symbol, amount, buy_sell, timestamp, outcome)`
 6. Retry 3 times on failure, email user if all fail
 
-**Note:** Leave actual CCXT trade execution as `# TODO: Implement CCXT` but complete all surrounding code (validation, database queries, logging, error handling)
+**Note:** CCXT is fully integrated via BotOrderService. All exchange interactions use real CCXT methods.
 
 ## Subscription Plans
 
@@ -100,16 +101,14 @@ A subscription-based platform where users create and manage cryptocurrency tradi
 - Quantum AI investment access
 
 **Payment Methods:**
-- PayPal, Stripe, Wise (auto-approved)
-- Crypto (upload proof, admin approves)
+- Crypto deposits with admin approval
 
 ## Exchange Integration
 - Users connect exchanges by entering API keys
 - Store encrypted in database
 - Display masked on dashboard (e.g., `****abcd`)
 - Support spot and futures trading
-- Create separate handler files per exchange: `exchanges/binance.py`, `exchanges/bybit.py` etc.
-- Central manager dynamically loads correct handler
+- Exchange adapters live in `apps/trading/exchanges/` (already implemented: bybit, binance, mexc, alpaca, okx, coinbase)
 
 ## Referral System
 - Each user gets unique code on signup
@@ -136,7 +135,7 @@ Show:
 Features:
 - Approve pending investments/payments (one-click approve/reject)
 - Modify subscription plans (features, pricing, limits)
-- Configure Quantum AI shown percentage (5-20%)
+- Configure Quantum AI profit parameters
 - View all users, restrict/disable accounts
 - View trade logs (filter by user, bot, exchange, date)
 - Process manual withdrawals every 2 weeks
@@ -146,9 +145,8 @@ Features:
 ## Key API Endpoints
 
 **User:**
-- `POST /api/users/register/` - Register new user
-- `POST /api/users/login/` - Login, return JWT tokens
-- `GET /api/users/dashboard/` - Get all dashboard data
+- `POST /api/auth/register/` - Register new user
+- `POST /api/auth/login/` - Login, return JWT tokens
 
 **Bots:**
 - `POST /api/bots/signal-bots/` - Create custom bot
@@ -158,53 +156,52 @@ Features:
 - `GET /api/bots/{id}/` - Get bot details
 
 **Webhooks:**
-- `POST /api/webhooks/custom_bots/` - Receive TradingView signals
+- `POST /api/webhooks/custombot/` - Receive TradingView signals
 
 **Investments:**
-- `POST /api/investments/quantum/` - Submit investment (screenshot, tx_hash)
+- `POST /api/bots/quantum-investments/` - Submit investment (screenshot, tx_hash)
 - `GET /api/investments/balance/` - Get current Quantum AI balance
 - `GET /api/investments/history/` - Get investment history
 
 **Admin:**
 - `GET /api/admin/pending/` - Get pending approvals
-- `PUT /api/admin/investments/{id}/approve/` - Approve/reject
-- `PUT /api/admin/payments/{id}/approve/` - Approve/reject
-- `PATCH /api/admin/quantum/config/` - Update shown percentage
-- `POST /api/admin/emails/send/` - Send emails
+- `PUT /api/admin/investments/{id}/approve/` - Approve/reject investment
+- `PUT /api/admin/payments/{id}/approve/` - Approve/reject payment
 
 **Referrals:**
-- `GET /api/referrals/stats/` - Get referral stats and earnings
+- `GET /api/referrals/my-stats/` - Get referral stats and earnings
 
 ## Database Models (PostgreSQL)
 
-**User:** id (UUID), email/phone, password, webhook_url, secret_key, referral_code, subscription_plan
+**User:** id (UUID), email, username, phone, password, referral_code, subscription_plan
 
-**Bot:** id (UUID), user_id, type (custom/grid/martingale/quantum), exchange, config (JSON), status (active/inactive)
+**Bot (4 separate models):** SignalBot, GridBot, MartingaleBot, QuantumAIBot — each has user_id, exchange, config (JSON), status
 
-**TradeLog:** id (UUID), user_id, bot_id, exchange, symbol, amount, buy_sell, timestamp, outcome
+**BotOrder:** id (UUID), user_id, bot_id, exchange, symbol, amount, buy_sell, timestamp, outcome
 
-**Investment:** id (UUID), user_id, amount, tx_hash, screenshot, status (pending/approved), blockchain
+**InvestorDeposit:** id (UUID), user_id, amount, tx_hash, screenshot, status (pending/approved), blockchain
+**InvestorPortfolio:** tracks user investment balance in Quantum AI fund
 
 **Referral:** id (UUID), referrer_id, referred_id, code, bonus_amount, timestamp
 
-**Subscription:** user_id, plan, limits (JSON: bot_count, webhook_alerts), usage (JSON), renewal_date
+**SubscriptionPlan:** Free / Basic / Premium / Enterprise tiers with bot limits and features
 
 ## Implementation Requirements
 
 1. **Async Processing:** All webhooks, emails, bot monitoring, and Quantum AI calculations run asynchronously
 2. **Security:** Encrypt API keys, rate-limit endpoints, validate all inputs, HTTPS only
 3. **Error Handling:** Retry mechanisms, comprehensive logging, user notifications on failures
-4. **Resource Management:** Auto-discard inactive bots after 24h, optimize database queries
+4. **Resource Management:** check_stale_bots with configurable thresholds, optimize database queries
 5. **Email Notifications:** Send on: registration, investment approval, trade failures, balance updates
-6. **Telegram Integration:** For paid users, send trade executions to their Telegram channel (placeholder for Telegram API calls, complete user permission checks)
+6. **Telegram Integration:** For paid users, send trade executions to their Telegram channel (TelegramBotManager + Telegram signal system implemented)
 7. **Testing:** Implement last with 80%+ coverage
 8. **Production Ready:** Docker setup, environment variables, cloud deployment ready
 
 ## CCXT Integration Note
 - Use CCXT library for all exchange interactions
 - Support spot and futures trading
-- **Leave actual trade execution calls as `# TODO: Implement CCXT trade execution`**
-- **Complete ALL other code:** validation, database operations, TradeLog entries, error handling, notifications
+- **CCXT is fully integrated via BotOrderService** — all exchange interactions use real CCXT methods
+- **Complete ALL other code:** validation, database operations, BotOrder entries, error handling, notifications
 
 ## Frontend Requirements
 - React + Vite setup

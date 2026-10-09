@@ -4,7 +4,7 @@ Complements the existing smoke/status tests in tests/bots/test_views.py by
 exercising the model logic that powers the API: SignalBot id/message/credential
 generation and signal accounting, soft-delete semantics, grid/martingale
 one-bot-per-subscription constraints, GridBot.save_state, ReserveFund
-target/cover/audit behavior, and QuantumAIFund/QuantumAIInvestment return
+target/cover/audit behavior, and QuantumAIFund/InvestorPortfolio return
 smoothing.
 """
 
@@ -301,13 +301,11 @@ class TestQuantumFundSmoothing:
         assert quantum_fund.calculate_excess_return(Decimal("1")) == Decimal("-1")
 
 
-class TestQuantumAIInvestment:
+class TestInvestorPortfolio:
     def _investment(self, user, fund, amount, status="active"):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
-        return QuantumAIInvestment.objects.create(
-            user=user, fund=fund, amount=amount, status=status
-        )
+        return InvestorPortfolio.objects.create(user=user, fund=fund, amount=amount, status=status)
 
     def test_share_percentage_zero_when_no_deposits(self, user, quantum_fund_without_deposits):
         inv = self._investment(user, quantum_fund_without_deposits, Decimal("100"))

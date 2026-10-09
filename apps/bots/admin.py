@@ -557,7 +557,7 @@ class ReserveFundAdmin(admin.ModelAdmin):
     is_below_target.short_description = "Reserve Status"
 
 
-class QuantumAIInvestmentAdmin(admin.ModelAdmin):
+class InvestorPortfolioAdmin(admin.ModelAdmin):
     list_display = [
         "user",
         "fund",

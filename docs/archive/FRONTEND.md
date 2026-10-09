@@ -10,10 +10,7 @@
 
 ## Implementation Status
 
-**Not started.** The React + Vite scaffold exists under `/home/arcore/Desktop/demo/torgovo-frontend/` with:
-- Vite + React + TypeScript + Tailwind CSS installed
-- Basic routing structure
-- Empty component files
+**Scaffold exists** in `frontend/` (project root). Existing files: `App.jsx`, `main.jsx`, `AuthContext.jsx`, `ProtectedRoute.jsx`. No page components or build pipeline yet.
 
 ## Pages Required
 
@@ -50,6 +47,7 @@
 - All API responses follow consistent format (see `docs/API.md`)
 - Bot start/stop are async (Celery) — poll status endpoint or use WebSocket
 - WebSocket planned but not implemented — fallback to polling
+- Supported exchanges: Binance, Bybit, OKX, MEXC, Alpaca, Coinbase
 
 ## Component Architecture
 

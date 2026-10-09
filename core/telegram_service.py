@@ -117,6 +117,8 @@ class TelegramService:
     @staticmethod
     def notify_bot_started(user, bot_type, bot_config):
         """Notify user that a bot has started."""
+        if not hasattr(user, "telegram_token") or not hasattr(user, "telegram_chat_id"):
+            return False
         if not user.telegram_token or not user.telegram_chat_id:
             return False
 
@@ -132,6 +134,8 @@ class TelegramService:
     @staticmethod
     def notify_bot_stopped(user, bot_type, reason="User stopped"):
         """Notify user that a bot has stopped."""
+        if not hasattr(user, "telegram_token") or not hasattr(user, "telegram_chat_id"):
+            return False
         if not user.telegram_token or not user.telegram_chat_id:
             return False
 
@@ -142,3 +146,38 @@ class TelegramService:
 """
 
         return TelegramService.send_message(user.telegram_token, user.telegram_chat_id, message)
+
+    @staticmethod
+    def send_channel_message(user, message):
+        """
+        Send a message to the user's Telegram channel (broadcast).
+        Uses channel_token and channel_chat_id fields on the user model.
+
+        Args:
+            user: Django user instance with channel_token and channel_chat_id
+            message: Message text (plain text, no markdown)
+
+        Returns:
+            bool: Success status
+        """
+        if not hasattr(user, "channel_token") or not hasattr(user, "channel_chat_id"):
+            return False
+        if not user.channel_token or not user.channel_chat_id:
+            return False
+
+        try:
+            url = f"https://api.telegram.org/bot{user.channel_token}/sendMessage"
+            payload = {
+                "chat_id": user.channel_chat_id,
+                "text": message,
+            }
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            logger.info(f"Telegram channel message sent to {user.channel_chat_id}")
+            return True
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to send Telegram channel message: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error sending Telegram channel message: {e}")
+            return False

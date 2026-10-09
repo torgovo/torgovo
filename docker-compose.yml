@@ -1,3 +1,7 @@
+# docker-compose.yml — Development configuration
+# .:/app volume mounts for live code reload.
+# Production: use docker-compose.prod.yml instead.
+
 services:
   # PostgreSQL Database
   db:
@@ -38,7 +42,7 @@ services:
     command: >
       sh -c "python manage.py migrate --noinput &&
              python manage.py collectstatic --noinput --clear &&
-             gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000 -w 4 --max-requests 1000 --max-requests-jitter 50"
+             python manage.py runserver 0.0.0.0:8000"
     volumes:
       - .:/app
       - static_volume:/app/staticfiles
@@ -47,7 +51,7 @@ services:
       - "8000"
     env_file: .env
     environment:
-      DJANGO_SETTINGS_MODULE: config.settings.production
+      DJANGO_SETTINGS_MODULE: config.settings.development
       DB_HOST: db
       REDIS_URL: redis://redis:6379/1
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -62,13 +66,13 @@ services:
   # Celery Worker
   celery-worker:
     build: .
-    command: celery -A config.celery worker -l info --concurrency=4
+    command: celery -A config.celery worker -l info --concurrency=2
     volumes:
       - .:/app
       - media_volume:/app/media
     env_file: .env
     environment:
-      DJANGO_SETTINGS_MODULE: config.settings.production
+      DJANGO_SETTINGS_MODULE: config.settings.development
       DB_HOST: db
       REDIS_URL: redis://redis:6379/1
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -86,7 +90,7 @@ services:
       - .:/app
     env_file: .env
     environment:
-      DJANGO_SETTINGS_MODULE: config.settings.production
+      DJANGO_SETTINGS_MODULE: config.settings.development
       DB_HOST: db
       REDIS_URL: redis://redis:6379/1
       CELERY_BROKER_URL: redis://redis:6379/0

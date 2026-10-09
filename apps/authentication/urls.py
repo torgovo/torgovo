@@ -26,6 +26,10 @@ urlpatterns = [
         views.PhoneVerificationConfirmView.as_view(),
         name="verify-phone-confirm",
     ),
+    # Two-factor authentication (TOTP)
+    path("2fa/setup/", views.TwoFASetupView.as_view(), name="two-fa-setup"),
+    path("2fa/confirm/", views.TwoFAConfirmView.as_view(), name="two-fa-confirm"),
+    path("2fa/disable/", views.TwoFADisableView.as_view(), name="two-fa-disable"),
     # Password reset
     path(
         "password-reset/", views.PasswordResetRequestView.as_view(), name="password-reset-request"

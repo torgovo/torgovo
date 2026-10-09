@@ -1,8 +1,19 @@
 """
 Views for Telegram signals subscription management
+
+A9 — canonical plan-endpoint map (two models, three shapes; report §3.6):
+
+| Endpoint | Auth | Model | Shape |
+|---|---|---|---|
+| /api/subscriptions/telegram/plans/ | AllowAny | TelegramSignalPlan | flat ``plans[]``, cached |
+| /api/subscriptions/bot-plans/ | AllowAny | payments.SubscriptionPlan | flat ``plans[]``, cached |
+| /api/subscriptions/plans/ (router) | IsAuthenticated | TelegramSignalPlan | paginated envelope |
+| /api/subscriptions/public/plans/ | AllowAny | TelegramSignalPlan | paginated envelope |
 """
 
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import generics, serializers, status, viewsets
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
@@ -16,6 +27,43 @@ from apps.subscriptions.models import (
     TelegramSubscription,
     TradingSignal,
 )
+from core.exceptions import Conflict
+
+
+def _active_plan_ids(user):
+    """A12: plan ids the user can currently read signals/results for.
+
+    A subscription counts when its status is ``active`` AND it is not
+    past ``end_date`` (null ``end_date`` on an active row = open-ended).
+    Executed as a subquery — callers pass this straight into ``__in``.
+    """
+    today = timezone.localdate()
+    return (
+        TelegramSubscription.objects.filter(user=user, status="active")
+        .filter(Q(end_date__isnull=True) | Q(end_date__gte=today))
+        .values_list("plan_id", flat=True)
+    )
+
+
+def _resolve_plan(model, value):
+    """A5: resolve a plan from either a primary key or a slug.
+
+    ``telegram/subscribe`` historically matched only a numeric/UUID pk and
+    ``bot-subscribe`` only a slug — sending the other form returned 400 and
+    the frontend had to branch per endpoint.  Both lookup forms are accepted
+    here so the payload param stays ``plan_id`` (no FE rename needed) while
+    either value works on either endpoint.  Inactive plans resolve to
+    ``None`` → the endpoints keep their 400 "Invalid plan_id".
+    """
+    value = str(value).strip()
+    if not value:
+        return None
+    for lookup in ({"pk": value}, {"slug": value}):
+        try:
+            return model.objects.get(is_active=True, **lookup)
+        except (model.DoesNotExist, DjangoValidationError, ValueError, TypeError):
+            continue  # pk parse failure / not found → try the other form
+    return None
 
 
 # Simple serializers for the viewsets
@@ -42,7 +90,12 @@ class TelegramSubscriptionSerializer(serializers.ModelSerializer):
         model = TelegramSubscription
         fields = "__all__"
         # SECURITY: status, approval, billing, payment fields and dates are
-        # server-controlled. Plan stays writable so users can pick a plan.
+        # server-controlled. Plan stays writable so users can pick a plan;
+        # payment proof fields stay writable for first submission (enforced
+        # by the write-once gate in TelegramSubscriptionViewSet.update).
+        # A11: channels M2M, billing/payment metadata, admin notes and
+        # soft-delete flags are NOT user-writable — channels are assigned
+        # server-side in TelegramSubscription.approve() per required_plan_id.
         read_only_fields = [
             "id",
             "user",
@@ -58,6 +111,19 @@ class TelegramSubscriptionSerializer(serializers.ModelSerializer):
             "amount_paid",
             "created_at",
             "updated_at",
+            # --- A11: sensitive fields previously user-writable ---
+            "telegram_user_id",
+            "channels",
+            "billing_cycle",
+            "payment_method",
+            "stripe_subscription_id",
+            "auto_renew",
+            "success_rate_tracked",
+            "rejection_reason",
+            "admin_notes",
+            "started_at",
+            "is_deleted",
+            "deleted_at",
         ]
 
 
@@ -109,27 +175,51 @@ class TelegramSubscriptionViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         """Write-once guard for plan and payment proof fields.
 
-        Once a subscription leaves ``pending_payment`` status, no field
-        can be modified — the record is frozen for admin review.  While
-        still in ``pending_payment``, the user may correct their telegram
-        handle (typo fixes) but may NOT change the plan they chose or
-        alter payment proof after initial submission.  These restrictions
-        prevent fraud: a user cannot get approved on a cheap plan and
-        switch post-approval, or alter submitted proof after admin review.
+        A4: the record is editable while still ``pending_payment`` (proof
+        submission) AND while ``pending_approval`` (admin has not decided
+        yet — typos/late proof correction are still legitimate).  Once the
+        admin approves/rejects (or the row is active/expired/cancelled) the
+        record is frozen.  These restrictions prevent fraud: a user cannot
+        get approved on a cheap plan and switch post-approval, or alter
+        submitted proof after admin review.
+
+        A6: plan and proof checks are value-aware, not presence-based:
+        resubmitting the identical value is a no-op and must not 400
+        (frontend idempotent PATCH), while any *change* to a submitted
+        value is rejected.  First proof submission is allowed.
         """
         instance = self.get_object()
 
-        # --- Status gate: only editable during payment submission phase ---
-        if instance.status != "pending_payment":
+        # --- A4: status gate — editable until an admin decision exists ---
+        if instance.status not in ("pending_payment", "pending_approval"):
             raise serializers.ValidationError("This subscription can no longer be edited.")
 
-        # --- Plan is write-once from creation ---
+        # --- A6: plan is write-once BY VALUE (identical value = no-op) ---
         if "plan" in request.data:
-            raise serializers.ValidationError({"plan": "Plan cannot be changed after creation."})
+            incoming = request.data.get("plan")
+            stored_pk = str(instance.plan_id) if instance.plan_id else None
+            stored_slug = instance.plan.slug if instance.plan_id else None
+            if str(incoming) not in {stored_pk, stored_slug}:
+                raise serializers.ValidationError(
+                    {"plan": "Plan cannot be changed after creation."}
+                )
 
-        # --- Payment proof fields are write-once ---
+        # --- A6: payment proof is write-once BY VALUE (first submit OK) ---
         for field in self.PROOF_FIELDS:
-            if field in request.data:
+            if field not in request.data:
+                continue
+            if field == "payment_screenshot":
+                # FileField: we cannot compare bytes, so the rule is
+                # "one screenshot per subscription" — block only once
+                # a file already exists (replacement), allow first upload.
+                if getattr(instance, "payment_screenshot", None):
+                    raise serializers.ValidationError(
+                        {field: f"{field} cannot be changed after initial submission."}
+                    )
+                continue
+            incoming = request.data.get(field)
+            stored = getattr(instance, field, None)
+            if stored and str(incoming) != str(stored):
                 raise serializers.ValidationError(
                     {field: f"{field} cannot be changed after initial submission."}
                 )
@@ -152,22 +242,36 @@ class TelegramChannelViewSet(viewsets.ReadOnlyModelViewSet):
 
 class TradingSignalViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    ViewSet for trading signals
+    ViewSet for trading signals.
+
+    A12: scoped to the caller's active, unexpired subscription plans —
+    a user with no (or a different-plan) subscription sees no signals.
     """
 
     queryset = TradingSignal.objects.filter(is_active=True)
     serializer_class = TradingSignalSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        return TradingSignal.objects.filter(
+            is_active=True, plan_id__in=_active_plan_ids(self.request.user)
+        )
+
 
 class SignalResultViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    ViewSet for signal results
+    ViewSet for signal results.
+
+    A12: scoped through ``signal.plan`` to the caller's active,
+    unexpired subscription plans (same rule as trading signals).
     """
 
     queryset = SignalResult.objects.all()
     serializer_class = SignalResultSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return SignalResult.objects.filter(signal__plan_id__in=_active_plan_ids(self.request.user))
 
 
 # Additional Views
@@ -183,19 +287,29 @@ class PublicPlanListView(generics.ListAPIView):
 
 class MySubscriptionView(APIView):
     """
-    Get current user subscription
+    GET /api/subscriptions/my-subscription/
+    Get current user subscription.
+
+    A8: always 200 — active row first, otherwise the latest own row of any
+    status (pending_payment/pending_approval are now visible), otherwise
+    ``{"subscription": null}`` so the frontend no longer has to treat a 404
+    as "no subscription yet".
     """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        subscription = TelegramSubscription.objects.filter(
-            user=request.user, status="active"
-        ).first()
+        subscription = (
+            TelegramSubscription.objects.filter(user=request.user, status="active")
+            .order_by("-created_at")
+            .first()
+            or TelegramSubscription.objects.filter(user=request.user)
+            .order_by("-created_at")
+            .first()
+        )
         if subscription:
-            serializer = TelegramSubscriptionSerializer(subscription)
-            return Response(serializer.data)
-        return Response({"message": "No active subscription"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(TelegramSubscriptionSerializer(subscription).data)
+        return Response({"subscription": None})
 
 
 class AdminChannelListView(generics.ListAPIView):
@@ -235,7 +349,10 @@ class TelegramPlanFeaturesSerializer(serializers.Serializer):
 class TelegramSignalPlanDetailSerializer(serializers.ModelSerializer):
     """Enhanced serializer for Telegram signal plans"""
 
-    features = TelegramPlanFeaturesSerializer(source="feature_dict", read_only=True)
+    # A10: was ``source="feature_dict"`` (a property that exists only on
+    # payments.SubscriptionPlan) → DRF silently SkipField'd the key; the
+    # intended computation below was dead.  SerializerMethodField wires it.
+    features = serializers.SerializerMethodField()
 
     class Meta:
         model = TelegramSignalPlan
@@ -268,8 +385,8 @@ class TelegramSignalPlanDetailSerializer(serializers.ModelSerializer):
 
 class TelegramPlanListView(APIView):
     """
-    GET /api/telegram/plans/
-    Public endpoint for Telegram signal plans
+    GET /api/subscriptions/telegram/plans/
+    Public endpoint for Telegram signal plans (flat {"plans": [...]} shape)
     """
 
     permission_classes = [AllowAny]
@@ -289,7 +406,7 @@ class TelegramPlanListView(APIView):
 
 class MyTelegramUsageView(APIView):
     """
-    GET /api/telegram/my-usage/
+    GET /api/subscriptions/telegram/my-usage/
     Get user's Telegram subscription usage
     """
 
@@ -326,34 +443,69 @@ class MyTelegramUsageView(APIView):
 
 class TelegramSubscribeView(APIView):
     """
-    POST /api/telegram/subscribe/
+    POST /api/subscriptions/telegram/subscribe/
     Subscribe to Telegram signal plan with payment proof
     """
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        # --- required fields (A14: raise → uniform error envelope) ---
         plan_id = request.data.get("plan_id")
-        telegram_handle = request.data.get("telegram_handle", "").strip()
+        telegram_handle = str(request.data.get("telegram_handle") or "").strip()
 
         if not plan_id or not telegram_handle:
-            return Response(
-                {"error": "plan_id and telegram_handle required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise serializers.ValidationError("plan_id and telegram_handle required")
 
-        try:
-            plan = TelegramSignalPlan.objects.get(id=plan_id, is_active=True)
-        except TelegramSignalPlan.DoesNotExist:
-            return Response({"error": "Invalid plan_id"}, status=status.HTTP_400_BAD_REQUEST)
+        # --- A5: accept UUID/int pk OR slug (same param as bot-subscribe) ---
+        plan = _resolve_plan(TelegramSignalPlan, plan_id)
+        if plan is None:
+            raise serializers.ValidationError("Invalid plan_id")
 
-        # Payment validation
+        # Payment validation (A14: uniform envelope instead of flat {"error"})
         payment_screenshot = request.FILES.get("payment_screenshot")
         payment_tx_hash = request.data.get("payment_transaction_hash", "")
         payment_blockchain = request.data.get("payment_blockchain", "")
 
         if not (payment_screenshot or payment_tx_hash):
-            return Response({"error": "Payment proof required"}, status=status.HTTP_400_BAD_REQUEST)
+            raise serializers.ValidationError("Payment proof required")
+
+        # --- A7: honour the billing cycle instead of hardcoding monthly ---
+        billing_cycle = str(request.data.get("billing_cycle") or "monthly")
+        cycle_prices = {
+            "monthly": plan.price_monthly,
+            "quarterly": plan.price_quarterly,
+            "yearly": plan.price_yearly,
+        }
+        if billing_cycle not in cycle_prices:
+            raise serializers.ValidationError(
+                "billing_cycle must be one of: monthly, quarterly, yearly"
+            )
+
+        # --- A7: duplicate check (mirrors bot-subscribe: 409 + metadata) ---
+        duplicate = (
+            TelegramSubscription.objects.filter(user=request.user, plan=plan)
+            .exclude(status__in=["expired", "cancelled", "rejected"])
+            .first()
+        )
+        if duplicate:
+            raise Conflict(
+                {
+                    "message": ("You already have an active or pending subscription to this plan"),
+                    "subscription_id": str(duplicate.id),
+                    "status": duplicate.status,
+                }
+            )
+
+        # --- A7: plan capacity — max_subscribers counts non-terminal rows ---
+        if plan.max_subscribers is not None:
+            taken = (
+                TelegramSubscription.objects.filter(plan=plan)
+                .exclude(status__in=["expired", "cancelled", "rejected"])
+                .count()
+            )
+            if taken >= plan.max_subscribers:
+                raise Conflict("Plan has reached maximum subscribers")
 
         # Create subscription
         subscription = TelegramSubscription.objects.create(
@@ -364,11 +516,13 @@ class TelegramSubscribeView(APIView):
             payment_screenshot=payment_screenshot,
             payment_transaction_hash=payment_tx_hash,
             payment_blockchain=payment_blockchain,
-            amount_paid=plan.price_monthly,
-            billing_cycle="monthly",
+            amount_paid=cycle_prices[billing_cycle],
+            billing_cycle=billing_cycle,
         )
 
-        cache.delete("telegram_plans_v1")
+        # A15: the subscribe-time cache.delete("telegram_plans_v1") was
+        # removed — subscribing cannot change plan data; invalidation now
+        # lives on post_save/post_delete receivers for both plan models.
 
         return Response(
             {
@@ -399,8 +553,8 @@ class SubscriptionPlanSerializer(serializers.Serializer):
 
 class PlanListView(APIView):
     """
-    GET /api/subscriptions/plans/
-    List all active subscription plans.
+    GET /api/subscriptions/bot-plans/
+    List all active subscription plans (payments.SubscriptionPlan).
     """
 
     permission_classes = [AllowAny]
@@ -420,7 +574,7 @@ class PlanListView(APIView):
 
 class SubscribeView(APIView):
     """
-    POST /api/subscriptions/subscribe/
+    POST /api/subscriptions/bot-subscribe/
     Subscribe to a plan. Admin approval required for activation.
     """
 
@@ -429,14 +583,15 @@ class SubscribeView(APIView):
     def post(self, request):
         from apps.payments.models import BotSubscription, BotSubscriptionPlan, SubscriptionPlan
 
-        plan_slug = request.data.get("plan_id")
-        if not plan_slug:
-            return Response({"error": "plan_id required"}, status=status.HTTP_400_BAD_REQUEST)
+        # --- required field (A14: uniform envelope) ---
+        plan_value = request.data.get("plan_id")
+        if not plan_value:
+            raise serializers.ValidationError("plan_id required")
 
-        try:
-            plan = SubscriptionPlan.objects.get(slug=plan_slug, is_active=True)
-        except SubscriptionPlan.DoesNotExist:
-            return Response({"error": "Invalid plan_id"}, status=status.HTTP_400_BAD_REQUEST)
+        # --- A5: accept slug (historic behaviour) OR numeric pk ---
+        plan = _resolve_plan(SubscriptionPlan, plan_value)
+        if plan is None:
+            raise serializers.ValidationError("Invalid plan_id")
 
         bot_plan, _ = BotSubscriptionPlan.objects.get_or_create(
             name=plan.name,
@@ -460,13 +615,14 @@ class SubscribeView(APIView):
             .first()
         )
         if existing:
-            return Response(
+            # A14: flat {"error": ...} body → uniform envelope; extra keys
+            # (subscription_id/status) ride along in error.details.
+            raise Conflict(
                 {
-                    "error": "You already have an active or pending subscription to this plan",
+                    "message": ("You already have an active or pending subscription to this plan"),
                     "subscription_id": str(existing.id),
                     "status": existing.status,
-                },
-                status=status.HTTP_409_CONFLICT,
+                }
             )
 
         subscription = BotSubscription.objects.create(
@@ -487,7 +643,7 @@ class SubscribeView(APIView):
 
 class MyUsageView(APIView):
     """
-    GET /api/subscriptions/my-usage/
+    GET /api/subscriptions/bot-my-usage/
     Get current user's subscription plan and usage.
     """
 

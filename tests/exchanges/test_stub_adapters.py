@@ -164,6 +164,45 @@ class TestOKXAdapter:
         result = okx_adapter.create_market_order("BTC/USDT", "buy", 1.0)
         assert result["id"] == "okx1"
 
+    def test_create_stop_loss_order_works(self, okx_adapter):
+        okx_adapter._make_request = MagicMock(
+            return_value={"id": "okx-sl1", "symbol": "BTC/USDT", "side": "sell", "status": "open"}
+        )
+        okx_adapter.amount_to_precision = MagicMock(return_value=1.0)
+        okx_adapter.price_to_precision = MagicMock(return_value=48000.0)
+        result = okx_adapter.create_stop_loss_order("BTC/USDT", "sell", 1.0, 48000.0)
+        assert result["id"] == "okx-sl1"
+        args = okx_adapter._make_request.call_args[0]
+        assert args[0] == "create_order"
+        assert args[1] == "BTC/USDT"
+        assert args[2] == "market"
+        assert args[5] is None
+        assert args[6]["triggerPrice"] == 48000.0
+
+    def test_create_stop_loss_with_extra_params(self, okx_adapter):
+        okx_adapter._make_request = MagicMock(return_value={"id": "okx-sl2"})
+        okx_adapter.amount_to_precision = MagicMock(return_value=1.0)
+        okx_adapter.price_to_precision = MagicMock(return_value=48000.0)
+        okx_adapter.create_stop_loss_order(
+            "BTC/USDT", "sell", 1.0, 48000.0, params={"reduceOnly": True}
+        )
+        args = okx_adapter._make_request.call_args[0]
+        assert args[6]["reduceOnly"] is True
+        assert args[6]["triggerPrice"] == 48000.0
+
+    def test_create_take_profit_order_works(self, okx_adapter):
+        okx_adapter._make_request = MagicMock(
+            return_value={"id": "okx-tp1", "symbol": "BTC/USDT", "side": "buy", "status": "open"}
+        )
+        okx_adapter.amount_to_precision = MagicMock(return_value=0.5)
+        okx_adapter.price_to_precision = MagicMock(return_value=52000.0)
+        result = okx_adapter.create_take_profit_order("BTC/USDT", "buy", 0.5, 52000.0)
+        assert result["id"] == "okx-tp1"
+        args = okx_adapter._make_request.call_args[0]
+        assert args[2] == "market"
+        assert args[3] == "buy"
+        assert args[6]["triggerPrice"] == 52000.0
+
 
 # ==============================================================================
 # MEXC TESTS
@@ -275,6 +314,55 @@ class TestMEXCAdapter:
         result = mexc_adapter.create_limit_order("BTC/USDT", "buy", 0.5, 49000.0)
         assert result["id"] == "mexc1"
 
+    def test_create_market_order_works(self, mexc_adapter):
+        mexc_adapter._make_request = MagicMock(
+            return_value={"id": "mexc-m1", "symbol": "BTC/USDT", "side": "buy", "status": "closed"}
+        )
+        mexc_adapter.amount_to_precision = MagicMock(return_value=1.0)
+        result = mexc_adapter.create_market_order("BTC/USDT", "buy", 1.0)
+        assert result["id"] == "mexc-m1"
+
+    def test_create_stop_loss_order_works(self, mexc_adapter):
+        mexc_adapter._make_request = MagicMock(
+            return_value={"id": "mexc-sl1", "symbol": "BTC/USDT", "side": "sell", "status": "open"}
+        )
+        mexc_adapter.amount_to_precision = MagicMock(return_value=1.0)
+        mexc_adapter.price_to_precision = MagicMock(return_value=48000.0)
+        result = mexc_adapter.create_stop_loss_order("BTC/USDT", "sell", 1.0, 48000.0)
+        assert result["id"] == "mexc-sl1"
+        args = mexc_adapter._make_request.call_args[0]
+        assert args[0] == "create_order"
+        assert args[1] == "BTC/USDT"
+        assert args[2] == "STOP_LOSS"
+        assert args[5] is None
+        assert args[6]["stopPrice"] == 48000.0
+        assert args[6]["type"] == "STOP_LOSS"
+
+    def test_create_stop_loss_with_extra_params(self, mexc_adapter):
+        mexc_adapter._make_request = MagicMock(return_value={"id": "mexc-sl2"})
+        mexc_adapter.amount_to_precision = MagicMock(return_value=1.0)
+        mexc_adapter.price_to_precision = MagicMock(return_value=48000.0)
+        mexc_adapter.create_stop_loss_order(
+            "BTC/USDT", "sell", 1.0, 48000.0, params={"reduceOnly": True}
+        )
+        args = mexc_adapter._make_request.call_args[0]
+        assert args[6]["reduceOnly"] is True
+        assert args[6]["stopPrice"] == 48000.0
+
+    def test_create_take_profit_order_works(self, mexc_adapter):
+        mexc_adapter._make_request = MagicMock(
+            return_value={"id": "mexc-tp1", "symbol": "BTC/USDT", "side": "buy", "status": "open"}
+        )
+        mexc_adapter.amount_to_precision = MagicMock(return_value=0.5)
+        mexc_adapter.price_to_precision = MagicMock(return_value=52000.0)
+        result = mexc_adapter.create_take_profit_order("BTC/USDT", "buy", 0.5, 52000.0)
+        assert result["id"] == "mexc-tp1"
+        args = mexc_adapter._make_request.call_args[0]
+        assert args[2] == "TAKE_PROFIT"
+        assert args[3] == "buy"
+        assert args[6]["stopPrice"] == 52000.0
+        assert args[6]["type"] == "TAKE_PROFIT"
+
 
 # ==============================================================================
 # ALPACA TESTS
@@ -378,3 +466,69 @@ class TestAlpacaAdapter:
         assert result["exchange"] == "alpaca"
         assert result["demo_mode"] is False
         assert result["balance"]["total"]["USDT"] == 50000
+
+    def test_create_market_order_works(self, alpaca_adapter):
+        alpaca_adapter._make_request = MagicMock(
+            return_value={
+                "id": "alpaca-m1",
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "status": "closed",
+            }
+        )
+        alpaca_adapter.amount_to_precision = MagicMock(return_value=1.0)
+        result = alpaca_adapter.create_market_order("BTC/USDT", "buy", 1.0)
+        assert result["id"] == "alpaca-m1"
+
+    def test_create_limit_order_works(self, alpaca_adapter):
+        alpaca_adapter._make_request = MagicMock(
+            return_value={"id": "alpaca-l1", "symbol": "BTC/USDT", "side": "buy", "status": "open"}
+        )
+        alpaca_adapter.amount_to_precision = MagicMock(return_value=0.5)
+        alpaca_adapter.price_to_precision = MagicMock(return_value=49000.0)
+        result = alpaca_adapter.create_limit_order("BTC/USDT", "buy", 0.5, 49000.0)
+        assert result["id"] == "alpaca-l1"
+
+    def test_create_stop_loss_order_works(self, alpaca_adapter):
+        alpaca_adapter._make_request = MagicMock(
+            return_value={
+                "id": "alpaca-sl1",
+                "symbol": "BTC/USDT",
+                "side": "sell",
+                "status": "open",
+            }
+        )
+        alpaca_adapter.amount_to_precision = MagicMock(return_value=1.0)
+        alpaca_adapter.price_to_precision = MagicMock(return_value=48000.0)
+        result = alpaca_adapter.create_stop_loss_order("BTC/USDT", "sell", 1.0, 48000.0)
+        assert result["id"] == "alpaca-sl1"
+        args = alpaca_adapter._make_request.call_args[0]
+        assert args[0] == "create_order"
+        assert args[1] == "BTC/USDT"
+        assert args[2] == "market"
+        assert args[5] is None
+        assert args[6]["stopPrice"] == 48000.0
+
+    def test_create_stop_loss_with_extra_params(self, alpaca_adapter):
+        alpaca_adapter._make_request = MagicMock(return_value={"id": "alpaca-sl2"})
+        alpaca_adapter.amount_to_precision = MagicMock(return_value=1.0)
+        alpaca_adapter.price_to_precision = MagicMock(return_value=48000.0)
+        alpaca_adapter.create_stop_loss_order(
+            "BTC/USDT", "sell", 1.0, 48000.0, params={"reduceOnly": True}
+        )
+        args = alpaca_adapter._make_request.call_args[0]
+        assert args[6]["reduceOnly"] is True
+        assert args[6]["stopPrice"] == 48000.0
+
+    def test_create_take_profit_order_works(self, alpaca_adapter):
+        alpaca_adapter._make_request = MagicMock(
+            return_value={"id": "alpaca-tp1", "symbol": "BTC/USDT", "side": "buy", "status": "open"}
+        )
+        alpaca_adapter.amount_to_precision = MagicMock(return_value=0.5)
+        alpaca_adapter.price_to_precision = MagicMock(return_value=52000.0)
+        result = alpaca_adapter.create_take_profit_order("BTC/USDT", "buy", 0.5, 52000.0)
+        assert result["id"] == "alpaca-tp1"
+        args = alpaca_adapter._make_request.call_args[0]
+        assert args[2] == "market"
+        assert args[3] == "buy"
+        assert args[6]["stopPrice"] == 52000.0

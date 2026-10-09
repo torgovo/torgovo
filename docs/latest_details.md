@@ -24,8 +24,8 @@ Subscription-based crypto trading bot platform. Users create bots, connect excha
 | **QuantumAIBot** | Admin trades pooled user funds, distributes proportional P/L | Admin | Yes |
 
 **Quantum AI Flow:**
-1. User deposits USDT → `QuantumDeposit` (pending)
-2. Admin approves → updates `QuantumAIInvestment.amount` + `QuantumAIFund.total_deposits`
+1. User deposits USDT → `InvestorDeposit` (renamed from QuantumAIDeposit, pending)
+2. Admin approves → updates `InvestorPortfolio` (renamed from QuantumAIInvestment) + `QuantumAIFund.total_deposits`
 3. Admin runs `QuantumAIBot` against fund's master API keys
 4. Every 2 weeks: calculate P/L × `shown_percentage` (5-20%, admin-configurable), distribute proportionally
 5. Users see ONLY their balance + changes — NO trade details
@@ -37,8 +37,9 @@ Subscription-based crypto trading bot platform. Users create bots, connect excha
 ```
 apps/bots/           → Bot domain models + API views (user-facing CRUD)
   models.py          → SignalBot, GridBot, MartingaleBot, QuantumAIFund, QuantumAIBot,
-                       QuantumAIInvestment, QuantumDeposit, QuantumWeeklyProfit,
-                       PairConfig, Indicator, Order, TelegramSignal*
+                       InvestorPortfolio (renamed from QuantumAIInvestment),
+                       InvestorDeposit (renamed from QuantumDeposit), QuantumWeeklyProfit,
+                       PairConfig, Indicator, BotOrder (renamed from Order), TelegramSignal*
   views.py           → All bot ViewSets (moved FROM payments)
   serializers.py     → Bot serializers
   urls.py            → Bot API routes
@@ -48,13 +49,12 @@ apps/trading/        → Trading engine (internal, pure Python where possible)
   strategies/        → BaseStrategy, QuantumAI, Grid, Martingale, Signal (pure Python)
   exchanges/         → CCXT adapters: Binance, Bybit, OKX, MEXC, Alpaca (pure Python)
   engines/           → BotEngine, BotExecutor (orchestration)
-  models.py          → Exchange, ExchangeCredentials, TradingPair, ExchangeStatus,
-                       SupportedBlockchain, ExchangeRate, StrategyConfig
+  models.py          → StrategyConfig only (Exchange, TradingPair, etc. live in apps/exchanges/)
   tasks.py           → Celery async tasks
 
 apps/payments/       → Payment-only views (subscriptions, deposits, withdrawals, admin approval)
-apps/exchanges/      → Exchange CRUD (has its own ExchangeCredentials — DUPLICATE, see issues)
-apps/investments/    → Quantum AI investment views + serializers
+apps/exchanges/      → Exchange CRUD + ExchangeCredentials (canonical location)
+apps/investments/    → ExchangeStatus, SupportedBlockchain, ExchangeRate, InvestmentBalance, Order, Position, TechnicalIndicator (Quantum AI deposit display models)
 apps/webhooks/       → Webhook receiver endpoints
 apps/authentication/ → JWT auth, OAuth, OTP
 apps/users/          → User profiles
@@ -155,12 +155,12 @@ oldbybit.py          → Original Bybit bot code — reference for QuantumAI str
 ### ⚠️ Interrupted / NOT Completed
 | Item | Status | Details |
 |------|--------|---------|
-| `apps/trading/serializers.py` still imports `BotConfiguration` | **BROKEN** | Needs removal |
-| `apps/trading/views.py` has `BotBridge` import | **BROKEN** | Stale code |
-| `bot_engine.py` calls non-existent methods | **BROKEN** | Needs `from_config()` with dict |
-| `BotExecutor` rework to accept plain dict | **NOT DONE** | References deleted `TradingBot` |
-| `apps/bots/admin.py` references `CustomBot` | **STALE** | Needs rename |
-| `apps/webhooks/views.py` `CustomBotWebhookView` | **STALE** | Needs rename |
+| `apps/trading/serializers.py` still imports `BotConfiguration` | **RESOLVED** | Import cleaned up |
+| `apps/trading/views.py` has `BotBridge` import | **RESOLVED** | Stale code removed |
+| `bot_engine.py` calls non-existent methods | **RESOLVED** | `from_config()` accepts dict |
+| `BotExecutor` rework to accept plain dict | **RESOLVED** | Done |
+| `apps/bots/admin.py` references `CustomBot` | **RESOLVED** | Uses SignalBot |
+| `apps/webhooks/views.py` `CustomBotWebhookView` | **RESOLVED** | Uses SignalBot |
 
 ---
 
@@ -176,21 +176,21 @@ oldbybit.py          → Original Bybit bot code — reference for QuantumAI str
 5. **Frontend is a skeleton** — Only `App.jsx`, `main.jsx`, and `AuthContext.jsx` exist. No page components, no build pipeline. Platform has no UI for end users.
 
 ### P1 — Critical (Will crash at runtime)
-6. **`apps/trading/serializers.py`** — imports deleted `BotConfiguration` model
-7. **`apps/trading/views.py`** — `BotConfigurationViewSet` references deleted model + `BotBridge` import broken
-8. **`apps/trading/admin.py`** — `BotConfigurationAdmin` references deleted model
-9. **`apps/trading/engines/bot_engine.py`** — calls 2 non-existent methods
-10. **`apps/trading/engines/execution.py`** — `BotExecutor.from_config()` references deleted `TradingBot`/`StrategyConfig`
+6. ~~`apps/trading/serializers.py`~~ — **RESOLVED** (imports cleaned up)
+7. ~~`apps/trading/views.py`~~ — **RESOLVED** (BotBridge removed)
+8. ~~`apps/trading/admin.py`~~ — **RESOLVED** (BotConfigurationAdmin removed)
+9. ~~`apps/trading/engines/bot_engine.py`~~ — **RESOLVED** (accepts dict config)
+10. ~~`apps/trading/engines/execution.py`~~ — **RESOLVED** (BotExecutor reworked)
 
 ### P1 — High Risk
 11. **17 bare `except:` blocks (5 dangerous)** — Catch `KeyboardInterrupt`/`SystemExit`. Change to `except Exception:`.
 12. **No 2FA** — `two_factor_enabled` field exists on model but no 2FA flow. Trading platform with user funds.
-13. **Duplicate `ExchangeCredentials`** — Exists in both `apps/trading/models.py` and `apps/exchanges/models.py`. Pick one canonical location.
+13. ~~Duplicate `ExchangeCredentials`~~ — **RESOLVED** (canonical in `apps/exchanges/`)
 
 ### P2 — Moderate
-14. **`apps/webhooks/views.py`** — references `CustomBot`, needs `SignalBot`
-15. **`apps/bots/admin.py`** — references `CustomBot`, needs `SignalBot`
-16. **OKX/MEXC/Alpaca adapters** — minimal implementations (47, 75, 52 lines), only Binance/Bybit complete
+14. **`apps/webhooks/views.py`** — **RESOLVED** (uses SignalBot)
+15. **`apps/bots/admin.py`** — **RESOLVED** (uses SignalBot)
+16. **OKX/MEXC/Alpaca adapters** — fully implemented via CCXT (not stubs)
 17. **Placeholder data** — `get_exchange_rates()` returns hardcoded prices
 18. **`services/` directory** — references need verification
 19. **No rate limiting on password-reset email sending** — Account enumeration vector

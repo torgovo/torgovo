@@ -3,6 +3,7 @@ Abstract base models for Torgovo Crypto Trading Platform
 """
 
 import uuid
+from functools import lru_cache
 
 from django.conf import settings
 from django.db import models
@@ -22,36 +23,74 @@ class TimeStampedModel(models.Model):
         abstract = True
 
 
+class SoftDeleteQuerySet(models.QuerySet):
+    """QuerySet that soft-deletes instead of SQL DELETE."""
+
+    def delete(self):
+        """Soft-delete all records in this queryset."""
+        return self.update(is_deleted=True, deleted_at=timezone.now())
+
+    def hard_delete(self):
+        """Actually delete records from the database."""
+        return super().delete()
+
+    def active(self):
+        """Filter to non-deleted records."""
+        return self.filter(is_deleted=False)
+
+    def deleted(self):
+        """Filter to soft-deleted records."""
+        return self.filter(is_deleted=True)
+
+
+class SoftDeleteManager(models.Manager):
+    """Manager that defaults to active (non-deleted) records."""
+
+    def get_queryset(self):
+        return SoftDeleteQuerySet(self.model, using=self._db).filter(is_deleted=False)
+
+    def all_with_deleted(self):
+        """Return all records including soft-deleted."""
+        return SoftDeleteQuerySet(self.model, using=self._db)
+
+    def deleted_only(self):
+        """Return only soft-deleted records."""
+        return SoftDeleteQuerySet(self.model, using=self._db).filter(is_deleted=True)
+
+
 class SoftDeleteModel(TimeStampedModel):
     """
     Abstract model with soft delete functionality.
+
+    FIN-2: Fixed to prevent two bugs:
+    1. QuerySet.delete() now soft-deletes instead of SQL DELETE
+    2. post_delete signal is NOT fired on soft delete (was misleading handlers
+       into thinking the record was actually removed)
     """
 
     is_deleted = models.BooleanField(default=False)
     deleted_at = models.DateTimeField(null=True, blank=True)
 
+    objects = SoftDeleteManager()
+
     class Meta:
         abstract = True
 
     def delete(self, using=None, keep_parents=False):
-        """Soft delete the model and fire post_delete signal."""
-        from django.db.models.signals import post_delete
-
+        """Soft delete — sets is_deleted and deleted_at, no signal fired."""
         self.is_deleted = True
         self.deleted_at = timezone.now()
-        self.save()
-        # Fire post_delete signal for cleanup handlers
-        post_delete.send(sender=self.__class__, instance=self)
+        self.save(update_fields=["is_deleted", "deleted_at"])
 
     def hard_delete(self, using=None, keep_parents=False):
-        """Actually delete the model from database."""
+        """Actually delete the record from the database."""
         super().delete(using=using, keep_parents=keep_parents)
 
     def restore(self):
         """Restore a soft-deleted model."""
         self.is_deleted = False
         self.deleted_at = None
-        self.save()
+        self.save(update_fields=["is_deleted", "deleted_at"])
 
 
 class UserActivityLog(SoftDeleteModel):
@@ -127,10 +166,20 @@ class SiteConfig(models.Model):
         return "Site Configuration"
 
     @classmethod
+    @lru_cache(maxsize=1)
     def get(cls):
-        """Get or create the singleton SiteConfig row."""
+        """Get or create the singleton SiteConfig row.
+
+        SCAL-1: Cached via lru_cache to avoid a DB hit on every call.
+        Cache is cleared in save() when the admin updates plan_limits.
+        """
         obj, _ = cls.objects.get_or_create(pk=1, defaults={"plan_limits": {}})
         return obj
+
+    def save(self, *args, **kwargs):
+        """Override save to invalidate the cached singleton."""
+        super().save(*args, **kwargs)
+        SiteConfig.get.cache_clear()
 
     def get_plan_limit(self, plan: str, default: int = 3) -> int:
         """Get bot limit for a plan, with built-in defaults as fallback."""

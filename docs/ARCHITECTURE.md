@@ -38,11 +38,11 @@
 
 | App | Purpose | Key Models |
 |-----|---------|------------|
-| **bots** | Bot CRUD, indicators, orders | SignalBot, GridBot, MartingaleBot, QuantumAIBot, QuantumAIFund, Order, Indicator, PairConfig |
+| **bots** | Bot CRUD, indicators, orders | SignalBot, GridBot, MartingaleBot, QuantumAIBot, QuantumAIFund, BotOrder, Indicator, PairConfig, InvestorPortfolio |
 | **trading** | Trading engine, strategies, exchange adapters | StrategyConfig (imports Exchange, TradingPair from exchanges) |
 | **exchanges** | Canonical exchange data + credentials | Exchange, TradingPair, ExchangeCredentials |
-| **investments** | Quantum AI deposit display models | SupportedBlockchain, ExchangeRate, ExchangeStatus |
-| **payments** | Subscriptions, deposits, withdrawals, admin approval | PaymentTransaction, Subscription, Deposit, WithdrawalRequest |
+| **investments** | Quantum AI deposit display models | SupportedBlockchain, ExchangeRate, ExchangeStatus, InvestmentBalance, Order, Position, TechnicalIndicator, InvestorDeposit |
+| **payments** | Subscriptions, deposits, withdrawals, admin approval | PaymentTransaction, SubscriptionPlan, InvestorDeposit, WithdrawalRequest, BlockchainAddress |
 | **subscriptions** | Telegram signal subscription management | TelegramSignalPlan, TelegramSubscription |
 | **authentication** | JWT auth, OAuth, OTP, profile | (view-based, no custom models) |
 | **users** | User profiles, admin dashboards | CustomUser, UserProfile, UserActivityLog |
@@ -101,15 +101,15 @@ BotExecutorService.start_bot()  (services/bot_executor.py)
 BaseAdapter  (apps/trading/exchanges/base_adapter.py)
 +-- BinanceAdapter     (fully implemented)
 +-- BybitAdapter       (fully implemented)
-+-- OKXAdapter         (minimal stub)
-+-- MEXCAdapter        (stub, uses MockAdapter for testing)
-+-- AlpacaAdapter      (stub)
-+-- CoinbaseAdapter    (stub, uses MockAdapter for testing)
++-- OKXAdapter         (fully implemented)
++-- MEXCAdapter        (fully implemented)
++-- AlpacaAdapter      (fully implemented)
++-- CoinbaseAdapter    (fully implemented)
 ```
 
 Adapters wrap raw CCXT calls. `BotEngine` calls `self.exchange.create_order()` directly.
 
-**MockAdapter:** Exchanges without sandbox/testnet use `MockAdapter` for development.
+**MockAdapter:** Used only for unit tests, not for live or development trading.
 
 ## Strategy Pattern
 
@@ -118,7 +118,7 @@ Adapters wrap raw CCXT calls. `BotEngine` calls `self.exchange.create_order()` d
 | `SignalStrategy` | Execute single trade from webhook signal |
 | `GridStrategy` | Place buy/sell orders at grid levels |
 | `MartingaleStrategy` | Double position on losses, reset on win |
-| `QuantumAIStrategy` | Admin-managed pool trading (redundant — logic lives in bot_engine.py) |
+| `QuantumAIStrategy` | Admin-managed pool trading |
 
 ## Celery Tasks
 
@@ -132,6 +132,8 @@ Adapters wrap raw CCXT calls. `BotEngine` calls `self.exchange.create_order()` d
 - Heartbeat check — every 60s
 - Signal reset — every 24h
 - Profit accrual/distribution (Quantum AI) — every 2 weeks
+- Process fund payouts — periodic
+- Cleanup old audit logs — periodic
 
 ## Key Design Decisions
 

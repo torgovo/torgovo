@@ -15,7 +15,7 @@ router.register(r"grid-bots", views.GridBotViewSet, basename="gridbot")
 router.register(r"martingale-bots", views.MartingaleBotViewSet, basename="martingalebot")
 router.register(r"quantum-funds", views.QuantumAIFundViewSet, basename="quantumfund")
 router.register(
-    r"quantum-investments", views.QuantumAIInvestmentViewSet, basename="quantuminvestment"
+    r"quantum-investments", views.InvestorPortfolioViewSet, basename="quantuminvestment"
 )
 router.register(r"pair-configs", views.PairConfigViewSet, basename="pairconfig")
 router.register(r"orders", views.OrderViewSet, basename="order")

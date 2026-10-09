@@ -16,22 +16,22 @@ from apps.bots.models import (
     BotOrder,
     GridBot,
     Indicator,
+    InvestorPortfolio,
     MartingaleBot,
     PairConfig,
     QuantumAIFund,
-    QuantumAIInvestment,
     SignalBot,
 )
 from apps.bots.serializers import (
     GridBotCreateSerializer,
     GridBotSerializer,
     IndicatorSerializer,
+    InvestorPortfolioSerializer,
     MartingaleBotCreateSerializer,
     MartingaleBotSerializer,
     OrderSerializer,
     PairConfigSerializer,
     QuantumAIFundSerializer,
-    QuantumAIInvestmentSerializer,
     SignalBotCreateSerializer,
     SignalBotSerializer,
 )
@@ -39,21 +39,6 @@ from apps.payments.models import BotSubscription
 from core.pagination import StandardResultsSetPagination
 
 logger = logging.getLogger("bots")
-
-
-def _resolve_webhook_user(request):
-    """Resolve user from X-Webhook-Token header. Returns user or None."""
-    from django.contrib.auth import get_user_model
-    from django.core.exceptions import ValidationError
-
-    User = get_user_model()
-    token = request.headers.get("X-Webhook-Token") or request.POST.get("webhook_token")
-    if not token:
-        return None
-    try:
-        return User.objects.get(webhook_token=token)
-    except (User.DoesNotExist, ValidationError):
-        return None
 
 
 def get_or_create_engine(user, pair_config, exchange_name):
@@ -323,7 +308,7 @@ class QuantumAIFundViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = QuantumAIFundSerializer
 
 
-class QuantumAIInvestmentViewSet(viewsets.ModelViewSet):
+class InvestorPortfolioViewSet(viewsets.ModelViewSet):
     """ViewSet for user's Quantum AI investments"""
 
     permission_classes = [IsAuthenticated]
@@ -331,10 +316,10 @@ class QuantumAIInvestmentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         if self.request.user.is_staff:
-            return QuantumAIInvestment.objects.all()
-        return QuantumAIInvestment.objects.filter(user=self.request.user)
+            return InvestorPortfolio.objects.all()
+        return InvestorPortfolio.objects.filter(user=self.request.user)
 
-    serializer_class = QuantumAIInvestmentSerializer
+    serializer_class = InvestorPortfolioSerializer
 
     def perform_create(self, serializer):
         subscription = BotSubscription.objects.filter(

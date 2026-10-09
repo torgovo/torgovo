@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from apps.trading.engines.bot_engine import BotEngine
+from core.telegram_service import TelegramService
 
 BASE_CONFIG = {
     "bot_name": "test_bot",
@@ -409,6 +410,34 @@ class TestStopBot:
         assert bot_engine._stop_event.is_set()
         assert bot_engine.grid_monitor.monitoring_threads == []
 
+    def test_stop_bot_sends_telegram_notification(self, bot_engine, monkeypatch):
+        """stop_bot must notify the owner via Telegram without crashing."""
+        bot_engine.grid_monitor.monitoring_threads = []
+        sent = []
+
+        def _fake_notify(user, bot_type, reason):
+            sent.append((user.id, bot_type, reason))
+            return True
+
+        monkeypatch.setattr(TelegramService, "notify_bot_stopped", _fake_notify)
+        monkeypatch.setattr(
+            "django.contrib.auth.get_user_model",
+            lambda: type(
+                "FakeUser",
+                (),
+                {
+                    "objects": type(
+                        "FakeMgr", (), {"get": lambda self, id: type("U", (), {"id": id})()}
+                    )()
+                },
+            )(),
+        )
+
+        bot_engine.config["user_id"] = "42"
+        bot_engine.stop_bot()
+
+        assert sent == [("42", "quantum_ai", "Bot stopped")]
+
     def test_wait_for_threads_joins_alive_threads(self, bot_engine):
         mock_thread = MagicMock()
         mock_thread.is_alive.side_effect = [True, False]
@@ -430,6 +459,92 @@ class TestStopBot:
 
         mock_logger.warning.assert_called_once()
         assert "did not stop gracefully" in mock_logger.warning.call_args[0][0]
+
+
+class TestRemoteStopCallback:
+    """Phase 6a (CHG-6a-7/8) — Redis-driven teardown from inside a monitor thread."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_engines(self):
+        from apps.trading.engines import execution
+
+        execution._running_engines.clear()
+        yield
+        execution._running_engines.clear()
+
+    def test_grid_monitor_wired_to_callback(self, bot_engine):
+        """The monitor must be constructed with this engine's stop callback."""
+        assert bot_engine.grid_monitor._stop_cb == bot_engine._on_remote_stop
+
+    def test_remote_stop_tears_down_and_cleans_registry(self, bot_engine):
+        from apps.trading.engines import execution
+
+        bot_engine.config["bot_id"] = "b-42"
+        bot_engine.monitoring = True
+        bot_engine.bot_running = True
+        execution._running_engines["b-42"] = bot_engine
+
+        bot_engine._on_remote_stop()
+
+        assert bot_engine.monitoring is False
+        assert bot_engine.bot_running is False
+        assert bot_engine._stop_event.is_set()
+        assert "b-42" not in execution._running_engines
+        assert not execution._is_bot_running("b-42")
+
+    def test_remote_stop_never_joins_threads(self, bot_engine):
+        """Called from inside a monitor thread — joining would deadlock."""
+        bot_engine.config["bot_id"] = "b-42"
+        mock_thread = MagicMock()
+        mock_thread.is_alive.return_value = True
+        bot_engine.grid_monitor.monitoring_threads = [mock_thread]
+
+        def _boom():
+            raise AssertionError("remote stop must not join threads")
+
+        bot_engine._wait_for_threads = _boom
+        bot_engine._on_remote_stop()
+
+        mock_thread.join.assert_not_called()
+        # Threads stay registered — the poll that fired us already stopped them.
+        assert bot_engine.grid_monitor.monitoring_threads == [mock_thread]
+
+    def test_notify_stopped_is_internally_guarded(self, bot_engine):
+        """It runs inside a monitor thread — its own errors must be swallowed."""
+        bot_engine.config["user_id"] = "999999"  # no such user -> DoesNotExist
+
+        bot_engine._notify_stopped()  # must not raise
+
+    def test_remote_stop_propagates_notify_failure_only_to_the_poll(self, bot_engine):
+        """Even a stubbed-out raise is contained by the caller (_check_remote_stop)."""
+        from apps.trading.engines.grid_monitor import GridPositionMonitor
+
+        bot_engine.config["bot_id"] = "b-42"
+        bot_engine._notify_stopped = MagicMock(side_effect=RuntimeError("boom"))
+
+        monitor = GridPositionMonitor.__new__(GridPositionMonitor)
+        monitor.monitoring = True
+        monitor.bot_running = True
+        monitor.bot_config = {"bot_id": "b-42"}
+        monitor._stop_event = MagicMock()
+        monitor._stop_cb = bot_engine._on_remote_stop
+
+        with patch("apps.trading.engines.execution.stop_requested", return_value=True):
+            assert monitor._check_remote_stop() is True  # did not raise
+
+        assert bot_engine.monitoring is False
+
+    def test_remote_stop_without_bot_id(self, bot_engine):
+        from apps.trading.engines import execution
+
+        execution._running_engines["orphan"] = bot_engine
+        bot_engine.monitoring = True
+
+        bot_engine._on_remote_stop()
+
+        assert bot_engine.monitoring is False
+        # No bot_id -> no registry lookup, so the orphan entry survives.
+        assert "orphan" in execution._running_engines
 
 
 class TestStartBot:
@@ -468,8 +583,13 @@ class TestStartBot:
         assert bot_engine.current_side == "Buy"
         assert bot_engine.reason == "EMA + RSI BUY LONG (CASE1)"
         bot_engine.calculated_grid_orders.assert_called_once()
+        # Phase 1 (persistence): entry orders are marked live + carry the reason
         bot_engine.save_order.assert_called_once_with(
-            "BUY", "EMA + RSI BUY LONG (CASE1)", bot_engine.calculated_grid_orders.return_value
+            "BUY",
+            "EMA + RSI BUY LONG (CASE1)",
+            bot_engine.calculated_grid_orders.return_value,
+            reason="EMA + RSI BUY LONG (CASE1)",
+            status="open",
         )
 
     def test_start_bot_buy_case3_bb_rsi(self, bot_engine):
@@ -1099,3 +1219,428 @@ class TestBotEngineConfigHandling:
             assert "api_key" not in engine.config
             assert "secret_key" not in engine.config
             assert "passphrase" not in engine.config
+
+
+class TestSendSignalNotification:
+    """Tests for BotEngine._send_signal_notification."""
+
+    @pytest.fixture
+    def engine_with_user(self, bot_engine):
+        """Engine with a mock user that has telegram config."""
+        bot_engine.config["user_id"] = 1
+        return bot_engine
+
+    @pytest.fixture
+    def mock_user(self):
+        """A mock user with telegram fields."""
+        user = MagicMock()
+        user.telegram_token = "123456:ABC-DEF"
+        user.telegram_chat_id = "-100123456789"
+        return user
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_entry_buy_sends_correct_message(
+        self, mock_get_user, mock_ts, engine_with_user, mock_user
+    ):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_signal_notification("entry", "EMA crossover", "buy", 50000.0)
+
+        mock_ts.send_message.assert_called_once()
+        args = mock_ts.send_message.call_args[0]
+        assert args[0] == "123456:ABC-DEF"
+        assert args[1] == "-100123456789"
+        msg = args[2]
+        assert "🟢" in msg
+        assert "SIGNAL" in msg
+        assert "buy" in msg.lower()
+        assert "50000" in msg
+        assert "EMA crossover" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_entry_sell_uses_red_emoji(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_signal_notification("entry", "RSI overbought", "sell", 51000.0)
+
+        msg = mock_ts.send_message.call_args[0][2]
+        assert "🔴" in msg
+        assert "SIGNAL" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_exit_tp_event(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_signal_notification("exit_tp", "Target reached", "sell", 55000.0)
+
+        msg = mock_ts.send_message.call_args[0][2]
+        assert "💰" in msg
+        assert "TP HIT" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_exit_sl_event(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_signal_notification("exit_sl", "Stop triggered", "buy", 45000.0)
+
+        msg = mock_ts.send_message.call_args[0][2]
+        assert "🛑" in msg
+        assert "SL HIT" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_close_event(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_signal_notification("close", "Manual close", "sell", 48000.0)
+
+        msg = mock_ts.send_message.call_args[0][2]
+        assert "⏹️" in msg
+        assert "POSITION CLOSED" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_unknown_event_type_uses_fallback(
+        self, mock_get_user, mock_ts, engine_with_user, mock_user
+    ):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_signal_notification("unknown_event", "reason", "buy", 100.0)
+
+        msg = mock_ts.send_message.call_args[0][2]
+        assert "📊" in msg
+        assert "UNKNOWN_EVENT" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_details_included_when_provided(
+        self, mock_get_user, mock_ts, engine_with_user, mock_user
+    ):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_signal_notification(
+            "entry", "reason", "buy", 50000.0, details="Extra info here"
+        )
+
+        msg = mock_ts.send_message.call_args[0][2]
+        assert "Extra info here" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_no_details_omits_details_line(
+        self, mock_get_user, mock_ts, engine_with_user, mock_user
+    ):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_signal_notification("entry", "reason", "buy", 50000.0)
+
+        msg = mock_ts.send_message.call_args[0][2]
+        assert "Details:" not in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_no_user_id_silently_returns(self, mock_get_user, mock_ts, bot_engine):
+        bot_engine.config.pop("user_id", None)
+
+        bot_engine._send_signal_notification("entry", "reason", "buy", 50000.0)
+
+        mock_ts.send_message.assert_not_called()
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_no_telegram_token_silently_returns(self, mock_get_user, mock_ts, engine_with_user):
+        user = MagicMock()
+        user.telegram_token = ""
+        user.telegram_chat_id = "-100123"
+        mock_get_user.return_value.objects.get.return_value = user
+
+        engine_with_user._send_signal_notification("entry", "reason", "buy", 50000.0)
+
+        mock_ts.send_message.assert_not_called()
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_no_telegram_chat_id_silently_returns(self, mock_get_user, mock_ts, engine_with_user):
+        user = MagicMock()
+        user.telegram_token = "123:ABC"
+        user.telegram_chat_id = ""
+        mock_get_user.return_value.objects.get.return_value = user
+
+        engine_with_user._send_signal_notification("entry", "reason", "buy", 50000.0)
+
+        mock_ts.send_message.assert_not_called()
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_user_not_found_silently_returns(self, mock_get_user, mock_ts, engine_with_user):
+        mock_get_user.return_value.objects.get.side_effect = Exception(
+            "User matching query does not exist"
+        )
+
+        engine_with_user._send_signal_notification("entry", "reason", "buy", 50000.0)
+
+        mock_ts.send_message.assert_not_called()
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_send_message_failure_does_not_crash(
+        self, mock_get_user, mock_ts, engine_with_user, mock_user
+    ):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+        mock_ts.send_message.side_effect = Exception("Telegram API down")
+
+        # Should not raise
+        engine_with_user._send_signal_notification("entry", "reason", "buy", 50000.0)
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_message_includes_symbol_and_exchange(
+        self, mock_get_user, mock_ts, engine_with_user, mock_user
+    ):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_signal_notification("entry", "reason", "buy", 50000.0)
+
+        msg = mock_ts.send_message.call_args[0][2]
+        assert "BTC/USDT:USDT" in msg
+        assert "bybit" in msg.lower()
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_message_includes_indicators(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_signal_notification("entry", "reason", "buy", 50000.0)
+
+        msg = mock_ts.send_message.call_args[0][2]
+        assert "Indicators:" in msg
+        assert "EMA:" in msg
+        assert "RSI:" in msg
+
+
+class TestSendChannelNotification:
+    """Tests for BotEngine._send_channel_notification."""
+
+    @pytest.fixture
+    def engine_with_user(self, bot_engine):
+        """Engine with a mock user that has channel config."""
+        bot_engine.config["user_id"] = 1
+        return bot_engine
+
+    @pytest.fixture
+    def mock_user(self):
+        """A mock user with channel fields."""
+        user = MagicMock()
+        user.channel_token = "999888:XYZ-CHANNEL"
+        user.channel_chat_id = "-100999888777"
+        return user
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_entry_sends_channel_message(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_channel_notification("entry", "Buy", 50000.0)
+
+        mock_ts.send_channel_message.assert_called_once()
+        args = mock_ts.send_channel_message.call_args[0]
+        assert args[0] == mock_user
+        msg = args[1]
+        assert "OPEN" in msg
+        assert "BUY" in msg
+        assert "50000" in msg
+        assert "BTC/USDT:USDT" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_exit_tp_sends_correct_label(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_channel_notification("exit_tp", "Sell", 55000.0)
+
+        msg = mock_ts.send_channel_message.call_args[0][1]
+        assert "TP HIT" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_exit_sl_sends_correct_label(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_channel_notification("exit_sl", "Buy", 45000.0)
+
+        msg = mock_ts.send_channel_message.call_args[0][1]
+        assert "SL HIT" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_close_sends_correct_label(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_channel_notification("close", "Sell", 48000.0)
+
+        msg = mock_ts.send_channel_message.call_args[0][1]
+        assert "CLOSE" in msg
+        assert "SELL" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_unknown_event_uses_upper(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_channel_notification("custom_event", "Buy", 100.0)
+
+        msg = mock_ts.send_channel_message.call_args[0][1]
+        assert "CUSTOM_EVENT" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_message_includes_exchange(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_channel_notification("entry", "Buy", 50000.0)
+
+        msg = mock_ts.send_channel_message.call_args[0][1]
+        assert "bybit" in msg.lower()
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_message_includes_price(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_channel_notification("entry", "Buy", 50000.0)
+
+        msg = mock_ts.send_channel_message.call_args[0][1]
+        assert "50000" in msg
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_no_user_id_silently_returns(self, mock_get_user, mock_ts, bot_engine):
+        bot_engine.config.pop("user_id", None)
+
+        bot_engine._send_channel_notification("entry", "Buy", 50000.0)
+
+        mock_ts.send_channel_message.assert_not_called()
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_no_channel_token_silently_returns(self, mock_get_user, mock_ts, engine_with_user):
+        user = MagicMock()
+        user.channel_token = ""
+        user.channel_chat_id = "-100999888"
+        mock_get_user.return_value.objects.get.return_value = user
+
+        engine_with_user._send_channel_notification("entry", "Buy", 50000.0)
+
+        mock_ts.send_channel_message.assert_not_called()
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_no_channel_chat_id_silently_returns(self, mock_get_user, mock_ts, engine_with_user):
+        user = MagicMock()
+        user.channel_token = "999:ABC"
+        user.channel_chat_id = ""
+        mock_get_user.return_value.objects.get.return_value = user
+
+        engine_with_user._send_channel_notification("entry", "Buy", 50000.0)
+
+        mock_ts.send_channel_message.assert_not_called()
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_user_not_found_silently_returns(self, mock_get_user, mock_ts, engine_with_user):
+        mock_get_user.return_value.objects.get.side_effect = Exception(
+            "User matching query does not exist"
+        )
+
+        engine_with_user._send_channel_notification("entry", "Buy", 50000.0)
+
+        mock_ts.send_channel_message.assert_not_called()
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_send_failure_does_not_crash(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+        mock_ts.send_channel_message.side_effect = Exception("Telegram API down")
+
+        # Should not raise
+        engine_with_user._send_channel_notification("entry", "Buy", 50000.0)
+
+    @patch("apps.trading.engines.bot_engine.TelegramService")
+    @patch("django.contrib.auth.get_user_model")
+    def test_message_includes_timestamp(self, mock_get_user, mock_ts, engine_with_user, mock_user):
+        mock_get_user.return_value.objects.get.return_value = mock_user
+
+        engine_with_user._send_channel_notification("entry", "Buy", 50000.0)
+
+        msg = mock_ts.send_channel_message.call_args[0][1]
+        assert "GMT+5" in msg
+
+
+class TestSaveOrderTradeIntegrity:
+    """Phase 1 (persistence): BotEngine must forward trade-integrity kwargs."""
+
+    def test_save_order_forwards_reason_status_pnl_price(self, bot_engine):
+        bot_engine.order_service.save_order = MagicMock(return_value=MagicMock())
+        bot_engine.save_order(
+            "Buy",
+            "entry",
+            {"order": "t"},
+            reason="EMA + RSI CASE1",
+            status="open",
+            pnl=None,
+            price=49900.5,
+        )
+        kwargs = bot_engine.order_service.save_order.call_args.kwargs
+        assert kwargs["reason"] == "EMA + RSI CASE1"
+        assert kwargs["status"] == "open"
+        assert kwargs["pnl"] is None
+        assert kwargs["price"] == 49900.5
+        assert kwargs["indicators"] is not None
+
+    def test_save_order_defaults_stay_backward_compatible(self, bot_engine):
+        """Legacy positional callers (details only) keep working unchanged."""
+        bot_engine.order_service.save_order = MagicMock(return_value=MagicMock())
+        bot_engine.save_order("Buy", "TEST ENTRY")
+        kwargs = bot_engine.order_service.save_order.call_args.kwargs
+        assert kwargs["reason"] is None
+        assert kwargs["status"] is None  # service default => "closed"
+        assert kwargs["pnl"] is None
+        assert kwargs["price"] is None
+
+    def test_close_open_order_marks_closed_with_realized_pnl(self, bot_engine):
+        bot_engine.executor.adapter.fetch_position = MagicMock(
+            return_value={
+                "contracts": 0.002,
+                "unrealized_pnl": 10.0,
+                "side": "short",
+                "symbol": "BTC/USDT:USDT",
+            }
+        )
+        bot_engine.executor.adapter.create_market_order = MagicMock(
+            return_value={"id": "close1", "status": "closed"}
+        )
+
+        with patch.object(bot_engine, "save_order") as mock_save:
+            result = bot_engine.close_open_order("Test close")
+
+        assert result is not None
+        mock_save.assert_called_once()
+        args, kwargs = mock_save.call_args
+        # close_position returns the position side ("short"/"long") as the
+        # record side — pre-existing behaviour, preserved on purpose
+        assert args[0] == "short"
+        assert args[1] == "Test close"
+        assert kwargs["status"] == "closed"
+        assert kwargs["pnl"] == 10.0
+
+    def test_close_all_orders_reuses_closed_exit_path(self, bot_engine):
+        """close_all_orders must not write its own unclosed record."""
+        bot_engine.reset_trading_state = MagicMock()
+        bot_engine.order_service.cancel_all_orders = MagicMock()
+        bot_engine.close_open_order = MagicMock(return_value={"id": "x"})
+        bot_engine.close_all_orders("flatten")
+        bot_engine.close_open_order.assert_called_once_with("flatten")

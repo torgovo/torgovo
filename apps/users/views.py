@@ -1,5 +1,7 @@
 """
-Admin-only views for user management
+Views for user management.
+User-facing account endpoints (deactivation / GDPR data export) plus
+admin-only user management views.
 """
 
 import logging
@@ -14,18 +16,36 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from apps.bots.models import BotOrder, GridBot, MartingaleBot, QuantumAIBot
-from apps.bots.models import SignalBot as WebhookAlert
+from apps.bots.models import (
+    BotOrder,
+    GridBot,
+    InvestorPortfolio,
+    MartingaleBot,
+    PairConfig,
+    QuantumAIBot,
+    QuantumDeposit,
+    QuantumWeeklyProfit,
+    SignalBot,
+)
+from apps.exchanges.models import ExchangeCredentials
 from apps.investments.models import Order as InvestmentOrder
-from apps.payments.models import BlockchainAddress
-from apps.payments.models import QuantumAIDeposit as Deposit
-from apps.payments.models import WithdrawalRequest
+from apps.payments.models import BlockchainAddress, BotSubscription
+from apps.payments.models import InvestorDeposit as Deposit
+from apps.payments.models import PaymentTransaction, WithdrawalRequest
+from apps.referrals.models import Referral
+from apps.subscriptions.models import TelegramSubscription
+from apps.users.models import UserBalance
+from core.models import AuditLog, UserActivityLog
 from core.pagination import StandardResultsSetPagination
 from core.permissions import IsAdminUser
+from core.utils import get_client_ip
 
 from .admin_serializers import UserAdminDetailSerializer, UserAdminSerializer
+from .serializers import DeactivateAccountSerializer
 
 logger = logging.getLogger("apps")
 
@@ -101,13 +121,13 @@ def admin_dashboard_stats(request):
             }
 
         # Bot statistics
-        total_webhooks = WebhookAlert.objects.count()
+        total_webhooks = SignalBot.objects.count()
         total_grid_bots = GridBot.objects.count()
         total_martingale_bots = MartingaleBot.objects.count()
         total_quantum_bots = QuantumAIBot.objects.count()
 
         running_bots = (
-            WebhookAlert.objects.filter(is_active=True).count()
+            SignalBot.objects.filter(is_active=True).count()
             + GridBot.objects.filter(is_running=True).count()
             + MartingaleBot.objects.filter(is_running=True).count()
             + QuantumAIBot.objects.filter(is_running=True).count()
@@ -127,7 +147,7 @@ def admin_dashboard_stats(request):
 
         # Exchange distribution
         exchange_stats = {}
-        for webhook in WebhookAlert.objects.values("exchange_name").annotate(count=Count("id")):
+        for webhook in SignalBot.objects.values("exchange_name").annotate(count=Count("id")):
             exchange_stats[webhook["exchange_name"]] = webhook["count"]
 
         return Response(
@@ -219,8 +239,8 @@ def admin_bots_overview(request):
     try:
         # Bot counts by type and status
         webhook_stats = {
-            "total": WebhookAlert.objects.count(),
-            "active": WebhookAlert.objects.filter(is_active=True).count(),
+            "total": SignalBot.objects.count(),
+            "active": SignalBot.objects.filter(is_active=True).count(),
             "running": 0,  # Webhook alerts don't have running state
             "exchanges": {},
         }
@@ -258,7 +278,7 @@ def admin_bots_overview(request):
 
         webhook_by_exchange = {
             item["exchange_name"]: item["count"]
-            for item in WebhookAlert.objects.values("exchange_name")
+            for item in SignalBot.objects.values("exchange_name")
             .annotate(count=Count("id"))
             .filter(exchange_name__in=exchanges)
         }
@@ -492,3 +512,189 @@ def admin_process_withdrawals(request):
             {"error": f"Failed to process withdrawals: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
+
+
+# ---------------------------------------------------------------------------
+# User-facing account endpoints (deactivation / GDPR data export)
+# ---------------------------------------------------------------------------
+
+
+def _mask_credential(value):
+    """Mask a secret, keeping only the first/last 4 chars for identification."""
+    if not value:
+        return None
+    if len(value) <= 8:
+        return "****"
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def _log_activity(user, request, action, description, status_code):
+    """Write an audit trail entry for a user-facing account action."""
+    ip = get_client_ip(request)
+    user_agent = request.META.get("HTTP_USER_AGENT", "")
+    UserActivityLog.objects.create(
+        user=user,
+        action=action,
+        description=description,
+        ip_address=ip,
+        user_agent=user_agent,
+        endpoint=request.path,
+        method=request.method,
+        status_code=status_code,
+    )
+
+
+class DeactivateAccountView(APIView):
+    """Let a user permanently deactivate their own account (GDPR Art. 17 right to erasure).
+
+    Deactivation keeps the account row (so duplicate signups stay blocked and
+    financial records keep referential integrity) but disables login and
+    revokes every outstanding refresh token. Only the account owner can call it,
+    and they must re-authenticate with their current password.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+
+        if not user.is_active:
+            return Response(
+                {"detail": "Account is already deactivated."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = DeactivateAccountSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+
+        # Disable the account — this blocks login (authenticate checks is_active).
+        user.is_active = False
+        user.save(update_fields=["is_active", "updated_at"])
+
+        # Revoke every outstanding refresh token so no session can continue.
+        from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
+
+        tokens = list(OutstandingToken.objects.filter(user=user))
+        from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+
+        for token in tokens:
+            BlacklistedToken.objects.get_or_create(token=token)
+        revoked = len(tokens)
+
+        # Audit trail for both the security log and the user activity feed.
+        ip = get_client_ip(request)
+        user_agent = request.META.get("HTTP_USER_AGENT", "")
+        AuditLog.objects.create(
+            user=user,
+            action="update",
+            resource_type="user_account",
+            resource_id=str(user.pk),
+            old_values={"is_active": True},
+            new_values={"is_active": False},
+            description="User deactivated their own account (GDPR erasure request)",
+            ip_address=ip,
+            user_agent=user_agent,
+        )
+        _log_activity(
+            user,
+            request,
+            "account_deactivated",
+            "User deactivated their own account",
+            status.HTTP_200_OK,
+        )
+
+        return Response(
+            {
+                "detail": "Account deactivated. You will not be able to log in again. "
+                "Contact support to reactivate.",
+                "sessions_revoked": revoked,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class UserDataExportView(APIView):
+    """Export all of a user's personal data as JSON (GDPR Art. 15 access right).
+
+    Every model owned by the user is included. Exchange API credentials are
+    masked (they are encrypted at rest and are never needed to be shown in
+    plaintext); everything else is the user's own data returned as-is.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        # Soft-delete-aware querysets: only live rows are exported.
+        def live(qs):
+            return qs.filter(is_deleted=False)
+
+        credentials = []
+        for cred in ExchangeCredentials.objects.filter(user=user, is_deleted=False):
+            decrypted = cred.get_decrypted_credentials()
+            credentials.append(
+                {
+                    "id": str(cred.pk),
+                    "exchange_name": cred.exchange_name,
+                    "api_key": _mask_credential(decrypted.get("api_key")),
+                    "secret_key": _mask_credential(decrypted.get("secret_key")),
+                    "passphrase": _mask_credential(decrypted.get("passphrase")),
+                    "is_testnet": cred.is_testnet,
+                    "is_active": cred.is_active,
+                    "permissions": cred.permissions,
+                    "verification_status": cred.verification_status,
+                    "last_verified": cred.last_verified,
+                    "created_at": cred.created_at,
+                }
+            )
+
+        data = {
+            "profile": {
+                "id": str(user.pk),
+                "username": user.username,
+                "email": user.email,
+                "is_active": user.is_active,
+                "is_staff": user.is_staff,
+                "is_superuser": user.is_superuser,
+                "subscription_plan": getattr(user, "subscription_plan", None),
+                "is_subscription_active": user.is_subscription_active,
+                "date_joined": user.date_joined,
+                "last_login": user.last_login,
+            },
+            "balances": list(UserBalance.objects.filter(user=user).values()),
+            "exchange_credentials": credentials,
+            "bots": {
+                "signal_bots": list(live(SignalBot.objects.filter(user=user)).values()),
+                "grid_bots": list(live(GridBot.objects.filter(user=user)).values()),
+                "martingale_bots": list(live(MartingaleBot.objects.filter(user=user)).values()),
+                "pair_configs": list(PairConfig.objects.filter(user=user).values()),
+            },
+            "quantum_ai": {
+                "investments": list(live(InvestorPortfolio.objects.filter(user=user)).values()),
+                "deposits": list(live(QuantumDeposit.objects.filter(user=user)).values()),
+                "weekly_profits": list(
+                    live(QuantumWeeklyProfit.objects.filter(user=user)).values()
+                ),
+            },
+            "orders": {
+                "bot_orders": list(BotOrder.objects.filter(user=user).values()),
+                "investment_orders": list(InvestmentOrder.objects.filter(user=user).values()),
+            },
+            "payments": {
+                "deposits": list(live(Deposit.objects.filter(user=user)).values()),
+                "withdrawal_requests": list(
+                    live(WithdrawalRequest.objects.filter(user=user)).values()
+                ),
+                "payment_transactions": list(PaymentTransaction.objects.filter(user=user).values()),
+                "bot_subscriptions": list(live(BotSubscription.objects.filter(user=user)).values()),
+            },
+            "subscriptions": list(live(TelegramSubscription.objects.filter(user=user)).values()),
+            "referrals": {
+                "referrals_made": list(Referral.objects.filter(referrer=user).values()),
+                "referral_received": list(Referral.objects.filter(referred_user=user).values()),
+            },
+            "activity_logs": list(live(UserActivityLog.objects.filter(user=user)).values()),
+        }
+
+        return Response(data, status=status.HTTP_200_OK)

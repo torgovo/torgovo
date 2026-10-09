@@ -8,7 +8,7 @@ import logging
 from django.db import transaction
 from django.db.models import Q
 
-from apps.bots.models import QuantumAIFund, QuantumAIInvestment
+from apps.bots.models import InvestorPortfolio, QuantumAIFund
 from apps.payments.models import BotSubscription
 from core.models import AuditLog
 
@@ -75,7 +75,7 @@ class SubscriptionService:
         usdt_amount = subscription.plan.price
 
         # Create investment
-        investment = QuantumAIInvestment.objects.create(
+        investment = InvestorPortfolio.objects.create(
             user=subscription.user,
             fund=fund,
             subscription=subscription,

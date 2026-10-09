@@ -87,7 +87,7 @@ Response: list of withdrawals with status (pending/approved/rejected).
 Important: Validate that amount <= current_balance. Create a WithdrawalRequest model with status field. Admin approval endpoint required (see Module 2).
 Module 2: Admin Endpoints (for Dashboard)
 
-Add to apps/admin/views.py (or extend existing admin views).
+Add to `apps/users/views.py` (admin views) or create a new `apps/admin/` module.
 2.1 Manage Subscription Plans
 
     GET /api/admin/subscription-plans/

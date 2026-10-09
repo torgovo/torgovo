@@ -19,9 +19,9 @@ Subscription-based crypto trading bot platform. Users create bots, connect excha
 
 ### Quantum AI Flow
 1. User deposits USDT → `QuantumDeposit` (pending)
-2. Admin approves → updates `QuantumAIInvestment.amount` + `QuantumAIFund.total_deposits`
+2. Admin approves → updates `InvestorPortfolio.amount` + `QuantumAIFund.total_deposits`
 3. Admin runs `QuantumAIBot` against fund's master API keys
-4. Every 2 weeks: calculate P/L × `shown_percentage` (5–20%, admin-configurable), distribute proportionally
+4. Every 2 weeks: calculate P/L × fund parameters (`monthly_min_return`, `monthly_max_return`, `reserve_buffer_pct`), distribute proportionally
 5. Users see ONLY their balance + changes — NO trade details
 
 ---
@@ -31,7 +31,7 @@ Subscription-based crypto trading bot platform. Users create bots, connect excha
 ```
 apps/bots/           → Bot domain models + API views (user-facing CRUD)
   models.py          → SignalBot, GridBot, MartingaleBot, QuantumAIFund, QuantumAIBot,
-                       QuantumAIInvestment, QuantumDeposit, QuantumWeeklyProfit,
+                       InvestorPortfolio, InvestorDeposit, QuantumWeeklyProfit,
                        PairConfig, Indicator, Order
   views.py           → All bot ViewSets
   indicators_views.py → TradingView indicator webhooks (EMA/RSI/BB → BotEngine)

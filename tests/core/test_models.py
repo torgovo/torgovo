@@ -111,12 +111,17 @@ class TestSoftDeleteModel:
         log1 = UserActivityLog.objects.create(user=user, action="deletable")
         log2 = UserActivityLog.objects.create(user=user, action="keep")
         log1.delete()
-        logs = UserActivityLog.objects.filter(user=user)
+        # FIN-2: Default manager now filters out soft-deleted records.
+        # Use all_with_deleted() to see both active and deleted.
+        logs = UserActivityLog.objects.all_with_deleted().filter(user=user)
         assert logs.count() == 2
         log1.refresh_from_db()
         assert log1.is_deleted is True
         log2.refresh_from_db()
         assert log2.is_deleted is False
+        # Default manager only shows active
+        active_logs = UserActivityLog.objects.filter(user=user)
+        assert active_logs.count() == 1
 
 
 @pytest.mark.django_db

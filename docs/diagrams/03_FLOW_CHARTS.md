@@ -106,13 +106,13 @@ flowchart TB
 
     subgraph DISTRIBUTION[PROFIT DISTRIBUTION]
         CALC_PROFIT([Admin Action: Calculate Profit Distribution])
-        CALC_PROFIT --> AGGREGATE[Aggregate QuantumAIInvestment<br/>share_percentages]
+        CALC_PROFIT --> AGGREGATE[Aggregate InvestorPortfolio<br/>share_percentages]
         AGGREGATE --> ALLOCATE[Allocate weekly profit<br/>20% users / 80% admin]
         ALLOCATE --> CREATE_WEEKLY[Create QuantumWeeklyProfit<br/>records per user]
         CREATE_WEEKLY --> PAYOUT([Admin Action: Process Payouts])
 
         PAYOUT --> TRANSFER[Transfer USDT to<br/>User Wallets]
-        TRANSFER --> UPDATE_INVESTMENT[Update<br/>QuantumAIInvestment.accrued_profit]
+        TRANSFER --> UPDATE_INVESTMENT[Update<br/>InvestorPortfolio.accrued_profit]
         UPDATE_INVESTMENT --> MARK_DISTRIBUTED[Mark WeeklyProfit<br/>is_distributed = True]
     end
 
@@ -225,7 +225,7 @@ flowchart TB
     CHOOSE_BOT_TYPE -->|TradingView Alerts| CREATE_SIGNAL[Create SignalBot<br/>Set webhook_url + trading_pair]
     CHOOSE_BOT_TYPE -->|Grid Trading| CREATE_GRID[Create GridBot<br/>Set levels, qty, TP/SL]
     CHOOSE_BOT_TYPE -->|Martingale| CREATE_MARTINGALE[Create MartingaleBot<br/>Set multiplier, levels]
-    CHOOSE_BOT_TYPE -->|Quantum AI| CREATE_QAI[QuantumAIInvestment<br/>Deposit to Fund Wallet]
+    CHOOSE_BOT_TYPE -->|Quantum AI| CREATE_QAI[InvestorDeposit<br/>Deposit to Fund Wallet]
 
     CREATE_SIGNAL --> CONFIGURE[Configure via API]
     CREATE_GRID --> CONFIGURE

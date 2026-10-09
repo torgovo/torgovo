@@ -84,6 +84,20 @@ LOGGING["loggers"]["django"]["handlers"] = ["file", "error_file"]  # noqa: F405
 LOGGING["loggers"]["apps"]["handlers"] = ["file", "error_file"]  # noqa: F405
 LOGGING["loggers"]["trading"]["handlers"] = ["trading_file", "error_file"]  # noqa: F405
 
+# Structured JSON logging for production (item #2)
+LOGGING["handlers"]["json_file"] = {  # noqa: F405
+    "level": "INFO",
+    "class": "logging.handlers.RotatingFileHandler",
+    "filename": BASE_DIR / "logs" / "django-json.log",  # noqa: F405
+    "maxBytes": 1024 * 1024 * 15,
+    "backupCount": 10,
+    "formatter": "json",
+    "filters": ["cred_redact", "request_id"],
+}
+# Route apps + trading logs to JSON file as well
+LOGGING["loggers"]["apps"]["handlers"].append("json_file")  # noqa: F405
+LOGGING["loggers"]["trading"]["handlers"].append("json_file")  # noqa: F405
+
 # Cache for production
 CACHES = {
     "default": {
@@ -148,3 +162,17 @@ if SENTRY_DSN and SENTRY_DSN.strip() and SENTRY_DSN.startswith("http"):
         send_default_pii=False,
         environment="production",
     )
+
+# Database backup configuration (item #6)
+# Uses django-dbbackup for automated backups to local/S3 storage.
+# Run: python manage.py dbbackup           # backup to BACKUP_STORAGE_DIR
+# Run: python manage.py dbrestore          # restore from latest backup
+# Schedule via Celery beat or cron for automated daily backups.
+DBBACKUP_STORAGE = config("DBBACKUP_STORAGE", default="django.core.files.storage.FileSystemStorage")
+DBBACKUP_STORAGE_OPTIONS = {
+    "location": config("BACKUP_STORAGE_DIR", default=str(BASE_DIR / "backups")),  # noqa: F405
+}
+DBBACKUP_TEMPLATE_NAME = "torgovo_{datetime}.{extension}"
+DBBACKUP_FILENAME_TEMPLATE = "torgovo_{datetime}.{extension}"
+# Backup retention: keep last 30 daily backups
+DBBACKUP_CLEANUP_KEEP = 30

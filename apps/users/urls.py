@@ -14,6 +14,9 @@ app_name = "users"
 urlpatterns = [
     # User endpoints
     path("", include(router.urls)),
+    # User-facing account endpoints (GDPR deactivation / data access)
+    path("deactivate/", views.DeactivateAccountView.as_view(), name="deactivate_account"),
+    path("export-data/", views.UserDataExportView.as_view(), name="export_data"),
     # Admin-only endpoints
     path("admin/", views.UserListView.as_view(), name="admin_user_list"),
     path("admin/<int:pk>/", views.UserDetailView.as_view(), name="admin_user_detail"),

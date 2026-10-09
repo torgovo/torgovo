@@ -84,7 +84,7 @@ sequenceDiagram
     participant FundSvc as services/quantum_ai_fund.py
     participant Fund as bots/models/QuantumAIFund
     participant Reserve as bots/models/ReserveFund
-    participant Investment as bots/models/QuantumAIInvestment
+    participant Investment as bots/models/InvestorPortfolio
     participant Engine as BotEngine
     participant Exchange as CCXT Exchange
 

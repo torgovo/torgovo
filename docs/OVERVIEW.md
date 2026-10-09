@@ -8,7 +8,7 @@ A subscription-based cryptocurrency trading bot platform where users create auto
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Django 5.x + Django REST Framework 3.17 |
+| Backend | Django 5.2 + Django REST Framework 3.17 |
 | Database | PostgreSQL 15 (prod), SQLite (tests) |
 | Cache/Broker | Redis (cache, Celery broker, WebSocket channel layer) |
 | Task Queue | Celery + Celery Beat (periodic scheduler) |
@@ -30,7 +30,7 @@ A subscription-based cryptocurrency trading bot platform where users create auto
 
 ## Key Features
 
-- Multi-exchange support (Binance, Bybit fully implemented; OKX, MEXC, Alpaca, Coinbase stubs)
+- Multi-exchange support (Binance, Bybit, OKX, MEXC, Alpaca, Coinbase)
 - Webhook-driven signal trading (TradingView integration)
 - Automated grid and martingale strategies
 - Quantum AI pooled fund with proportional profit/loss distribution
@@ -57,18 +57,18 @@ All payments currently require manual admin approval (crypto deposits). Automate
 ## Current Status
 
 - **Core trading engine:** Working (Signal, Grid, Martingale, Quantum AI)
-- **Exchange adapters:** Binance + Bybit complete; other exchanges are stubs
+- **Exchange adapters:** All 6 exchanges complete (Binance, Bybit, OKX, MEXC, Alpaca, Coinbase)
 - **Webhook system:** Functional with EMA/RSI/BB indicator processing
 - **Security:** Fernet encryption, JWT auth, rate limiting, credential redaction
-- **Tests:** 254 passing (webhook + strategy + security + regression)
+- **Tests:** ~1949 passing (13 skipped)
 - **Frontend:** Not started (React + Vite scaffold exists)
 - **Payments:** Manual approval only — no automated billing
 
 ## Known Critical Issues
 
 1. **Duplicate app ecosystems** — `apps/bots/` vs `apps/investments/` have parallel model/view hierarchies
-2. **RateLimitMiddleware** uses in-memory dict (not thread-safe, not process-safe)
-3. **TradingViewWebhookView** is unimplemented stub (accepts webhooks, does nothing)
-4. **CreateSubscriptionView** and Extend/Cancel views return 501 "Not implemented"
-5. **django_prometheus** missing from requirements — breaks `manage.py check`
+2. ~~**RateLimitMiddleware**~~ — resolved: now Redis/cache-backed
+3. ~~**TradingViewWebhookView**~~ — resolved: functional with EMA/RSI/BB indicator processing
+4. ~~**CreateSubscriptionView**~~ — resolved: subscription views functional
+5. ~~**django_prometheus**~~ — resolved: installed and working
 6. No KYC/AML, no GDPR compliance, no ToS acceptance

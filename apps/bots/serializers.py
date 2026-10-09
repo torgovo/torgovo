@@ -11,10 +11,10 @@ from .models import (
     BotOrder,
     GridBot,
     Indicator,
+    InvestorPortfolio,
     MartingaleBot,
     PairConfig,
     QuantumAIFund,
-    QuantumAIInvestment,
     QuantumDeposit,
     QuantumDepositWallet,
     SignalBot,
@@ -317,7 +317,7 @@ class QuantumAIFundSerializer(serializers.ModelSerializer):
         read_only_fields = ["total_profit", "created_at", "updated_at"]
 
 
-class QuantumAIInvestmentSerializer(serializers.ModelSerializer):
+class InvestorPortfolioSerializer(serializers.ModelSerializer):
     """Serializer for user's Quantum AI investment"""
 
     user = serializers.HiddenField(default=serializers.CurrentUserDefault())
@@ -328,7 +328,7 @@ class QuantumAIInvestmentSerializer(serializers.ModelSerializer):
         return Decimal("0")
 
     class Meta:
-        model = QuantumAIInvestment
+        model = InvestorPortfolio
         fields = [
             "id",
             "user",
@@ -524,13 +524,3 @@ class QuantumDepositSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "user", "status", "created_at"]
-
-
-class BotOverviewSerializer(serializers.Serializer):
-    total_bots = serializers.IntegerField()
-    running_bots = serializers.IntegerField()
-    total_users = serializers.IntegerField()
-    daily_trades = serializers.IntegerField()
-    platform_volume = serializers.CharField()
-    by_type = serializers.DictField()
-    by_exchange = serializers.DictField()

@@ -358,6 +358,8 @@ class TestUserModelRegistration:
             {
                 **data,
                 "password_confirm": "StrongPass123!",
+                "terms_accepted": True,
+                "privacy_policy_accepted": True,
             },
             format="json",
         )

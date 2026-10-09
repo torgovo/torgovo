@@ -1,46 +1,62 @@
-# Use Python 3.11 slim image
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
 
-# Set work directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    postgresql-client \
-    libpq-dev \
+# Install only build-time dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    libpq-dev \
     python3-dev \
     musl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt requirements/ /app/requirements/
+RUN pip install --no-cache-dir -r requirements.txt
+
+
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Install only runtime dependencies (no compilers)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    postgresql-client \
+    libpq5 \
     libmagic1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip
-RUN pip install --upgrade pip
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Copy requirements files
-COPY requirements.txt /app/
-COPY requirements/ /app/requirements/
+WORKDIR /app
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy project files
+# Copy application code
 COPY . /app/
 
-# Create necessary directories
-RUN mkdir -p /app/staticfiles /app/media /app/logs
+# Create non-root user
+RUN groupadd -r torgovo && useradd -r -g torgovo -d /app -s /sbin/nologin torgovo \
+    && mkdir -p /app/staticfiles /app/media /app/logs \
+    && chown -R torgovo:torgovo /app
 
-# Collect static files
-RUN python manage.py collectstatic --noinput || true
+USER torgovo
 
-# Expose port
 EXPOSE 8000
 
-# Default command (can be overridden in docker-compose)
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "4"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/health/ || exit 1
+
+CMD ["gunicorn", "config.wsgi:application", \
+     "--bind", "0.0.0.0:8000", \
+     "--workers", "4", \
+     "--timeout", "120", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]

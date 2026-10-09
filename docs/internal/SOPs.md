@@ -59,7 +59,7 @@ graph TD
 
 1. Receive deletion request → create support ticket
 2. Verify identity (email confirmation)
-3. Run management command: `python manage.py delete_user_data <user_id>`
+3. **Note:** A `delete_user_data` management command does not yet exist. If GDPR right-to-erasure is needed, create `apps/users/management/commands/delete_user_data.py`.
    - Deletes: profile, credentials, bots, orders, transactions, logs
    - Retains: anonymized referral rewards (legal requirement)
 4. Confirm deletion to user

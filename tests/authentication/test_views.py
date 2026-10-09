@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from django.contrib.auth.hashers import make_password
 from django.utils import timezone
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -28,6 +29,8 @@ class TestUserRegistration:
             "password_confirm": "StrongPass123!",
             "first_name": "New",
             "last_name": "User",
+            "terms_accepted": True,
+            "privacy_policy_accepted": True,
         }
         response = api_client.post(self.url, data, format="json")
         assert response.status_code == status.HTTP_201_CREATED
@@ -40,6 +43,51 @@ class TestUserRegistration:
         assert response.data["verification_sent"] is True
         assert response.data["user"]["email"] == "newuser@example.com"
         assert CustomUser.objects.filter(email="newuser@example.com").exists()
+
+    def test_registration_without_consent_rejected(self, api_client):
+        """COMPLIANCE Phase-1: missing consent booleans -> 400, no user created."""
+        data = {
+            "username": "noconsent",
+            "email": "noconsent@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
+        }
+        response = api_client.post(self.url, data, format="json")
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert not CustomUser.objects.filter(email="noconsent@example.com").exists()
+
+    def test_registration_declined_privacy_policy_rejected(self, api_client):
+        """COMPLIANCE Phase-1: explicit privacy-policy refusal -> 400."""
+        data = {
+            "username": "opposer",
+            "email": "opposer@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
+            "terms_accepted": True,
+            "privacy_policy_accepted": False,
+        }
+        response = api_client.post(self.url, data, format="json")
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert not CustomUser.objects.filter(email="opposer@example.com").exists()
+
+    def test_registration_stamps_consent_metadata(self, api_client):
+        """COMPLIANCE Phase-1: successful registration records consent timestamp + version."""
+        from django.conf import settings
+
+        data = {
+            "username": "consented",
+            "email": "consented@example.com",
+            "password": "StrongPass123!",
+            "password_confirm": "StrongPass123!",
+            "terms_accepted": True,
+            "privacy_policy_accepted": True,
+        }
+        response = api_client.post(self.url, data, format="json")
+        assert response.status_code == status.HTTP_201_CREATED
+        user = CustomUser.objects.get(email="consented@example.com")
+        assert user.terms_accepted_at is not None
+        assert user.terms_accepted_at <= timezone.now()
+        assert user.privacy_version == settings.PRIVACY_POLICY_VERSION
 
     def test_registration_duplicate_email(self, api_client, user):
         data = {
@@ -91,6 +139,8 @@ class TestUserRegistration:
             "email": "verify@example.com",
             "password": "StrongPass123!",
             "password_confirm": "StrongPass123!",
+            "terms_accepted": True,
+            "privacy_policy_accepted": True,
         }
         response = api_client.post(self.url, data, format="json")
         assert response.status_code == status.HTTP_201_CREATED
@@ -309,7 +359,7 @@ class TestPhoneVerificationConfirm:
     def test_confirm_valid_code(self, auth_client, user):
         PhoneVerification.objects.create(
             user=user,
-            code="123456",
+            code=make_password("123456"),
             phone_number="+1234567890",
             expires_at=timezone.now() + timedelta(minutes=10),
         )
@@ -324,7 +374,7 @@ class TestPhoneVerificationConfirm:
     def test_confirm_wrong_code(self, auth_client, user):
         PhoneVerification.objects.create(
             user=user,
-            code="123456",
+            code=make_password("123456"),
             phone_number="+1234567890",
             expires_at=timezone.now() + timedelta(minutes=10),
         )
@@ -340,7 +390,7 @@ class TestPhoneVerificationConfirm:
     def test_confirm_expired_code(self, auth_client, user):
         PhoneVerification.objects.create(
             user=user,
-            code="123456",
+            code=make_password("123456"),
             phone_number="+1234567890",
             expires_at=timezone.now() - timedelta(minutes=1),
         )
@@ -351,7 +401,7 @@ class TestPhoneVerificationConfirm:
     def test_confirm_too_many_attempts(self, auth_client, user):
         PhoneVerification.objects.create(
             user=user,
-            code="123456",
+            code=make_password("123456"),
             phone_number="+1234567890",
             expires_at=timezone.now() + timedelta(minutes=10),
             attempts=3,

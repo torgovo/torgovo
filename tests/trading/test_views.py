@@ -271,7 +271,7 @@ class TestListExchangesView:
 
 @pytest.mark.django_db
 class TestGetExchangeSymbols:
-    def test_get_symbols(self, auth_client, trading_pair):
+    def test_get_symbols(self, auth_client, exchange, trading_pair):
         response = auth_client.get("/api/trading/exchanges/binance/symbols/")
         assert response.status_code == status.HTTP_200_OK
         assert response.data["success"] is True
@@ -279,9 +279,7 @@ class TestGetExchangeSymbols:
 
     def test_get_symbols_unknown_exchange(self, auth_client):
         response = auth_client.get("/api/trading/exchanges/unknown/symbols/")
-        assert response.status_code == status.HTTP_200_OK
-        assert response.data["success"] is True
-        assert response.data["symbols"] == []
+        assert response.status_code == status.HTTP_404_NOT_FOUND
 
 
 @pytest.mark.django_db

@@ -1,3 +1,5 @@
+import json
+import time
 from decimal import Decimal
 
 import pytest
@@ -8,11 +10,18 @@ from apps.payments.models import (
     BlockchainAddress,
     BotSubscription,
     BotSubscriptionPlan,
+    InvestorDeposit,
     PaymentTransaction,
-    QuantumAIDeposit,
     SubscriptionPlan,
     WithdrawalRequest,
 )
+from core.utils import encrypt_api_key
+from services.two_factor import _totp_code
+
+
+def totp_code_for_secret(secret_b32):
+    """Deterministic valid TOTP code for a base32 secret (matches current 30s step)."""
+    return _totp_code(secret_b32, int(time.time()) // 30)
 
 
 @pytest.mark.django_db
@@ -151,7 +160,7 @@ class TestQuantumDepositViewSet:
         assert response.data["status"] == "pending"
 
     def test_retrieve_deposit(self, auth_client, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("500"),
             currency="USDT",
@@ -164,7 +173,7 @@ class TestQuantumDepositViewSet:
         assert response.status_code == status.HTTP_200_OK
 
     def test_list_own_deposits_only(self, auth_client, user, admin_user):
-        QuantumAIDeposit.objects.create(
+        InvestorDeposit.objects.create(
             user=admin_user,
             amount=Decimal("999"),
             currency="USDT",
@@ -195,7 +204,7 @@ class TestQuantumDepositViewSet:
 @pytest.mark.django_db
 class TestDepositAdminViews:
     def test_approve_deposit(self, admin_client, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("100"),
             currency="USDT",
@@ -208,7 +217,7 @@ class TestDepositAdminViews:
         assert response.status_code == status.HTTP_200_OK
 
     def test_approve_already_approved(self, admin_client, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("100"),
             currency="USDT",
@@ -222,7 +231,7 @@ class TestDepositAdminViews:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_reject_deposit(self, admin_client, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("100"),
             currency="USDT",
@@ -235,7 +244,7 @@ class TestDepositAdminViews:
         assert response.status_code == status.HTTP_200_OK
 
     def test_reject_without_reason(self, admin_client, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("100"),
             currency="USDT",
@@ -248,7 +257,7 @@ class TestDepositAdminViews:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_non_admin_cannot_approve(self, auth_client, user):
-        deposit = QuantumAIDeposit.objects.create(
+        deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("100"),
             currency="USDT",
@@ -272,6 +281,7 @@ class TestWithdrawalRequestViewSet:
     def test_create_withdrawal(self, auth_client, user):
         user.is_email_verified = True
         user.two_factor_enabled = True
+        user.totp_secret = encrypt_api_key("JBSWY3DPEHPK3PXP")
         user.save()
         url = reverse("payments:withdrawal-list")
         data = {
@@ -279,11 +289,62 @@ class TestWithdrawalRequestViewSet:
             "currency": "USDT",
             "blockchain": "BEP20",
             "to_address": "0xreceiver1234567890abcdef12345678",
-            "two_factor_code": "123456",
+            "two_factor_code": None,  # filled below with a valid TOTP code
         }
+        # issue a real code derived from the same secret the gate will decrypt
+        code = totp_code_for_secret("JBSWY3DPEHPK3PXP")
+        data["two_factor_code"] = code
         response = auth_client.post(url, data, format="json")
         assert response.status_code == status.HTTP_201_CREATED
         assert response.data["status"] == "pending"
+
+    def test_create_withdrawal_rejects_invalid_2fa_code(self, auth_client, user):
+        user.is_email_verified = True
+        user.two_factor_enabled = True
+        user.totp_secret = encrypt_api_key("JBSWY3DPEHPK3PXP")
+        user.save()
+        url = reverse("payments:withdrawal-list")
+        data = {
+            "amount": "50.00000000",
+            "currency": "USDT",
+            "blockchain": "BEP20",
+            "to_address": "0xreceiver1234567890abcdef12345678",
+            "two_factor_code": "000000",
+        }
+        response = auth_client.post(url, data, format="json")
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        # project custom exception handler wraps errors under "error"
+        body = json.dumps(response.data).lower()
+        assert "two_factor" in body or "code" in body
+
+    def test_create_withdrawal_rejects_missing_2fa_code(self, auth_client, user):
+        user.is_email_verified = True
+        user.two_factor_enabled = True
+        user.save()
+        url = reverse("payments:withdrawal-list")
+        data = {
+            "amount": "50.00000000",
+            "currency": "USDT",
+            "blockchain": "BEP20",
+            "to_address": "0xreceiver1234567890abcdef12345678",
+        }
+        response = auth_client.post(url, data, format="json")
+        assert response.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN)
+
+    def test_create_withdrawal_rejects_when_2fa_disabled(self, auth_client, user):
+        user.is_email_verified = True
+        user.two_factor_enabled = False
+        user.save()
+        url = reverse("payments:withdrawal-list")
+        data = {
+            "amount": "50.00000000",
+            "currency": "USDT",
+            "blockchain": "BEP20",
+            "to_address": "0xreceiver1234567890abcdef12345678",
+            "two_factor_code": totp_code_for_secret("JBSWY3DPEHPK3PXP"),
+        }
+        response = auth_client.post(url, data, format="json")
+        assert response.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN)
 
     def test_list_own_withdrawals_only(self, auth_client, user, admin_user):
         WithdrawalRequest.objects.create(

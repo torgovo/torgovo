@@ -11,9 +11,9 @@ from core.permissions import (
     IsAdminOrReadOnly,
     IsAdminUser,
     IsBotOwner,
+    IsInvestorDepositOwner,
     IsOwnerOrAdmin,
     IsOwnerOrReadOnly,
-    IsQuantumAIDepositOwner,
     IsWebhookOwner,
 )
 
@@ -340,10 +340,10 @@ class TestHasExchangeCredentials:
         assert permission.has_permission(request, None) is False
 
 
-class TestIsQuantumAIDepositOwner:
+class TestIsInvestorDepositOwner:
     @pytest.fixture
     def permission(self):
-        return IsQuantumAIDepositOwner()
+        return IsInvestorDepositOwner()
 
     def test_admin_can_access(self, permission):
         user = MagicMock()

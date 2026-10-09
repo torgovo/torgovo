@@ -22,6 +22,8 @@ class TestReferralRegistration:
                 "password": "testpass123",
                 "password_confirm": "testpass123",
                 "referral_code": referrer.referral_code,
+                "terms_accepted": True,
+                "privacy_policy_accepted": True,
             },
         )
 
@@ -29,8 +31,35 @@ class TestReferralRegistration:
         new_user = User.objects.get(username="newuser")
         assert new_user.referred_by == referrer
 
-        referral = Referral.objects.get(code=referrer.referral_code)
-        assert referral.referred_user == new_user
+        # A2: the NEW row for this signup (referrer also has a placeholder row)
+        assert Referral.objects.filter(code=referrer.referral_code, referred_user=new_user).exists()
+
+    def test_second_signup_same_code_still_referred(self, api_client):
+        """A2: unlimited signups with the SAME code — 2nd signup must not be
+        dropped (old code claimed one shared row and skipped signup 2+)."""
+        referrer = User.objects.create_user(username="referrer", password="testpass123")
+        payload = {
+            "password": "testpass123",
+            "password_confirm": "testpass123",
+            "referral_code": referrer.referral_code,
+            "terms_accepted": True,
+            "privacy_policy_accepted": True,
+        }
+
+        first = api_client.post(
+            reverse("auth:register"),
+            {**payload, "username": "newuser1", "email": "new1@example.com"},
+        )
+        second = api_client.post(
+            reverse("auth:register"),
+            {**payload, "username": "newuser2", "email": "new2@example.com"},
+        )
+
+        assert first.status_code == 201
+        assert second.status_code == 201
+        assert User.objects.get(username="newuser1").referred_by == referrer
+        assert User.objects.get(username="newuser2").referred_by == referrer
+        assert Referral.objects.filter(referrer=referrer, referred_user__isnull=False).count() == 2
 
     def test_invalid_referral_code_returns_400(self, api_client):
         """Invalid code blocks registration with validation error."""
@@ -42,6 +71,8 @@ class TestReferralRegistration:
                 "password": "testpass123",
                 "password_confirm": "testpass123",
                 "referral_code": "FAKECODE",
+                "terms_accepted": True,
+                "privacy_policy_accepted": True,
             },
         )
 
@@ -61,6 +92,8 @@ class TestReferralRegistration:
                 "password": "testpass123",
                 "password_confirm": "testpass123",
                 "referral_code": referrer.referral_code,
+                "terms_accepted": True,
+                "privacy_policy_accepted": True,
             },
         )
         assert response.status_code == 201  # valid referral, user referred by 'selfref'
@@ -99,6 +132,8 @@ class TestReferralRegistration:
                 "email": "new@example.com",
                 "password": "testpass123",
                 "password_confirm": "testpass123",
+                "terms_accepted": True,
+                "privacy_policy_accepted": True,
             },
         )
         assert response.status_code == 201
@@ -118,6 +153,8 @@ class TestReferralRegistration:
                 "email": "new@example.com",
                 "password": "testpass123",
                 "password_confirm": "testpass123",
+                "terms_accepted": True,
+                "privacy_policy_accepted": True,
             },
         )
         assert response.status_code == 201
@@ -154,6 +191,8 @@ class TestReferralRegistration:
                 "password": "testpass123",
                 "password_confirm": "testpass123",
                 "referral_code": code_lower,
+                "terms_accepted": True,
+                "privacy_policy_accepted": True,
             },
         )
 

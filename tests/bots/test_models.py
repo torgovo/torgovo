@@ -422,11 +422,11 @@ class TestQuantumAIBotModel:
 
 
 @pytest.mark.django_db
-class TestQuantumAIInvestmentModel:
+class TestInvestorPortfolioModel:
     def test_create_investment(self, user, quantum_fund, bot_subscription):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
-        inv = QuantumAIInvestment.objects.create(
+        inv = InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("1000"),
@@ -438,11 +438,11 @@ class TestQuantumAIInvestmentModel:
         assert str(inv) == f"{user.email} - 1000 USDT"
 
     def test_calculate_share_percentage(self, user, quantum_fund):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
         quantum_fund.total_deposits = Decimal("50000")
         quantum_fund.save()
-        inv = QuantumAIInvestment.objects.create(
+        inv = InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("5000"),
@@ -451,9 +451,9 @@ class TestQuantumAIInvestmentModel:
         assert inv.calculate_share_percentage() == Decimal("10.00")
 
     def test_calculate_share_percentage_zero_deposits(self, user, quantum_fund_without_deposits):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
-        inv = QuantumAIInvestment(
+        inv = InvestorPortfolio(
             user=user,
             fund=quantum_fund_without_deposits,
             amount=Decimal("1000"),
@@ -461,9 +461,9 @@ class TestQuantumAIInvestmentModel:
         assert inv.calculate_share_percentage() == Decimal("0")
 
     def test_calculate_profit_share_not_active(self, user, quantum_fund):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
-        inv = QuantumAIInvestment.objects.create(
+        inv = InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("1000"),
@@ -472,7 +472,7 @@ class TestQuantumAIInvestmentModel:
         assert inv.calculate_profit_share(Decimal("0")) == Decimal("0")
 
     def test_calculate_profit_share_active(self, user, quantum_fund):
-        from apps.bots.models import QuantumAIInvestment
+        from apps.bots.models import InvestorPortfolio
 
         quantum_fund.total_deposits = Decimal("50000")
         quantum_fund.total_profit = Decimal("10000")
@@ -480,7 +480,7 @@ class TestQuantumAIInvestmentModel:
         quantum_fund.monthly_max_return = Decimal("15.00")
         quantum_fund.reserve_buffer_pct = Decimal("10.00")
         quantum_fund.save()
-        inv = QuantumAIInvestment.objects.create(
+        inv = InvestorPortfolio.objects.create(
             user=user,
             fund=quantum_fund,
             amount=Decimal("5000"),
