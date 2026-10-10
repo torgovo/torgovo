@@ -18,9 +18,9 @@ This plan focuses on remaining work that still needs pairing, ordering, and exec
 **DONE:** QuantumAI logic lives in `bot_engine.py` (canonical). `apps/trading/strategies/quantum_ai.py` exists as the strategy class and is used by the engine.
 
 ## Phase 3 — Minimize Document Drift
-1. Make one authoritative tracker: prefer `docs/todo.md`.
-2. Update `docs/latest_details.md` so known issues reflect current code.
-3. Align `docs/CODEBASE.md`, `PROJECT.md`, and `README.md` with current app/module reality.
+1. Make one authoritative tracker: prefer `docs/todo.md`. **DONE**
+2. ~~Update `docs/latest_details.md`~~ superseded — archived at `docs/archive/latest_details.md` (2026-10-09; live status = `PROJECT_STATUS.md`).
+3. Align `docs/CODEBASE.md`, `PROJECT.md`, and `README.md` with current app/module reality. **DONE** (README index current; CODEBASE re-synced 2026-08-20; frontend-docs consolidation Steps 2–3 archived FRONTEND.md / connectivity / API.md / legacy frontend prompt, route-verified API_DOCUMENTATION.md 2026-10-07).
 
 ## Phase 4 — Frontend Kickoff
 1. Start skeleton in `frontend/`.
