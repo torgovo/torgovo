@@ -11,6 +11,7 @@ from django.db.models import Q
 from apps.bots.models import InvestorPortfolio, QuantumAIFund
 from apps.payments.models import BotSubscription
 from core.models import AuditLog
+from services.quantum_locks import QuantumLockService
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,11 @@ class SubscriptionService:
         try:
             subscription = BotSubscription.objects.select_for_update().get(id=subscription_id)
 
-            if subscription.status not in ["pending_payment", "pending_approval"]:
+            # G4 / FR A6 re-subscribe: allow approving an "expired" row —
+            # approve() re-stamps started_at/expires_at and clears the
+            # reminder ledger, restoring access while RETAINING all bots
+            # (they keep their FK to this same row).
+            if subscription.status not in ["pending_payment", "pending_approval", "expired"]:
                 raise ValueError(f"Cannot approve subscription with status: {subscription.status}")
 
             # Approve the subscription
@@ -54,6 +59,12 @@ class SubscriptionService:
                 resource_id=str(subscription.id),
                 description=f"Approved {bot_type} subscription for {subscription.user.email}",
             )
+
+            # G5 / FR A7: book the payment tx + accrue creator-tier commission
+            # (inside the same atomic block as the approval above).
+            from services.referral_rewards import ReferralRewardService
+
+            ReferralRewardService.record_subscription_payment(subscription, kind="bot")
 
             logger.info(f"Approved {bot_type} subscription for {subscription.user.email}")
             return subscription
@@ -86,6 +97,23 @@ class SubscriptionService:
         # Calculate share percentage
         investment.share_percentage = investment.calculate_share_percentage()
         investment.save()
+
+        # A5 / G3: open the per-investor lock alongside the investment record
+        # (FUNCTIONAL_REQUIREMENTS.md §A5 — replaces the old biweekly
+        # distribution schedule; term = fund default).
+        lock = QuantumLockService.create_lock(
+            user=subscription.user,
+            fund=fund,
+            amount=usdt_amount,
+            lock_days=fund.default_lock_days,
+            subscription=subscription,
+        )
+        logger.info(
+            "Opened Quantum AI lock %s (%sd) for %s",
+            lock.id,
+            lock.lock_days,
+            subscription.user.email,
+        )
 
         logger.info(
             f"Created Quantum AI investment for {subscription.user.email}: {usdt_amount} USDT"

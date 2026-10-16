@@ -11,8 +11,12 @@ from .models import (
     BotSubscription,
     BotSubscriptionPlan,
     InvestorDeposit,
+    PaymentCode,
+    PaymentCoin,
+    PaymentQuote,
     PaymentTransaction,
     ReferralPayout,
+    ReferralPayoutRequest,
     SubscriptionPlan,
     WithdrawalRequest,
 )
@@ -21,7 +25,12 @@ from .models import (
 class SubscriptionPlanSerializer(serializers.ModelSerializer):
     """
     Serializer for SubscriptionPlan model.
+
+    G1: exposes every admin-driven field (FR A2 Model C) so plan tier
+    changes propagate to clients with zero code changes.
     """
+
+    annual_discount_pct = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = SubscriptionPlan
@@ -29,10 +38,17 @@ class SubscriptionPlanSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "slug",
+            "description",
             "price_monthly",
             "price_yearly",
+            "annual_discount_pct",
+            "sort_order",
             "max_bots_allowed",
             "max_webhooks_allowed",
+            "bot_types",
+            "market",
+            "max_signals_per_month",
+            "max_exchanges",
             "features",
             "is_active",
             "trial_days",
@@ -311,6 +327,38 @@ class ReferralPayoutSerializer(serializers.ModelSerializer):
         ]
 
 
+class ReferralPayoutRequestSerializer(serializers.ModelSerializer):
+    """
+    G5 / FR A7 — referrer files a payout request, admin decides it.
+
+    Admin enter the amount actually paid including fees; the service settles
+    accruals FIFO and books the referral_payout ledger transaction.
+    """
+
+    user_email = serializers.EmailField(source="user.email", read_only=True)
+    decided_by_email = serializers.EmailField(
+        source="decided_by.email", read_only=True, default=None
+    )
+
+    class Meta:
+        model = ReferralPayoutRequest
+        fields = [
+            "id",
+            "user",
+            "user_email",
+            "amount_requested",
+            "status",
+            "admin_entered_payout",
+            "admin_notes",
+            "decided_at",
+            "decided_by",
+            "decided_by_email",
+            "payment_transaction",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
 # ==================== BOT SUBSCRIPTION SERIALIZERS ====================
 
 
@@ -396,3 +444,134 @@ class BotSubscriptionSerializer(serializers.ModelSerializer):
         if obj.plan.bot_type == "custom" and obj.webhook_secret:
             return obj.get_webhook_json_template()
         return None
+
+
+# ==================== G2 / FR A3 — MANUAL MULTI-COIN PAYMENTS ====================
+
+
+class PaymentCoinSerializer(serializers.ModelSerializer):
+    """Public coin/chain picker (deposit_address included only when set).
+
+    `network_fee` = per-chain fee buffer (coin units) that the quote already
+    includes in its combined `crypto_amount` — FE renders the breakdown
+    (e.g. `TRC20 (fee: 0.20 USDT)`, `15.00 + 0.20 → 15.20 USDT`).
+    """
+
+    class Meta:
+        model = PaymentCoin
+        fields = [
+            "id",
+            "coin",
+            "chain",
+            "deposit_address",
+            "memo",
+            "min_amount",
+            "network_fee",
+            "sort_order",
+        ]
+        read_only_fields = fields
+
+
+class PaymentQuoteSerializer(serializers.ModelSerializer):
+    """One price-lock event (rate + crypto amount + TTL)."""
+
+    coin = PaymentCoinSerializer(read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = PaymentQuote
+        fields = [
+            "id",
+            "coin",
+            "fiat_amount",
+            "rate",
+            "crypto_amount",
+            "locked_at",
+            "expires_at",
+            "is_expired",
+        ]
+        read_only_fields = fields
+
+
+class PaymentCodeSerializer(serializers.ModelSerializer):
+    """Payment code + its live quote (re-locked by the detail GET while awaiting)."""
+
+    quote = serializers.SerializerMethodField()
+    plan_name = serializers.CharField(source="plan.name", read_only=True)
+
+    class Meta:
+        model = PaymentCode
+        fields = [
+            "id",
+            "code",
+            "order_kind",
+            "billing_cycle",
+            "fiat_amount",
+            "discount_applied",  # G5 / FR A7: null = no referee discount
+            "status",
+            "plan_name",
+            "quote",
+            "subscription_id",
+            "locked_rate",
+            "locked_crypto_amount",
+            "locked_coin",
+            "quote_window_expires_at",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_quote(self, obj):
+        quote = obj.current_quote
+        return PaymentQuoteSerializer(quote).data if quote else None
+
+
+class PaymentCodeCreateSerializer(serializers.ModelSerializer):
+    """Write: user picks a plan (pk or slug) + optional billing_cycle."""
+
+    plan_id = serializers.CharField(required=True)
+
+    class Meta:
+        model = PaymentCode
+        fields = ["order_kind", "plan_id", "billing_cycle"]
+
+    def validate(self, attrs):
+        from apps.subscriptions.models import TelegramSignalPlan
+        from apps.subscriptions.views import _resolve_plan
+
+        kind = attrs.get("order_kind")
+        if kind == "telegram_signal":
+            plan = _resolve_plan(TelegramSignalPlan, attrs.get("plan_id"))
+            if plan is None:
+                raise serializers.ValidationError({"plan_id": "Invalid plan_id"})
+            cycle = attrs.get("billing_cycle", "monthly")
+            if cycle not in ("monthly", "quarterly", "yearly"):
+                raise serializers.ValidationError({"billing_cycle": "monthly, quarterly or yearly"})
+            attrs["telegram_plan"] = plan
+            attrs["bot_plan"] = None
+        elif kind == "bot":
+            plan = _resolve_plan(SubscriptionPlan, attrs.get("plan_id"))
+            if plan is None:
+                raise serializers.ValidationError({"plan_id": "Invalid plan_id"})
+            attrs["bot_plan"] = plan
+            attrs["telegram_plan"] = None
+            attrs["billing_cycle"] = "monthly"
+        else:
+            raise serializers.ValidationError({"order_kind": "telegram_signal or bot"})
+        attrs.pop("plan_id", None)
+        return attrs
+
+
+class PaymentCodeProofSerializer(serializers.Serializer):
+    """Write: proof submission (hash/screenshot + handle for telegram)."""
+
+    payment_transaction_hash = serializers.CharField(required=False, allow_blank=True, default="")
+    payment_blockchain = serializers.CharField(required=False, allow_blank=True, default="")
+    telegram_handle = serializers.CharField(required=False, allow_blank=True, default="")
+    payment_screenshot = serializers.ImageField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        if not (attrs.get("payment_screenshot") or attrs.get("payment_transaction_hash")):
+            raise serializers.ValidationError(
+                "Either payment_screenshot or payment_transaction_hash is required"
+            )
+        return attrs

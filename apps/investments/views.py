@@ -16,10 +16,15 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.bots.models import InvestorLock, QuantumWithdrawalRequest
+from services.quantum_locks import QuantumLockError, QuantumLockService
+
 from .models import InvestmentBalance, Order, Position, TechnicalIndicator
 from .serializers import (
     OrderSerializer,
     PositionSerializer,
+    QuantumLockSerializer,
+    QuantumWithdrawalRequestSerializer,
     TechnicalIndicatorSerializer,
     UserBalanceSerializer,
 )
@@ -295,3 +300,189 @@ class InvestorDepositView(APIView):
             return Response(
                 {"error": "Deposit failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+# ============ A5 QUANTUM AI LOCKS (G3 — FUNCTIONAL_REQUIREMENTS.md §A5) ============
+# User surface: list own locks + file post-lock withdrawal requests.
+# Admin surface: credit matured locks (free-form %) + decide withdrawal
+# requests (approve requires the payout amount incl. chain fees — grill Q12).
+
+
+def _paginate_lock_queryset(qs, request):
+    """Minimal page/page_size pagination (50 default, 200 cap)."""
+    try:
+        page = max(int(request.query_params.get("page", 1)), 1)
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(request.query_params.get("page_size", 50))
+    except (TypeError, ValueError):
+        page_size = 50
+    page_size = max(1, min(page_size, 200))
+
+    total = qs.count()
+    start = (page - 1) * page_size
+    return {
+        "count": total,
+        "page": page,
+        "page_size": page_size,
+        "results": qs[start : start + page_size],
+    }
+
+
+class QuantumLockListView(APIView):
+    """GET own locks (staff: all locks). Filters: ?status=, ?matured=1."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        qs = InvestorLock.objects.select_related("fund", "user").order_by("-created_at")
+        if not request.user.is_staff:
+            qs = qs.filter(user=request.user)
+
+        status_filter = (request.query_params.get("status") or "").strip()
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        if request.query_params.get("matured"):  # admin "ready to credit" queue
+            from django.utils import timezone as _tz
+
+            qs = qs.filter(matures_at__lte=_tz.now())
+
+        payload = _paginate_lock_queryset(qs, request)
+        payload["results"] = QuantumLockSerializer(payload["results"], many=True).data
+        return Response(payload)
+
+
+class QuantumLockWithdrawView(APIView):
+    """POST file a withdrawal request against a matured lock (owner only)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, lock_id):
+        try:
+            amount_raw = request.data.get("amount")
+            if amount_raw is None:
+                return Response({"error": "amount is required"}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                amount = Decimal(str(amount_raw))
+            except Exception:
+                return Response({"error": "Invalid amount"}, status=status.HTTP_400_BAD_REQUEST)
+
+            withdrawal = QuantumLockService.request_withdrawal(
+                user=request.user, lock_id=lock_id, amount=amount
+            )
+            return Response(
+                QuantumWithdrawalRequestSerializer(withdrawal).data,
+                status=status.HTTP_201_CREATED,
+            )
+        except InvestorLock.DoesNotExist:
+            # Service raises this for non-owner access too — no existence leak.
+            return Response({"error": "Lock not found"}, status=status.HTTP_404_NOT_FOUND)
+        except QuantumLockError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class QuantumLockCreditView(APIView):
+    """POST admin: credit a matured lock by `pct` (capital x (1 + pct/100))."""
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request, lock_id):
+        try:
+            pct_raw = request.data.get("pct")
+            if pct_raw is None:
+                return Response({"error": "pct is required"}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                pct = Decimal(str(pct_raw))
+            except Exception:
+                return Response({"error": "Invalid pct"}, status=status.HTTP_400_BAD_REQUEST)
+
+            credit = QuantumLockService.credit_maturity(
+                lock_id=lock_id, pct=pct, admin=request.user
+            )
+            return Response(
+                {
+                    "credit_id": str(credit.id),
+                    "term_number": credit.term_number,  # term that was credited
+                    "current_term": credit.lock.term_number,  # term now running
+                    "pct_entered": str(credit.pct_entered),
+                    "profit_amount": str(credit.profit_amount),
+                    "capital_after": str(credit.capital_after),
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        except InvestorLock.DoesNotExist:
+            return Response({"error": "Lock not found"}, status=status.HTTP_404_NOT_FOUND)
+        except QuantumLockError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class QuantumWithdrawalRequestListView(APIView):
+    """GET own withdrawal requests (staff: all; ?status=pending filter)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        qs = QuantumWithdrawalRequest.objects.select_related("user", "lock").order_by(
+            "-requested_at"
+        )
+        if not request.user.is_staff:
+            qs = qs.filter(user=request.user)
+
+        status_filter = (request.query_params.get("status") or "").strip()
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        payload = _paginate_lock_queryset(qs, request)
+        payload["results"] = QuantumWithdrawalRequestSerializer(payload["results"], many=True).data
+        return Response(payload)
+
+
+class QuantumWithdrawalDecisionView(APIView):
+    """
+    POST admin decides a pending request:
+      {"action": "approve", "payout_amount": ..., "notes": "..."}  # incl. fees
+      {"action": "reject", "notes": "..."}
+    """
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request, request_id):
+        action = (request.data.get("action") or "").strip().lower()
+        notes = str(request.data.get("notes") or "")
+
+        try:
+            if action == "approve":
+                payout_raw = request.data.get("payout_amount")
+                if payout_raw is None:
+                    return Response(
+                        {"error": "payout_amount is required for approval (incl. chain fees)"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                try:
+                    payout_amount = Decimal(str(payout_raw))
+                except Exception:
+                    return Response(
+                        {"error": "Invalid payout_amount"}, status=status.HTTP_400_BAD_REQUEST
+                    )
+                updated = QuantumLockService.approve_withdrawal(
+                    request_id=request_id,
+                    admin=request.user,
+                    payout_amount=payout_amount,
+                    notes=notes,
+                )
+            elif action == "reject":
+                updated = QuantumLockService.reject_withdrawal(
+                    request_id=request_id, admin=request.user, notes=notes
+                )
+            else:
+                return Response(
+                    {"error": "action must be 'approve' or 'reject'"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            return Response(QuantumWithdrawalRequestSerializer(updated).data)
+        except QuantumWithdrawalRequest.DoesNotExist:
+            return Response({"error": "Request not found"}, status=status.HTTP_404_NOT_FOUND)
+        except QuantumLockError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

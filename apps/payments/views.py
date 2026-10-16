@@ -10,16 +10,18 @@ Bot management ViewSets have been moved to apps/bots/views.py.
 import logging
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError
 from django.shortcuts import get_object_or_404
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import generics, serializers, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAdminUser, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.bots.models import QuantumAIFund
+from core.exceptions import ServiceUnavailable
 from core.pagination import StandardResultsSetPagination
 
 from .models import (
@@ -27,7 +29,10 @@ from .models import (
     BotSubscription,
     BotSubscriptionPlan,
     InvestorDeposit,
+    PaymentCode,
+    PaymentCoin,
     PaymentTransaction,
+    ReferralPayoutRequest,
     SubscriptionPlan,
     WithdrawalRequest,
 )
@@ -35,7 +40,12 @@ from .serializers import (
     BlockchainAddressSerializer,
     BotSubscriptionSerializer,
     InvestorDepositSerializer,
+    PaymentCodeCreateSerializer,
+    PaymentCodeProofSerializer,
+    PaymentCodeSerializer,
+    PaymentCoinSerializer,
     PaymentTransactionSerializer,
+    ReferralPayoutRequestSerializer,
     SubscriptionPlanSerializer,
     WithdrawalRequestSerializer,
 )
@@ -98,21 +108,57 @@ class CreateBotSubscriptionView(APIView):
 
             plan = BotSubscriptionPlan.objects.get(id=plan_id)
 
-            initial_status = (
-                "pending_approval"
-                if (payment_screenshot or payment_transaction_hash)
-                else "pending_payment"
-            )
+            # G5 / FR A7: referee discount frozen at purchase — recomputed on
+            # every submit, so a re-subscribe (returning payer) correctly
+            # clears any stale first-payment discount instead of keeping it.
+            # G5 race guard: claim_referee_discount locks the Referral row so
+            # two concurrent first-purchases cannot both receive the discount.
+            from django.db import transaction as _txn
 
-            subscription = BotSubscription.objects.create(
-                user=request.user,
-                plan=plan,
-                exchange_name=exchange_name,
-                payment_screenshot=payment_screenshot,
-                payment_transaction_hash=payment_transaction_hash,
-                payment_blockchain=payment_blockchain,
-                status=initial_status,
-            )
+            from services.referral_rewards import ReferralRewardService, apply_discount
+
+            with _txn.atomic():
+                pct = ReferralRewardService.claim_referee_discount(request.user)
+                discount_pct = pct if pct > 0 else None
+                net_price = apply_discount(plan.price, pct) if pct > 0 else None
+
+                initial_status = (
+                    "pending_approval"
+                    if (payment_screenshot or payment_transaction_hash)
+                    else "pending_payment"
+                )
+
+                # G4 / FR A6 re-subscribe: unique_together ["user","plan"] means
+                # a returning user already has a row (possibly "expired"). Reuse
+                # it — reset payment fields + status, KEEP started_at/expires_at
+                # and all bot FKs (retained data). Only after admin re-approval
+                # does approve() stamp a fresh clock.
+                subscription = BotSubscription.objects.filter(user=request.user, plan=plan).first()
+                if subscription:
+                    subscription.exchange_name = exchange_name
+                    if payment_screenshot:
+                        subscription.payment_screenshot = payment_screenshot
+                    if payment_transaction_hash:
+                        subscription.payment_transaction_hash = payment_transaction_hash
+                    if payment_blockchain:
+                        subscription.payment_blockchain = payment_blockchain
+                    subscription.status = initial_status
+                    subscription.rejection_reason = ""  # clear old rejection on re-submit
+                    subscription.discount_applied = discount_pct
+                    subscription.amount_due = net_price
+                    subscription.save()
+                else:
+                    subscription = BotSubscription.objects.create(
+                        user=request.user,
+                        plan=plan,
+                        exchange_name=exchange_name,
+                        payment_screenshot=payment_screenshot,
+                        payment_transaction_hash=payment_transaction_hash,
+                        payment_blockchain=payment_blockchain,
+                        status=initial_status,
+                        discount_applied=discount_pct,
+                        amount_due=net_price,
+                    )
 
             return Response(
                 {
@@ -120,6 +166,17 @@ class CreateBotSubscriptionView(APIView):
                     "message": "Subscription created and pending approval",
                     "subscription_id": str(subscription.id),
                     "status": subscription.status,
+                    # G5 / FR A7: null = full plan price (frontend shows plan price)
+                    "amount_due": (
+                        str(subscription.amount_due)
+                        if subscription.amount_due is not None
+                        else None
+                    ),
+                    "discount_applied": (
+                        str(subscription.discount_applied)
+                        if subscription.discount_applied is not None
+                        else None
+                    ),
                 },
                 status=status.HTTP_201_CREATED,
             )
@@ -471,7 +528,12 @@ class ApproveDepositView(APIView):
         responses={200: openapi.Response("Deposit approved")},
     )
     def post(self, request, deposit_id):
-        """Approve a deposit."""
+        """Approve a deposit and open the A5 Quantum AI lock (§A5/G3)."""
+        from django.db import transaction as db_transaction
+
+        from apps.bots.models import QuantumAIFund
+        from services.quantum_locks import QuantumLockError, QuantumLockService
+
         try:
             deposit = get_object_or_404(InvestorDeposit, id=deposit_id)
 
@@ -485,12 +547,70 @@ class ApproveDepositView(APIView):
             usdt_amount = request.data.get("usdt_amount")
 
             if usdt_amount:
-                deposit.usdt_amount = Decimal(str(usdt_amount))
+                try:
+                    deposit.usdt_amount = Decimal(str(usdt_amount))
+                except Exception:
+                    return Response(
+                        {"success": False, "error": "Invalid usdt_amount"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
-            deposit.approve(request.user, notes)
+            # A5 capital: admin-entered USDT value wins; a USDT-denominated
+            # deposit falls back to its raw amount (single balance-of-record).
+            capital = deposit.usdt_amount
+            if capital is None and (deposit.currency or "").upper() == "USDT":
+                capital = deposit.amount
 
-            return Response({"success": True, "message": "Deposit approved successfully"})
+            fund = deposit.fund or QuantumAIFund.objects.filter(is_active=True).first()
+            if fund is None or not fund.is_active:
+                # Same hard requirement as subscription approval — a deposit
+                # must never land without an A5 lock ledger.
+                return Response(
+                    {
+                        "success": False,
+                        "error": "No active Quantum AI fund — create one before approving.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if capital is None:
+                return Response(
+                    {
+                        "success": False,
+                        "error": "usdt_amount is required — enter the deposit value in USDT.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
+            try:
+                lock_days = int(request.data.get("lock_days") or fund.default_lock_days)
+            except (TypeError, ValueError):
+                return Response(
+                    {"success": False, "error": "Invalid lock_days"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Approve + lock creation commit together — either both or neither.
+            with db_transaction.atomic():
+                deposit.approve(request.user, notes)
+                lock = QuantumLockService.create_lock(
+                    user=deposit.user,
+                    fund=fund,
+                    amount=capital,
+                    lock_days=lock_days,
+                    deposit=deposit,
+                )
+
+            return Response(
+                {
+                    "success": True,
+                    "message": "Deposit approved successfully",
+                    "lock_id": str(lock.id),
+                    "matures_at": lock.matures_at.isoformat(),
+                }
+            )
+
+        except QuantumLockError as e:
+            return Response({"success": False, "error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"Error approving deposit {deposit_id}: {str(e)}")
             return Response(
@@ -544,3 +664,282 @@ class RejectDepositView(APIView):
                 {"success": False, "error": "Failed to reject deposit"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+# ==================== G2 / FR A3 — MANUAL MULTI-COIN PAYMENTS ====================
+
+
+class PaymentCoinListView(APIView):
+    """Public read of the admin-configured coin/chain list (step-0 picker)."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        coins = PaymentCoin.objects.filter(is_active=True, deposit_address__gt="")
+        return Response(PaymentCoinSerializer(coins, many=True).data)
+
+
+class PaymentCodeCreateView(APIView):
+    """
+    POST /api/v1/payments/payment-codes/ — step 1: user picks a plan.
+
+    Resolves plan (pk or slug), freezes fiat amount, runs duplicate/capacity
+    pre-flight (409), requires at least one configured coin (400), returns
+    the unique code. Quote/price-lock happens on the detail GET.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ser = PaymentCodeCreateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+
+        if not PaymentCoin.objects.filter(is_active=True, deposit_address__gt="").exists():
+            raise serializers.ValidationError({"coin": "No payment coin is configured yet"})
+
+        # G5 / FR A7: referee discount baked into fiat_amount at code
+        # creation — the quote, verify and fulfill paths all read fiat_amount,
+        # so they price the discounted amount end-to-end with no extra hooks.
+        from services.referral_rewards import ReferralRewardService, apply_discount
+
+        from .services.fulfill import check_order_allowed, plan_fiat_amount
+
+        fiat = plan_fiat_amount(
+            data["order_kind"],
+            data.get("telegram_plan") or data.get("bot_plan"),
+            data.get("billing_cycle", "monthly"),
+        )
+        pct = ReferralRewardService.referee_discount_pct(request.user)
+        if pct > 0:
+            fiat = apply_discount(fiat, pct)
+
+        code = PaymentCode(
+            user=request.user,
+            order_kind=data["order_kind"],
+            telegram_plan=data.get("telegram_plan"),
+            bot_plan=data.get("bot_plan"),
+            billing_cycle=data.get("billing_cycle", "monthly"),
+            fiat_amount=fiat,
+            discount_applied=pct if pct > 0 else None,
+        )
+        # Duplicate/capacity pre-flight BEFORE allocating the code (fail early).
+        check_order_allowed(code)
+        code.save()
+        return Response(PaymentCodeSerializer(code).data, status=status.HTTP_201_CREATED)
+
+
+def _resolve_requested_coin(coin_id: str | None) -> PaymentCoin | None:
+    """
+    Resolve a client-requested payment coin (shared by GET detail + re-request).
+
+    Only active, address-configured coins are selectable. No coin_id → first
+    configured coin by sort_order (same default the picker starts on).
+    """
+    configured = PaymentCoin.objects.filter(is_active=True, deposit_address__gt="")
+    if coin_id:
+        # Guard: a malformed UUID would raise out of the ORM as a 500.
+        try:
+            coin = configured.filter(pk=coin_id).first()
+        except (ValueError, ValidationError):
+            coin = None
+        if coin is None:
+            raise serializers.ValidationError({"coin_id": "Unknown or unconfigured coin"})
+        return coin
+    return configured.first()
+
+
+class PaymentCodeDetailView(APIView):
+    """
+    GET /api/v1/payments/payment-codes/<code>/ — step 2: live quote.
+
+    Re-locks the price when the latest quote is past TTL while the payment
+    window is open (or the caller switched coins via ?coin_id=). Once the
+    window ends the quote stays expired — the client must re-request via
+    POST .../quote/. Once proof is submitted the frozen quote returns
+    unchanged (manual verify at launch).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, code):
+        code_obj = get_object_or_404(PaymentCode, code=code, user=request.user)
+        coin = _resolve_requested_coin(request.query_params.get("coin_id"))
+
+        from .services.quote import QuoteUnavailable, get_or_refresh_quote
+
+        if coin is not None:
+            try:
+                get_or_refresh_quote(code_obj, coin)
+            except QuoteUnavailable:
+                # Price feed down → say so cleanly (standard envelope); the
+                # client retries — never returns a stale/absent amount as
+                # if it were current.
+                raise ServiceUnavailable("Price feed unavailable — retry shortly")
+        return Response(PaymentCodeSerializer(code_obj).data)
+
+
+class PaymentCodeQuoteView(APIView):
+    """
+    POST /api/v1/payments/payment-codes/<code>/quote/ — explicit re-request.
+
+    FR A3: after the payment window ends the user must re-request a quote
+    at the then-current price (no silent re-lock). Resets the window
+    (per-coin admin-configurable, default 6h) and re-locks. Body
+    {coin_id?} selects/switches the coin; response = same payload as GET.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, code):
+        code_obj = get_object_or_404(PaymentCode, code=code, user=request.user)
+        if code_obj.status != "awaiting_payment":
+            raise serializers.ValidationError({"detail": "Code is not awaiting payment"})
+
+        from .services.quote import QuoteUnavailable, renew_quote
+
+        try:
+            coin = _resolve_requested_coin(request.data.get("coin_id"))
+        except serializers.ValidationError:
+            raise  # unknown/unconfigured coin → 400 with field error
+        try:
+            renew_quote(code_obj, coin)
+        except ValueError:
+            # No configured coin exists to price against.
+            raise serializers.ValidationError({"coin_id": "Unknown or unconfigured coin"})
+        except QuoteUnavailable:
+            raise ServiceUnavailable("Price feed unavailable — retry shortly")
+        return Response(PaymentCodeSerializer(code_obj).data)
+
+
+class PaymentCodeProofView(APIView):
+    """
+    POST /api/v1/payments/payment-codes/<code>/proof/ — step 3: submit proof.
+
+    Refreshes the quote if stale (auto-reprice up to submission), freezes
+    rate/amount onto the code, creates the pending_approval subscription,
+    marks the code `submitted` (admin verifies manually at launch).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, code):
+        code_obj = get_object_or_404(PaymentCode, code=code, user=request.user)
+        ser = PaymentCodeProofSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        from .services.fulfill import fulfill_payment_code
+        from .services.quote import QuoteUnavailable, get_or_refresh_quote
+
+        # Final re-price before freezing: a stale quote is re-locked here so
+        # the admin verifies against a rate the user actually saw. If the
+        # client never loaded the detail GET, lock against the first
+        # configured coin so locked_* is always populated.
+        try:
+            if code_obj.current_quote is None:
+                fallback_coin = (
+                    PaymentCoin.objects.filter(is_active=True, deposit_address__gt="")
+                    .order_by("sort_order")
+                    .first()
+                )
+                if fallback_coin is not None:
+                    from .services.quote import create_quote
+
+                    create_quote(code_obj, fallback_coin)
+            get_or_refresh_quote(code_obj, None)
+        except QuoteUnavailable:
+            raise ServiceUnavailable("Price feed unavailable — retry shortly")
+
+        subscription = fulfill_payment_code(
+            code_obj,
+            payment_screenshot=ser.validated_data.get("payment_screenshot"),
+            payment_transaction_hash=ser.validated_data.get("payment_transaction_hash", ""),
+            payment_blockchain=ser.validated_data.get("payment_blockchain", ""),
+            telegram_handle=ser.validated_data.get("telegram_handle", ""),
+        )
+        code_obj.refresh_from_db()
+        payload = PaymentCodeSerializer(code_obj).data
+        payload["subscription_id"] = str(subscription.id)
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+
+# ==================== REFERRAL PAYOUT REQUESTS (G5 / FR A7) ====================
+
+
+class AdminPayoutRequestListView(APIView):
+    """GET /api/v1/payments/admin/payout-requests/ — staff list (default pending)."""
+
+    permission_classes = [IsAdminUser]
+
+    @swagger_auto_schema(
+        manual_parameters=[
+            openapi.Parameter(
+                "status",
+                openapi.IN_QUERY,
+                type=openapi.TYPE_STRING,
+                description="pending | approved | rejected | all (default pending)",
+            )
+        ],
+        responses={200: ReferralPayoutRequestSerializer(many=True)},
+    )
+    def get(self, request):
+        status_filter = request.query_params.get("status", "pending")
+        qs = ReferralPayoutRequest.objects.select_related("user", "decided_by").order_by(
+            "-requested_at"
+        )
+        if status_filter != "all":
+            qs = qs.filter(status=status_filter)
+        return Response(ReferralPayoutRequestSerializer(qs[:200], many=True).data)
+
+
+class AdminPayoutRequestDecideView(APIView):
+    """POST approve|reject a commission payout request (admin only).
+
+    Approve body: {payout_amount, notes} — payout_amount is what was actually
+    paid to the referrer including fees; settles pending accruals FIFO and
+    books one `referral_payout` ledger transaction. Reject body: {notes}.
+    `action` is injected via as_view(action=...), mirroring the deposits
+    approve/reject path convention.
+    """
+
+    permission_classes = [IsAdminUser]
+    action = None  # "approve" | "reject" (set by as_view)
+
+    @swagger_auto_schema(
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                "payout_amount": openapi.Schema(type=openapi.TYPE_NUMBER),
+                "notes": openapi.Schema(type=openapi.TYPE_STRING),
+            },
+        ),
+        responses={200: ReferralPayoutRequestSerializer()},
+    )
+    def post(self, request, request_id):
+        from services.referral_rewards import ReferralRewardError, ReferralRewardService
+
+        try:
+            if self.action == "approve":
+                req = ReferralRewardService.approve_payout_request(
+                    request_id=request_id,
+                    admin=request.user,
+                    payout_amount=request.data.get("payout_amount"),
+                    notes=str(request.data.get("notes") or ""),
+                )
+            else:
+                req = ReferralRewardService.reject_payout_request(
+                    request_id=request_id,
+                    admin=request.user,
+                    notes=str(request.data.get("notes") or ""),
+                )
+        except ReferralPayoutRequest.DoesNotExist:
+            return Response(
+                {"success": False, "error": "Payout request not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except ReferralRewardError as exc:
+            return Response(
+                {"success": False, "error": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(ReferralPayoutRequestSerializer(req).data)

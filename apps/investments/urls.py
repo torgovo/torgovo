@@ -33,4 +33,30 @@ urlpatterns = [
         views.InvestorDepositView.as_view(),
         name="quantum-deposit",
     ),
+    # A5 Quantum AI locks (G3): list / withdraw (user) + credit / decide (admin)
+    path(
+        "bots/quantum-ai/locks/",
+        views.QuantumLockListView.as_view(),
+        name="quantum-locks",
+    ),
+    path(
+        "bots/quantum-ai/locks/<uuid:lock_id>/withdraw/",
+        views.QuantumLockWithdrawView.as_view(),
+        name="quantum-lock-withdraw",
+    ),
+    path(
+        "bots/quantum-ai/locks/<uuid:lock_id>/credit/",
+        views.QuantumLockCreditView.as_view(),
+        name="quantum-lock-credit",
+    ),
+    path(
+        "bots/quantum-ai/withdrawal-requests/",
+        views.QuantumWithdrawalRequestListView.as_view(),
+        name="quantum-withdrawal-requests",
+    ),
+    path(
+        "bots/quantum-ai/withdrawal-requests/<uuid:request_id>/decide/",
+        views.QuantumWithdrawalDecisionView.as_view(),
+        name="quantum-withdrawal-decide",
+    ),
 ]

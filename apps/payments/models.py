@@ -3,6 +3,7 @@ Payment and deposit models for Quantum AI system
 """
 
 import logging
+import secrets
 import uuid
 from decimal import Decimal
 
@@ -22,25 +23,48 @@ logger = logging.getLogger(__name__)
 class SubscriptionPlan(TimeStampedModel):
     """
     Subscription plans for different service tiers.
+
+    G1 (FR A2): plans are fully admin-driven — every price/limit lives in
+    DB rows editable from the admin. Nothing about plan tiers may be
+    hard-coded in application code. ``sort_order`` (not price) controls
+    display order so tiers stay in the canonical Free→Creator ladder.
     """
+
+    MARKET_CHOICES = [
+        ("spot", "Spot only"),
+        ("spot_futures", "Spot + Futures"),
+    ]
 
     name = models.CharField(max_length=50, unique=True)
     slug = models.SlugField(unique=True)
+    description = models.CharField(max_length=255, blank=True)
     price_monthly = models.DecimalField(
         max_digits=10, decimal_places=2, validators=[MinValueValidator(0)]
     )
     price_yearly = models.DecimalField(
         max_digits=10, decimal_places=2, validators=[MinValueValidator(0)]
     )
+    sort_order = models.PositiveIntegerField(default=100)
     max_bots_allowed = models.PositiveIntegerField()
     max_webhooks_allowed = models.PositiveIntegerField(default=10)
+    # FR A2 free-tier limits (admin-editable; paid values seeded as
+    # placeholders — TBD until approved, see migration 0009)
+    bot_types = models.JSONField(default=list, blank=True)
+    market = models.CharField(max_length=20, choices=MARKET_CHOICES, default="spot")
+    max_signals_per_month = models.PositiveIntegerField(default=10)
+    max_exchanges = models.PositiveIntegerField(default=1)
     features = models.JSONField(default=list)
     is_active = models.BooleanField(default=True)
     stripe_price_id = models.CharField(max_length=100, blank=True)
     trial_days = models.PositiveIntegerField(default=0)
+    # G5 / FR A7 referral commission tier ladder: holders of a plan with this
+    # flag earn cash commissions on their referees' payments (seeded:
+    # creator=True in migration 0013; admin-editable, no code constants).
+    grants_referral_commission = models.BooleanField(default=False)
 
     class Meta:
         db_table = "payments_subscription_plans"
+        ordering = ["sort_order", "price_monthly"]
         indexes = [
             models.Index(fields=["slug"]),
             models.Index(fields=["is_active"]),
@@ -48,6 +72,20 @@ class SubscriptionPlan(TimeStampedModel):
 
     def __str__(self):
         return f"{self.name} (${self.price_monthly}/month)"
+
+    @property
+    def annual_discount_pct(self):
+        """Derived annual saving vs paying monthly (0 for free plans).
+
+        Coerces via str() so both Decimal (post-refresh) and float
+        (pre-refresh instance attrs) work without TypeError.
+        """
+        monthly = Decimal(str(self.price_monthly or 0))
+        yearly = Decimal(str(self.price_yearly or 0))
+        if monthly <= 0 or yearly <= 0:
+            return 0
+        full_year = monthly * 12
+        return int(round((Decimal(1) - (yearly / full_year)) * 100))
 
     @property
     def feature_dict(self):
@@ -348,6 +386,9 @@ class PaymentTransaction(TimeStampedModel):
         ("subscription", "Subscription"),
         ("refund", "Refund"),
         ("fee", "Fee"),
+        # G5: cash commission paid out to a referrer (linked from
+        # ReferralPayoutRequest.payment_transaction)
+        ("referral_payout", "Referral payout"),
     ]
 
     user = models.ForeignKey(
@@ -414,6 +455,87 @@ class ReferralPayout(SoftDeleteModel):
         return f"Referral: {self.amount} - {self.referrer.email}"
 
 
+class ReferralPayoutRequest(SoftDeleteModel):
+    """G5 / FR A7: referrer requests a cash payout of accrued commissions.
+
+    Flow (mirrors quantum withdrawal requests): the user asks for
+    `amount_requested` (USD, must be >= admin-configured payout_minimum_usd
+    and <= their pending ReferralPayout balance). An admin then pays the
+    referrer in crypto/fiat OUTSIDE the platform, enters the actual
+    `admin_entered_payout` (covering network fees) and decides. On approve,
+    FIFO-slices the pending ReferralPayout rows covering `amount_requested`
+    to paid and books one `referral_payout` PaymentTransaction for the
+    admin-entered amount; on reject the accruals stay pending untouched.
+    """
+
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="referral_payout_requests",
+    )
+    amount_requested = models.DecimalField(max_digits=20, decimal_places=8)
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True
+    )
+
+    # Decision fields (admin)
+    admin_entered_payout = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        null=True,
+        blank=True,
+        help_text="Actual amount paid out to the referrer, incl. fees",
+    )
+    admin_notes = models.TextField(blank=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="decided_referral_payout_requests",
+    )
+    # Ledger bookkeeping: the referral_payout PaymentTransaction created at
+    # approval (null until then).
+    payment_transaction = models.ForeignKey(
+        PaymentTransaction,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="referral_payout_requests",
+    )
+
+    requested_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "payments_referral_payout_requests"
+        ordering = ["-requested_at"]
+        constraints = [
+            # G5 race guard: at most ONE pending request per user. The service
+            # checks exists() but two concurrent POSTs could both pass without
+            # this DB-level constraint.
+            models.UniqueConstraint(
+                fields=["user"],
+                condition=models.Q(status="pending"),
+                name="uniq_pending_payout_request_per_user",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "status"]),
+            models.Index(fields=["status", "-requested_at"]),
+        ]
+
+    def __str__(self):
+        return f"Payout {self.amount_requested} by {self.user.email} [{self.status}]"
+
+
 # ==================== NEW BOT SUBSCRIPTION MODELS ====================
 
 
@@ -438,8 +560,23 @@ class BotSubscriptionPlan(SoftDeleteModel):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    bot_type = models.CharField(max_length=20, choices=BOT_TYPE_CHOICES, unique=True)
+    # unique removed (G5): the Model C tier ladder needs one "custom" shim
+    # plan per tier (Free/Basic/Standard/Premium/Creator) — bot_type is a
+    # coarse type discriminator only. Regression doc: see docs/
+    # regression-bot-type-unique-drop.md
+    bot_type = models.CharField(max_length=20, choices=BOT_TYPE_CHOICES)
     name = models.CharField(max_length=100)
+    # G5 tier bridge: which Model C SubscriptionPlan tier this bot plan
+    # belongs to (null for pure per-bot plans like grid/martingale). The
+    # referral commission tier check walks BotSubscription -> plan ->
+    # subscription_plan.
+    subscription_plan = models.ForeignKey(
+        SubscriptionPlan,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="bot_subscription_plans",
+    )
     price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
     duration_days = models.IntegerField(choices=DURATION_CHOICES, default=30)
     description = models.TextField(blank=True)
@@ -501,6 +638,26 @@ class BotSubscription(SoftDeleteModel):
         max_length=20, choices=ExchangeCredentials.EXCHANGE_CHOICES, blank=True
     )
 
+    # G5 / FR A7 referee discount (first subscription payment only):
+    # discount_applied = percent taken (e.g. 15.00 = 15% off, null = none);
+    # amount_due = net payable after the discount (null = full plan price).
+    # amount_due is also the commission accrual basis when set (payment-code
+    # fulfill copies the already-discounted fiat_amount here).
+    discount_applied = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Referee discount percent applied at subscribe (FR A7); null = none",
+    )
+    amount_due = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Net payable after referee discount; null = full plan price",
+    )
+
     # Admin approval fields
     approved_by = models.ForeignKey(
         User,
@@ -525,6 +682,19 @@ class BotSubscription(SoftDeleteModel):
     started_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
 
+    # G4 / FR A6 expiry lifecycle:
+    # grace_until = end of the 2-day (configurable) grace window AFTER
+    # expires_at during which the user keeps FULL access; after it the
+    # subscription is hard-stopped (no new bot entries).
+    grace_until = models.DateTimeField(
+        null=True, blank=True, help_text="End of post-expiry grace window (FR A6)"
+    )
+    # Idempotency ledger for expiry reminder emails: {"D-7": "<ISO ts>", ...}.
+    # Keys reset on every approve() so each paid term re-arms its reminders.
+    expiry_reminders_sent = models.JSONField(
+        default=dict, blank=True, help_text="Offsets already emailed this term (e.g. D-7)"
+    )
+
     # Bot-specific fields
     webhook_secret = models.CharField(
         max_length=64, unique=True, blank=True, null=True, help_text="For custom bots"
@@ -547,10 +717,26 @@ class BotSubscription(SoftDeleteModel):
         return f"{self.user.email} - {self.plan.name} ({self.status})"
 
     def approve(self, approved_by, notes=""):
-        """Approve the subscription (manual admin approval)."""
+        """Approve (or re-approve after expiry) and start the paid clock.
+
+        G4 / FR A6: approval now stamps started_at and derives expires_at
+        from plan.duration_days. Grace window = expires_at + the
+        admin-configured SUBSCRIPTION_GRACE_PERIOD_DAYS. Reminder ledger is
+        cleared so the new term re-arms D-7/5/3/1 emails. Re-approving an
+        expired row restores access while RETAINING all bot rows (they keep
+        their FK to this same subscription — A6 "retained data").
+        """
+        now = timezone.now()
+        duration_days = getattr(self.plan, "duration_days", None) or 30
+        grace_days = getattr(settings, "SUBSCRIPTION_GRACE_PERIOD_DAYS", 2)
+
         self.status = "active"
         self.approved_by = approved_by
-        self.approved_at = timezone.now()
+        self.approved_at = now
+        self.started_at = now
+        self.expires_at = now + timezone.timedelta(days=duration_days)
+        self.grace_until = self.expires_at + timezone.timedelta(days=grace_days)
+        self.expiry_reminders_sent = {}
         self.notes = notes
         self.save()
 
@@ -581,3 +767,210 @@ class BotSubscription(SoftDeleteModel):
             "order_id": "{{strategy.order.id}}",
             "price": "{{close}}",
         }
+
+
+# ============================================================================
+# G2 / FR A3 — MANUAL MULTI-COIN PAYMENTS: coin list, payment code, quote
+# ----------------------------------------------------------------------------
+# Domain split (deliberate): BlockchainAddress (above) is WITHDRAWAL-side
+# (hot wallets, balances, confirmations). PaymentCoin below is RECEIVE-side
+# config for plan payments only — lean on purpose, seeded by
+# `manage.py seed_payment_coins`, addresses left blank until admin sets the
+# real on-chain deposit addresses.
+# ============================================================================
+
+
+class PaymentCoin(TimeStampedModel):
+    """
+    Admin-configurable coin/chain list for receiving plan payments (FR A3).
+
+    Launch set (seeded): USDT on TRC20, BEP20, ERC20.
+    `deposit_address` starts blank — the seed never invents addresses;
+    code creation fails with a clear 400 until admin sets a real address.
+    """
+
+    coin = models.CharField(max_length=10)  # e.g. USDT — free text, not choice-locked
+    chain = models.CharField(max_length=20)  # e.g. TRC20 / BEP20 / ERC20
+    deposit_address = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="On-chain receive address. Empty = not configured yet.",
+    )
+    memo = models.CharField(
+        max_length=100, blank=True, help_text="Tag/memo if the chain requires one"
+    )
+    min_amount = models.DecimalField(
+        max_digits=20, decimal_places=8, default=0, validators=[MinValueValidator(0)]
+    )
+    # Per-chain buffer covering network fees, in COIN units (e.g. 0.20 USDT).
+    # Included in the quote's combined payable amount (plan price + this fee).
+    # Seeded at 0 — the seed never invents values; admin sets real buffers.
+    network_fee = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        default=0,
+        validators=[MinValueValidator(0)],
+        help_text="Chain fee buffer in coin units, added to plan price in quotes",
+    )
+    # Admin-configurable payment-window length (FR A3: default 6 hours).
+    # After this expires the user must explicitly re-request a quote.
+    quote_window_seconds = models.PositiveIntegerField(
+        default=21600,
+        help_text="How long a payment window stays open (seconds) before re-request is required",
+    )
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=10)
+
+    class Meta:
+        db_table = "payments_payment_coins"
+        unique_together = ["coin", "chain"]
+        ordering = ["sort_order", "coin", "chain"]
+
+    def __str__(self):
+        return f"{self.coin} on {self.chain}"
+
+    @property
+    def is_configured(self):
+        """Address must be set by an admin before quotes can point at it."""
+        return bool(self.deposit_address)
+
+
+class PaymentCode(TimeStampedModel):
+    """
+    Unique per-order payment handle (FR A3 step 1).
+
+    Created when the user picks a plan; carries the frozen fiat amount.
+    The crypto amount lives on PaymentQuote rows (price re-locks while the
+    code is still `awaiting_payment`; frozen at proof submission).
+    """
+
+    ORDER_KIND_CHOICES = [
+        ("telegram_signal", "Telegram Signal Plan"),
+        ("bot", "Bot Subscription Plan"),
+    ]
+    STATUS_CHOICES = [
+        ("awaiting_payment", "Awaiting Payment"),
+        ("submitted", "Proof Submitted"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+        ("cancelled", "Cancelled"),
+    ]
+
+    code = models.CharField(max_length=12, unique=True, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="payment_codes")
+    order_kind = models.CharField(max_length=20, choices=ORDER_KIND_CHOICES)
+    # Exactly one of the two plan FKs is set, matching order_kind.
+    telegram_plan = models.ForeignKey(
+        "subscriptions.TelegramSignalPlan",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="payment_codes",
+    )
+    bot_plan = models.ForeignKey(
+        SubscriptionPlan,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="payment_codes",
+    )
+    billing_cycle = models.CharField(max_length=16, default="monthly")
+    fiat_amount = models.DecimalField(
+        max_digits=10, decimal_places=2, validators=[MinValueValidator(0)]
+    )
+    # G5 / FR A7: referee discount percent baked into fiat_amount at code
+    # creation (null = full price); copied onto the subscription at fulfill.
+    discount_applied = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Referee discount percent applied to fiat_amount (FR A7); null = none",
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="awaiting_payment", db_index=True
+    )
+    # Polymorphic pointer to the subscription created at proof time
+    # (TelegramSubscription or BotSubscription — order_kind disambiguates).
+    subscription_id = models.CharField(max_length=36, blank=True)
+    # Frozen rate/crypto amount at proof submission (audit for admin verify).
+    locked_rate = models.DecimalField(max_digits=18, decimal_places=8, null=True, blank=True)
+    locked_crypto_amount = models.DecimalField(
+        max_digits=20, decimal_places=8, null=True, blank=True
+    )
+    locked_coin = models.CharField(max_length=10, blank=True)
+    # End of the open payment window (FR A3): set at the first quote,
+    # reset only by an explicit re-request. While open, TTL-expired polls
+    # re-lock automatically; once past, the quote stays expired until the
+    # user re-requests (no silent re-lock at the then-current price).
+    quote_window_expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "payments_payment_codes"
+        indexes = [
+            models.Index(fields=["user", "status"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.code:
+            self.code = self._generate_code()
+        super().save(*args, **kwargs)
+
+    @staticmethod
+    def _generate_code():
+        """Unambiguous uppercase code (no 0/O/1/I) — readable off a screen."""
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        while True:
+            code = "".join(secrets.choice(alphabet) for _ in range(10))
+            if not PaymentCode.objects.filter(code=code).exists():
+                return code
+
+    def __str__(self):
+        return f"{self.code} ({self.get_status_display()})"
+
+    @property
+    def plan(self):
+        """The resolved plan object for this code's order kind."""
+        return self.telegram_plan if self.order_kind == "telegram_signal" else self.bot_plan
+
+    @property
+    def current_quote(self):
+        """Latest quote row (the live price lock, if any)."""
+        return self.quotes.order_by("-locked_at").first()
+
+
+class PaymentQuote(TimeStampedModel):
+    """
+    One price-lock event for a PaymentCode (FR A3 step 2).
+
+    Short refresh cadence (default 300s = 5 minutes — FE auto-updates the
+    combined amount while the payment window is open). The row's expires_at
+    is truncated at the payment window end, so `is_expired` flips exactly
+    when re-request becomes required. `crypto_amount` is the combined
+    payable amount (plan price + per-chain fee buffer). History is kept for
+    audit; at proof submission the latest quote is frozen onto locked_*.
+    """
+
+    code = models.ForeignKey(PaymentCode, on_delete=models.CASCADE, related_name="quotes")
+    coin = models.ForeignKey(PaymentCoin, on_delete=models.PROTECT, related_name="quotes")
+    fiat_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    rate = models.DecimalField(max_digits=18, decimal_places=8, help_text="USD per 1 unit of coin")
+    crypto_amount = models.DecimalField(max_digits=20, decimal_places=8)
+    locked_at = models.DateTimeField()
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "payments_payment_quotes"
+        ordering = ["-locked_at"]
+        indexes = [
+            models.Index(fields=["code", "locked_at"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.crypto_amount} {self.coin.coin} @ {self.rate} ({self.code.code})"
+
+    @property
+    def is_expired(self):
+        return timezone.now() >= self.expires_at

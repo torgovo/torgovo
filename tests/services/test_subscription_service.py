@@ -9,6 +9,17 @@ pytestmark = pytest.mark.django_db
 
 
 class TestApproveSubscription:
+    @pytest.fixture(autouse=True)
+    def _patch_g5_referral_hook(self):
+        """G5 hook calls ReferralRewardService.record_subscription_payment
+        which crashes on MagicMock subscriptions (amount_due is a MagicMock).
+        These are unit tests for approve_subscription — patch the hook out."""
+        with patch(
+            "services.referral_rewards.ReferralRewardService.record_subscription_payment",
+            return_value=None,
+        ):
+            yield
+
     def test_approve_pending_payment_success(self):
         mock_sub = MagicMock()
         mock_sub.status = "pending_payment"
@@ -57,16 +68,23 @@ class TestApproveSubscription:
             with pytest.raises(ValueError, match="Cannot approve subscription with status: active"):
                 SubscriptionService.approve_subscription("sub-123", "admin")
 
-    def test_approve_expired_status(self):
+    def test_approve_expired_status_allowed_for_resubscribe(self):
+        # G4 / FR A6: re-subscribe restore — an "expired" row MUST be
+        # re-approvable (approve() stamps a fresh clock, bots retained).
         mock_sub = MagicMock()
         mock_sub.status = "expired"
+        mock_sub.plan.bot_type = "custom"
+        mock_sub.user.email = "test@example.com"
+        mock_sub.id = "sub-123"
 
         with patch(
             "services.subscription_service.BotSubscription.objects.select_for_update"
         ) as mock_sfu:
             mock_sfu.return_value.get.return_value = mock_sub
-            with pytest.raises(ValueError, match="expired"):
-                SubscriptionService.approve_subscription("sub-123", "admin")
+            with patch("services.subscription_service.AuditLog.objects.create"):
+                result = SubscriptionService.approve_subscription("sub-123", "admin")
+                mock_sub.approve.assert_called_once_with("admin", "")
+                assert result == mock_sub
 
     def test_approve_cancelled_status(self):
         mock_sub = MagicMock()
@@ -315,28 +333,37 @@ class TestCreateInvestorPortfolio:
 
         mock_fund = MagicMock()
         mock_fund.total_deposits = Decimal("1000")
+        mock_fund.default_lock_days = 30
 
         with patch("services.subscription_service.QuantumAIFund.objects.filter") as mock_filter:
             mock_filter.return_value.first.return_value = mock_fund
             with patch(
                 "services.subscription_service.InvestorPortfolio.objects.create"
             ) as mock_create:
-                mock_investment = MagicMock()
-                mock_investment.amount = Decimal("100")
-                mock_investment.calculate_share_percentage.return_value = Decimal("10.0")
-                mock_create.return_value = mock_investment
+                with patch("services.quantum_locks.QuantumLockService.create_lock") as mock_lock:
+                    mock_investment = MagicMock()
+                    mock_investment.amount = Decimal("100")
+                    mock_investment.calculate_share_percentage.return_value = Decimal("10.0")
+                    mock_create.return_value = mock_investment
 
-                SubscriptionService._create_quantum_ai_investment(mock_sub)
+                    SubscriptionService._create_quantum_ai_investment(mock_sub)
 
-                mock_filter.assert_called_once_with(is_active=True)
-                mock_create.assert_called_once()
-                args, kwargs = mock_create.call_args
-                assert kwargs["user"] == mock_user
-                assert kwargs["fund"] == mock_fund
-                assert kwargs["subscription"] == mock_sub
-                assert kwargs["status"] == "pending"
-                mock_investment.calculate_share_percentage.assert_called_once()
-                mock_investment.save.assert_called_once()
+                    mock_filter.assert_called_once_with(is_active=True)
+                    mock_create.assert_called_once()
+                    args, kwargs = mock_create.call_args
+                    assert kwargs["user"] == mock_user
+                    assert kwargs["fund"] == mock_fund
+                    assert kwargs["subscription"] == mock_sub
+                    assert kwargs["status"] == "pending"
+                    mock_investment.calculate_share_percentage.assert_called_once()
+                    mock_investment.save.assert_called_once()
+                    # A5: investment creation also opens the investor lock
+                    mock_lock.assert_called_once()
+                    lock_kwargs = mock_lock.call_args[1]
+                    assert lock_kwargs["user"] == mock_user
+                    assert lock_kwargs["fund"] == mock_fund
+                    assert lock_kwargs["subscription"] == mock_sub
+                    assert lock_kwargs["lock_days"] == 30
 
     def test_no_active_fund_raises_error(self):
         mock_sub = MagicMock()
@@ -353,16 +380,19 @@ class TestCreateInvestorPortfolio:
         mock_sub.user = mock_user
         mock_fund = MagicMock()
         mock_fund.total_deposits = Decimal("1000")
+        mock_fund.default_lock_days = 30
 
         with patch("services.subscription_service.QuantumAIFund.objects.filter") as mock_filter:
             mock_filter.return_value.first.return_value = mock_fund
             with patch(
                 "services.subscription_service.InvestorPortfolio.objects.create"
             ) as mock_create:
-                mock_investment = MagicMock()
-                mock_investment.calculate_share_percentage.return_value = Decimal("5.0")
-                mock_create.return_value = mock_investment
+                with patch("services.quantum_locks.QuantumLockService.create_lock") as mock_lock:
+                    mock_investment = MagicMock()
+                    mock_investment.calculate_share_percentage.return_value = Decimal("5.0")
+                    mock_create.return_value = mock_investment
 
-                SubscriptionService._create_quantum_ai_investment(mock_sub)
+                    SubscriptionService._create_quantum_ai_investment(mock_sub)
 
-                assert mock_create.call_args[1]["status"] == "pending"
+                    assert mock_create.call_args[1]["status"] == "pending"
+                    mock_lock.assert_called_once()

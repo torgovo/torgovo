@@ -61,10 +61,52 @@ urlpatterns = [
         payment_views.AdminRejectSubscriptionView.as_view(),
         name="admin-reject-subscription",
     ),
+    # G2 / FR A3 — manual multi-coin payment codes
+    path(
+        "payment-coins/",
+        payment_views.PaymentCoinListView.as_view(),
+        name="payment-coin-list",
+    ),
+    path(
+        "payment-codes/",
+        payment_views.PaymentCodeCreateView.as_view(),
+        name="payment-code-create",
+    ),
+    path(
+        "payment-codes/<str:code>/",
+        payment_views.PaymentCodeDetailView.as_view(),
+        name="payment-code-detail",
+    ),
+    path(
+        "payment-codes/<str:code>/proof/",
+        payment_views.PaymentCodeProofView.as_view(),
+        name="payment-code-proof",
+    ),
+    path(
+        "payment-codes/<str:code>/quote/",
+        payment_views.PaymentCodeQuoteView.as_view(),
+        name="payment-code-quote",
+    ),
     # User deposit management (Quantum AI)
     path(
         "quantum-ai/<uuid:bot_id>/deposit/",
         payment_views.CreateDepositView.as_view(),
         name="create_deposit",
+    ),
+    # G5 / FR A7 — admin commission payout decisions
+    path(
+        "admin/payout-requests/",
+        payment_views.AdminPayoutRequestListView.as_view(),
+        name="admin-payout-request-list",
+    ),
+    path(
+        "admin/payout-requests/<uuid:request_id>/approve/",
+        payment_views.AdminPayoutRequestDecideView.as_view(action="approve"),
+        name="admin-payout-request-approve",
+    ),
+    path(
+        "admin/payout-requests/<uuid:request_id>/reject/",
+        payment_views.AdminPayoutRequestDecideView.as_view(action="reject"),
+        name="admin-payout-request-reject",
     ),
 ]

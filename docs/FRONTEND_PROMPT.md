@@ -2,7 +2,7 @@
 
 > **What this is:** a complete, verified reference for building/adapting a frontend against the Torgovo backend API. Every route below was read directly from Django `urls.py` and views/serializers source on **2026-08-21**, re-verified and updated **2026-10-07** (API-consistency fixes A5/A7/A8/A9/A10/A14/A15/A16: uniform error envelope, 409 conflicts, always-200 `my-subscription/`, pk-or-slug plan ids, public plan lists). Treat this as the single source of truth for contracts, auth, security constraints, and limitations.
 >
-> **What to do:** use this document as the working prompt for the frontend AI. Your existing frontend is the target — the now-deleted `frontend/` scaffold stub in the repo is NOT to be resurrected.
+> **What to do (grill Q21, 2026-10-13):** the frontend is the real dashboard repo **`MuhammadUlHasnain/torgovo-quantum-trader`** — it is THE frontend (the local `torgovo2/frontend/` scaffold stub is dead and must NOT be resurrected). It already contains `src/App.tsx` (routes, §14.5), `src/lib/api.ts` (fetch `ApiClient`), `src/lib/authToken.ts`, and `src/types/api.ts` (⚠️ models the OLD backend — replace from §14.4). This doc is NOT yet a complete handoff: first **finish these sections + sync them with that repo's actual code**, then hand it to the frontend AI.
 >
 > **Merged (2026-10-07):** `docs/frontend-connectivity.md` and `docs/FRONTEND.md` were absorbed into this file (originals preserved in `docs/archive/`). Auth token keys, refresh body, pagination type, and WebSocket status were re-verified against source on 2026-10-07 — where this doc previously disagreed (e.g. `access`/`refresh` keys), **this doc is now corrected**.
 
@@ -43,11 +43,11 @@ X-Webhook-Token: <uuid>                     (only for indicator webhooks — bac
 |----------|--------|-----------|
 | Framework | React 18+ with Vite + TypeScript | TS-first; interfaces in §14.4 |
 | Routing | react-router-dom v6 | Standard for React SPAs |
-| HTTP client | Axios | Interceptors for token refresh (§14.2) |
+| HTTP client | **`fetch`** via the existing `src/lib/api.ts` ApiClient (upgraded — §14.1) | Already present, zero dependencies; **no Axios** (decision ②, 2026-10-13) |
 | State management | React Context + useReducer for auth; React Query (TanStack Query) for server data | No Redux needed for this scope |
-| UI library | TailwindCSS + Headless UI | — |
+| UI library | TailwindCSS + **shadcn/ui** | Already installed (not Headless UI) |
 | WebSocket | Native WebSocket API | No library needed (§13) |
-| Charts | TradingView Lightweight Charts or Recharts | For portfolio/bot performance |
+| Charts | **Recharts** (installed) | For portfolio/bot performance |
 | Forms | React Hook Form + Zod validation | Type-safe schemas |
 
 ---
@@ -62,11 +62,16 @@ All endpoints requiring a user (or admin) need this header. Omit it → `401 {"d
 
 ### 2.2 Token lifecycle (frontend must implement)
 1. **Login** → `POST /api/auth/login/` returns `{"user": {...}, "tokens": {"access_token", "refresh_token"}, "message"}`.
-2. Store both (HttpOnly cookie or secure storage — never in plain JS-visible storage if possible; at minimum guard against XSS).
+2. **Store tokens via the existing `src/lib/authToken.ts`** — in-memory + `sessionStorage` mirror (approved; `sessionStorage` is tab-scoped/cleared-on-close, and the module migrates legacy `localStorage` tokens off). Do not add a second storage path.
 3. **Every API call** attaches `access_token` as `Authorization: Bearer <access_token>`.
 4. **Before expiry / on `401`** → `POST /api/auth/refresh-token/` with `{"refresh_token": "<refresh_token>"}` → `{"access_token", "refresh_token", "message"}`.
    ⚠️ Rotation on: each refresh invalidates the old refresh token — **always store BOTH returned tokens**, not just the access token. On refresh failure the whole session is dead — **force re-login**, do not retry in a loop.
 5. **Logout** → `POST /api/auth/logout/` with optional `{"refresh_token": "..."}` blacklists the refresh token server-side.
+
+**Required additions to the current code (grill Q21):**
+- Refresh-on-401 with rotation is **not yet implemented** in `src/lib/api.ts` — add it (single-flight, §14.1).
+- Logout must actually **call `auth/logout/`** (currently only clears local state).
+- 🐛 **Redirect bug:** `src/lib/api.ts` sends unauthenticated users to `/login` (line ~27) but the app route is **`/auth/login`** — fix or every forced re-login 404s.
 
 **Verified auth response shapes (source: `apps/authentication/views.py`, 2026-10-07):**
 - `register/` → **201** `{"user": {...}, "tokens": {"access_token", "refresh_token"}, "message": "...", "verification_sent": true}`
@@ -184,7 +189,7 @@ ViewSet routes (DRF default: list/create/retrieve/update/partial_update/destroy 
 - `my-subscription/` → **always 200, never 404.** Two shapes: a flat subscription object (fields incl. `status`, `end_date`, plan data) when any own row exists — active rows are preferred, otherwise the latest row of any status (so `pending_payment`/`pending_approval` are visible and renderable) — or `{"subscription": null}` when the user has never subscribed. Parse defensively: `data.subscription === null` → "no subscription"; otherwise treat the top-level object as the subscription.
 - `telegram/subscribe/` **request** (multipart): `plan_id` (UUID/int pk **or** slug), `telegram_handle` (required), payment proof — either `payment_screenshot` (file) **or** `payment_transaction_hash` (+ optional `payment_blockchain`), `billing_cycle` (optional: `monthly` | `quarterly` | `yearly`, default `monthly`). **201** → `{"subscription_id", "status": "pending_approval", "message"}`. **409** on duplicate → envelope with `error.details.subscription_id` + `error.details.status` (link the user to their existing subscription). **409** if plan at `max_subscribers` capacity.
 - `bot-subscribe/` **request**: `plan_id` (slug **or** numeric pk) — same 409-with-metadata behaviour as telegram/subscribe on duplicates.
-- `telegram/plans/` → flat `{"plans": [...]}` (cached 1h, invalidated server-side on plan changes); each plan includes a `features` object (`max_daily_signals`, `exchanges_covered`, `risk_level`, `include_premium_signals`) — use it for pricing-page feature lists. `bot-plans/` → same flat shape for `payments.SubscriptionPlan`.
+- `telegram/plans/` → flat `{"plans": [...]}` (cached 1h, invalidated server-side on plan changes); each plan includes a `features` object (`max_daily_signals`, `exchanges_covered`, `risk_level`, `include_premium_signals`) — use it for pricing-page feature lists. `bot-plans/` → same flat shape for `payments.SubscriptionPlan`. **G1 (2026-10-12): every plan now also returns `description`, `sort_order` (display order — sort by it, not price), `bot_types` (string[]), `market` (`'spot'` | `'spot_futures'`), `max_signals_per_month`, `max_exchanges`, `annual_discount_pct` (derived, e.g. 20 = 20% off annual). All values are admin-editable DB config (Model C, FR A2) — render tiers from the response, never hardcode prices or limits. Canonical order after `sort_order` asc: free, basic, standard, premium, creator.
 - Plan capacity is enforced server-side on this model family (SignalBot uniqueness per subscription; `max_subscribers` counts non-terminal rows — `null` = unlimited).
 
 ---
@@ -296,8 +301,17 @@ Webhooks (external, not frontend):
 | POST | `subscriptions/bot/<str:subscription_id>/approve/` | admin | Approve bot subscription |
 | POST | `subscriptions/bot/<str:subscription_id>/reject/` | admin | Reject bot subscription |
 | POST | `quantum-ai/<uuid:bot_id>/deposit/` | user | Deposit into Quantum AI bot |
+| GET | `payment-coins/` | public | Configured receive coins/chains (deposit_address only when set) |
+| POST | `payment-codes/` | user | Create unique payment code + first quote (G2/FR A3) |
+| GET | `payment-codes/<code>/` | user | Payment code detail + live quote (`?coin_id=` switches coin) |
+| POST | `payment-codes/<code>/quote/` | user | Explicit re-request after window expiry → fresh quote, window restarts |
+| POST | `payment-codes/<code>/proof/` | user | Submit TX hash/screenshot → pending_approval subscription |
 
 **Key contracts:**
+- **Payment codes (G2/FR A3 — manual multi-coin launch flow), 3 steps:**
+  1. `POST payment-codes/` `{order_kind: "telegram_signal"|"bot", plan_id, billing_cycle?}` → 201 `{code, fiat_amount, status: "awaiting_payment", …}`. Bot orders force `monthly`. 409 duplicate (`error.details.subscription_id` → "already subscribed") / plan capacity; 400 `{coin: …}` if no receive coin is configured.
+  2. `GET payment-codes/<code>/` → `{…, quote_window_expires_at, quote: {coin: {coin, chain, deposit_address, network_fee}, fiat_amount, rate, crypto_amount, expires_at, is_expired}}` — **poll while awaiting payment**: the quote shows the **final combined payable amount** (plan price + per-chain fee — e.g. `15.00 + 0.20 = 15.20 USDT` for Basic on TRC20; `quote.coin.network_fee` renders as `TRC20 (fee: 0.20 USDT)`) and **auto-updates every 5 minutes**; it **expires after 6 h** (admin-configurable per coin via `quote_window_expires_at`, FR A3) — when `quote.is_expired`, show a **re-request** action → `POST payment-codes/<code>/quote/` body `{coin_id?}` → 200 same payload, re-locks at the then-current price and **restarts the window** (400 unknown coin / non-awaiting code, 404 other user's code). GET polling **never silently re-locks after window expiry** (stays expired until re-request). `?coin_id=` switches receive coin (400 unknown coin). **503 `SERVICE_UNAVAILABLE` while the price feed is down → retry with backoff, never invent a fallback amount.** Proof submitted after expiry freezes the **stale** (last-seen) amount — never re-prices at that point. After proof submission the price is frozen on the code (`locked_rate` / `locked_crypto_amount`).
+  3. `POST payment-codes/<code>/proof/` — JSON `{payment_transaction_hash, payment_blockchain?, telegram_handle}` (telegram_handle required for telegram_signal) **or** multipart `payment_screenshot` → 201 `{subscription_id, status: "submitted", locked_rate, locked_crypto_amount, …}`. 409 if already submitted or a legacy subscription appeared meanwhile; 404 for another user's code. Status then flips `approved`/`rejected` by admin — keep polling step 2 for it.
 - **Withdrawal requires 2FA**: `POST withdrawals/` payload must include the current TOTP code as **`two_factor_code`** (required, write-only, validated not stored — `apps/payments/serializers.py:149`) and the user must have `two_factor_enabled=True`. Missing/weak/no-2FA → error telling the user to enable 2FA first.
 - `subscriptions/bot/create/` creates a **pending** subscription awaiting admin approval — UI must show "pending approval" state.
 - Deposits are admin-approve/reject gated (Quantum AI) — UI must show pending status until approved.
@@ -308,12 +322,52 @@ Webhooks (external, not frontend):
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `my-stats/` | user | Referral stats + codes |
+| GET | `my-stats/` | user | Referral stats + codes + G5 hybrid reward fields |
 | POST | `apply/` | user | Apply a referral code (`{"code": "..."}`) at first login |
+| GET | `payout-requests/` | user | Own commission payout requests, newest first |
+| POST | `payout-requests/` | user | File a payout request `{"amount": "50.00"}` against pending commission |
 
-- `my-stats/` → `{"referral_code", "total_referrals", "total_bonus_usdt", "referral_link"}` (`referral_link` = full signup URL with `?ref=` — render/copy it directly).
-- `apply/` success (200) → `{"message": "Referral code applied successfully", "referrer": "<email>"}`.
-- Rejections (invalid / self / already-applied) → **400 in the standard error envelope** (§11); read `error.message` for display. Codes are CSPRNG-generated.
+### `my-stats/` response
+
+Legacy keys (contract-stable, additive):
+
+```json
+{
+  "referral_code": "ABC123",
+  "total_referrals": 4,
+  "total_bonus_usdt": "0.00",
+  "referral_link": "https://site/signup?ref=ABC123"
+}
+```
+
+G5 / FR A7 hybrid reward fields (same response — **one model per user, never both**):
+
+```json
+{
+  "reward_model": "commission",          // "commission" (creator-tier) | "referee_discount" (everyone else)
+  "commission_pct": "10",                // Decimal string; null when reward_model = "referee_discount"
+  "commission_pending_usd": "120.00",    // unpaid accruals (ReferralPayout status="pending")
+  "commission_paid_usd": "30.00",        // already-paid accruals
+  "payout_minimum_usd": "50.00",         // min amount for POST payout-requests
+  "referee_discount_pct": null,          // e.g. "20"; null when reward_model = "commission"
+  "has_pending_payout_request": false    // true → disable the "Request payout" button
+}
+```
+
+- Creator-tier referrers see `reward_model: "commission"` — render pending/paid totals + payout form.
+- Everyone else sees `reward_model: "referee_discount"` — show "your referrals get X% off their first payment" and hide commission UI.
+- `referral_link` = full signup URL with `?ref=` — render/copy it directly.
+
+### `apply/`
+
+Success (200) → `{"message": "Referral code applied successfully", "referrer": "<email>"}`.
+Rejections (invalid / self / already-applied) → **400 in the standard error envelope** (§11); read `error.message` for display. Codes are CSPRNG-generated.
+
+### `payout-requests/`
+
+- **GET** → `{"payout_requests": [...]}` newest first. Each row: `{id, amount_requested, status, admin_entered_payout, admin_notes, decided_at, requested_at}`. `status` ∈ `"pending" | "approved" | "rejected"`.
+- **POST** `{"amount": "50.00"}` → `201` with `{id, amount_requested, status, ...}`. Amount must be ≥ `payout_minimum_usd` and ≤ pending commission balance; violations → **400 in the standard error envelope** (§11).
+- After filing, `has_pending_payout_request` in `my-stats/` becomes `true` — disable the button until the admin decides.
 
 ---
 
@@ -329,7 +383,13 @@ Webhooks (external, not frontend):
 | Quantum AI | `payments/subscription-plans/` → `payments/quantum-ai/<bot_id>/deposit/` → pending → admin approve → `payments/quantum-deposits/` reflects |
 | Withdrawals | 2FA prompt (`auth/2fa/`) → `payments/withdrawals/` POST (+TOTP code) → admin process |
 | Referral interstitial | `referrals/apply/` → `referrals/my-stats/` on profile |
+| Referral rewards page (TO ADD) | `referrals/my-stats/` (hybrid fields, §9) → `referrals/payout-requests/` GET+POST when `reward_model: "commission"` |
 | Admin | `users/admin/dashboard/stats/` → `users/admin/bots/overview/` → `users/admin/trade-logs/` → `payments/admin/deposits/<id>/approve|reject/` → `payments/subscriptions/bot/<id>/approve|reject/` → `users/admin/withdrawals/process/` |
+| Forgot password (TO ADD) | `auth/password-reset/` (email link) → `auth/password-reset/confirm/` → `/auth/login` |
+| Subscription expiry banners (TO ADD) | poll `subscriptions/my-subscription/` → in-app banner D-7/D-5/D-3/D-1 + grace (FR A5) |
+| QAI deposit via payment codes (TO ADD) | `payments/payment-coins/` → `payments/payment-codes/` (create) → poll `payment-codes/<code>/` (quote auto-updates every 5 min, 6 h expiry → `POST payment-codes/<code>/quote/` re-request, §8) → `payment-codes/<code>/proof/` → keep polling for `approved`/`rejected`; fee display `TRC20 (fee: …)` |
+| Deposits & transactions (TO ADD) | `payments/quantum-deposits/` + `payments/transactions/` → pending/approved/rejected states |
+| BotDetail (TO ADD) | `bots/<type>/<id>/` → poll `bots/orders/` + `investments/positions/` (§6.3 — no WS push) |
 
 ---
 
@@ -360,6 +420,7 @@ Webhooks (external, not frontend):
 | 409 | `CONFLICT` | State conflict — **not a client bug.** Duplicates: `error.details.{subscription_id,status}` → show "already subscribed" and link to the existing one; plan capacity: "plan is full" |
 | 429 | `RATE_LIMIT_EXCEEDED` | Rate limited — show wait/retry state; do NOT hammer (OTP, phone_verification, two_factor are 5/hour) |
 | 500 | `INTERNAL_SERVER_ERROR` | Backend fault — generic error + retry |
+| 503 | `SERVICE_UNAVAILABLE` | Live price feed down (quote/payment-code endpoints) — retry with backoff; never render a fallback crypto amount |
 
 **Legacy flat errors (defensive parsing required).** A minority of endpoints still bypass the handler and return `{"error": "<string>"}` directly (7 in `apps/bots/views.py`, 4 in `apps/investments/views.py`, 3 in `apps/payments/views.py`, 2 in `apps/users/views.py`, 5 in `apps/webhooks/views.py`); auth views (§2.2) return `{"error": {"code", "message"}}` objects with no `timestamp`. Therefore **never assume `error` is an object**:
 
@@ -378,7 +439,7 @@ const fields = e.error?.field_errors;
 ## 12. Known Issues & Limitations (verified)
 
 1. **Bot status is polling-based** — the `ws/bot/<id>/` endpoint exists (§13) but **no server-side producer pushes `bot_update`** (verified 2026-10-07), so grid fills/bot status must be polled on a cadence; the backend monitor is the source of truth. Only the **market ticker** WS (`ws/market/<exchange>/<symbol>/`) actually streams data.
-2. **Payment rails**: deposits/bot-subscriptions require **admin approval**; withdrawals require **admin processing**. The UI must reflect lifecycle states (`pending`, `approved`, `rejected`).
+2. **Payment rails**: deposits/bot-subscriptions require **admin approval**; withdrawals require **admin processing**. The UI must reflect lifecycle states (`pending`, `approved`, `rejected`). Payment codes (G2, §8) follow `awaiting_payment → submitted → approved|rejected` with a live quote that auto-updates every 5 minutes and expires after 6 h (admin-configurable) → user re-requests, FR A3.
 3. **2FA is a hard gate on withdrawals** — enable-2FA flow (`2fa/setup/` → `2fa/confirm/`) must be polished; users cannot withdraw without it.
 4. **Register needs consent booleans** — missing them fails validation; frontend must present an explicit terms/privacy acceptance UI.
 5. **Exchange credentials are masked** on every read — a "connected: yes/no + masked key" pattern is the only allowed display.
@@ -438,28 +499,15 @@ ws.onclose = (event) => {
 
 ## 14. Frontend implementation guide (absorbed from `frontend-connectivity.md` + `FRONTEND.md`)
 
-### 14.1 API client & token interceptors
-```typescript
-// src/api/client.ts
-import axios from 'axios';
+### 14.1 API client & token interceptors — **extend the existing `src/lib/api.ts`**
+Do **not** introduce Axios or a new client. The repo already has a `fetch`-based `ApiClient` (`src/lib/api.ts`) — extend it so every call gets the four behaviours below:
 
-const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000/api',
-  headers: { 'Content-Type': 'application/json' },
-});
+1. **Auth header** — read the token via `getAuthToken()` (`authToken.ts`), attach `Authorization: Bearer <access_token>`.
+2. **Envelope parsing + typed errors** — on non-2xx, parse the §11 envelope and **throw a typed `ApiError`** (carrying `status`, `code`, `message`, `field_errors`, `details`) — not a plain `Error` (that's what it throws today). Keep the flat `{"error": "<string>"}` fallback (§11) and the auth-shaped `{"error": {code, message}}` (§2.2). Map `error.field_errors` onto forms; toast `error.message` otherwise.
+3. **429 handling** — surface a wait/retry state (countdown for OTP/2FA/phone throttles, 5/hour) instead of failing silently; exponential backoff, no hammering.
+4. **Refresh interceptor (to add)** — on `401`: attempt **one** `POST /auth/refresh-token/` rotation (single-flight) → store BOTH returned tokens via `authToken.ts` → replay the original request. If rotation also 401s → `clearAuthToken()` + redirect to **`/auth/login`** (§2.2 bug fix). Never loop.
 
-// Request interceptor: attach auth token
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('access_token');
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
-
-// Response interceptor: 401 → single-flight refresh → replay (see below)
-export default api;
-```
-
-**Refresh race condition** — when several calls 401 simultaneously, only ONE refresh may run; queue the rest behind a promise lock:
+**Refresh race condition** — when several calls 401 simultaneously, only ONE refresh may run; queue the rest behind a promise lock (implement inside the ApiClient's 401 path):
 ```typescript
 let isRefreshing = false;
 let failedQueue: Array<{resolve, reject}> = [];
@@ -472,29 +520,29 @@ const processQueue = (error, token = null) => {
   failedQueue = [];
 };
 
-// Inside the 401 interceptor:
+// Inside the 401 path (before redirecting):
 if (!isRefreshing) {
   isRefreshing = true;
   try {
-    const { data } = await api.post('/auth/refresh-token/', {
-      refresh_token: localStorage.getItem('refresh_token')
+    const data = await postJson('/auth/refresh-token/', {
+      refresh_token: getRefreshToken()   // via authToken.ts
     });
-    localStorage.setItem('access_token', data.access_token);
-    localStorage.setItem('refresh_token', data.refresh_token); // rotation!
+    setAuthToken(data.access_token);     // stores BOTH (rotation!)
+    setRefreshToken(data.refresh_token);
     processQueue(null, data.access_token);
-    return api(originalConfig);
+    return replay(originalRequest);
   } catch (err) {
     processQueue(err, null);
-    localStorage.clear();
-    window.location.href = '/login';
+    clearAuthToken();
+    window.location.href = '/auth/login';   // NOT '/login' (§2.2 bug)
   } finally {
     isRefreshing = false;
   }
 } else {
   return new Promise((resolve, reject) => failedQueue.push({ resolve, reject }))
     .then((token) => {
-      originalConfig.headers.Authorization = `Bearer ${token}`;
-      return api(originalConfig);
+      originalRequest.headers.Authorization = `Bearer ${token}`;
+      return replay(originalRequest);
     });
 }
 ```
@@ -506,7 +554,7 @@ interface PaginatedResponse<T> { count: number; next: string | null; previous: s
 Query params: `?page=1&page_size=20` (default 20, max 100). Drive either a "Load more" button or Intersection Observer infinite scroll off the `next` link.
 
 ### 14.3 Special behaviors
-- **File uploads** (payment screenshots, deposit proofs): `multipart/form-data` — build `FormData` (`payment_screenshot`, `plan_id`, …); Axios sets the boundary automatically. Show upload progress.
+- **File uploads** (payment screenshots, deposit proofs): `multipart/form-data` — build `FormData` (`payment_screenshot`, `plan_id`, …); with `fetch`, let `FormData` set the boundary itself — **never set `Content-Type` manually** (it would break the multipart boundary). Show upload progress.
 - **Dates**: all timestamps are ISO-8601 UTC (e.g. `2026-07-15T10:30:00Z`) — convert to the user's `profile.timezone` for display (`dayjs`/`date-fns`).
 - **Feature/plan gating**: read `profile.subscription_plan` + `max_bots_allowed` from the profile response; also gate by quota via `bot-my-usage/` (§4).
 - **Start/stop idempotency**: starting a running bot (or stopping a stopped one) returns an error — show loading state, then re-sync UI from the actual status. Mutations are async (Celery) — poll after action.
@@ -515,6 +563,8 @@ Query params: `?page=1&page_size=20` (default 20, max 100). Drive either a "Load
 
 ### 14.4 TypeScript shape guide
 > Illustrative shapes merged from `frontend-connectivity.md` §6 — **validate against live responses** (serializers are authoritative; `FRONTEND_PROMPT` route/contract sections win on conflict).
+>
+> ⚠️ **The repo's existing `src/types/api.ts` models the OLD backend** (`custom_bot` / `managed_bot` shapes that don't match these routes) — **replace it with the shapes below**, don't reconcile against it.
 
 ```typescript
 interface User {
@@ -593,9 +643,14 @@ interface ExchangeCredentials {
   permissions: string[]; notes: string; created_at: string;
 }
 interface SubscriptionPlan {
-  id: string; name: string; slug: string;
+  id: string; name: string; slug: string; description: string;
   price_monthly: string; price_yearly: string;
+  annual_discount_pct: number;      // derived, e.g. 20 => 20% off annual
+  sort_order: number;               // display order (FR A2), sort asc
   max_bots_allowed: number; max_webhooks_allowed: number;
+  bot_types: string[];              // e.g. ['signal']; [] = not yet set (paid TBD)
+  market: 'spot' | 'spot_futures';
+  max_signals_per_month: number; max_exchanges: number;
   features: Record<string, any>; is_active: boolean; trial_days: number;
 }
 interface BotSubscription {
@@ -643,19 +698,41 @@ interface TradingPair {
 interface ReferralStats {
   referral_code: string; total_referrals: number;
   total_bonus_usdt: string; referral_link: string;
+  // G5 / FR A7 — hybrid reward model (one model per user, never both)
+  reward_model: 'commission' | 'referee_discount';
+  commission_pct: string | null;
+  commission_pending_usd: string;
+  commission_paid_usd: string;
+  payout_minimum_usd: string;
+  referee_discount_pct: string | null;
+  has_pending_payout_request: boolean;
+}
+interface PayoutRequestRow {
+  id: string; amount_requested: string;
+  status: 'pending' | 'approved' | 'rejected';
+  admin_entered_payout: string | null;
+  admin_notes: string | null;
+  decided_at: string | null;
+  requested_at: string;
 }
 ```
 
-### 14.5 Page inventory
-From `FRONTEND.md` (superset — combine with the §10 connectivity graph):
-- **Public:** Landing (product/features/pricing) · Login/Register (JWT) · Password Reset.
-- **User:** Dashboard (bot status, portfolio, recent trades) · Bot Management (unified list, create wizard: Signal/Grid/Martingale, detail w/ config+orders+P/L, start/stop) · Exchange Credentials (add/edit keys) · Subscriptions (plan select/upgrade) · Referrals (code+stats) · Transactions (deposit/withdrawal history) · Profile (settings).
-- **Admin:** Admin Dashboard (KPIs) · User Management (list/detail, toggle active) · Quantum AI Management (fund create/monitor) · Deposit/Withdrawal Approval · Audit Logs.
+### 14.5 Page inventory — EXISTS vs TO ADD
+**EXISTS in `src/App.tsx` (verified 2026-10-14 — build on these, don't recreate):**
+- **Public:** `/` · `/pricing` · `/tutorial` · `/about` · `/terms` · `/faqs` · `/blog` · `/help-support` · bot marketing pages `/grid-bots` `/spot-bots` `/futures-bots` `/martingale-bots` `/signal-bots` `/investment-bots` · `/custom-bots` (currently renders `SignalBots`) · `/auth/login` · `/auth/signup` · `*` → NotFound.
+- **Authed (under `/dashboard`, `ProtectedRoute`):** index (`DashboardHome`) · `bots` (list) · `exchanges` · `settings` · `analytics` · `create-bot` · `create-signal-bot` · `create-custom-bot` · `invest-in-bot` · `withdrawals` · `support`.
+
+**TO ADD (gap list — grill Q21):**
+- `/auth/forgot-password` — **already linked in the UI but no route → 404**; wire to `auth/password-reset/` + `auth/password-reset/confirm/`.
+- **Referrals** (code + stats, §9) · **Subscriptions / plan select + upgrade** (§4, A2 matrix — upgrade-only mid-term) · **Deposits** (admin-approve lifecycle) · **Transactions** (history) · **BotDetail** (config + orders + P/L, poll §6.3) · **Orders** (order history w/ §14.8 filters).
+- **Admin section** (staff-gated: dashboard KPIs, user mgmt, deposit/withdrawal/subscription approval — §10 Admin row).
+- **QAI screens**: deposit (payment-code flow §8) · lock · balance · withdraw — with fee display `TRC20 (fee: 0.20 USDT)` format; the address/proof screen shows the **final payable amount** = plan price + chain fee (e.g. `15.00 + 0.20 → 15.20 USDT`), auto-updating every 5 min (FR A3; quote = plan price + chain buffer, user receives ≥ plan price).
+- **In-app subscription expiry banners**: D-7 / D-5 / D-3 / D-1 + grace (FR A5).
 
 **Recommended file structure (TS):**
 ```
 frontend/src/
-├── api/          client.ts (axios+interceptors), auth.ts, bots.ts, payments.ts, trading.ts, admin.ts
+├── api/          lib/api.ts (fetch ApiClient + refresh — §14.1), lib/authToken.ts, auth.ts, bots.ts, payments.ts, trading.ts, admin.ts
 ├── hooks/        useAuth.ts, useBotWebSocket.ts, usePagination.ts
 ├── pages/        Login, Register, Dashboard, BotManager, CreateBot, BotDetail,
 │                 Settings, Subscriptions, Deposits, Withdrawals, Orders, Referrals,
@@ -701,3 +778,8 @@ These appeared in `docs/archive/frontend-connectivity.md` but were **verified no
 - [ ] No hardcoded secrets; HTTPS-only; tokens out of XSS reach.
 - [ ] Error handling reads the envelope (`error.code` / `error.message` / `error.field_errors`) with the flat `{"error": "<string>"}` fallback; 409 on subscribe surfaces "already subscribed" via `details.subscription_id`.
 - [ ] `my-subscription/` null-state (`{"subscription": null}`) rendered as a proper empty state, not an error.
+- [ ] **401 redirect path fixed:** every forced re-login goes to `/auth/login` (not `/login` — bug in `src/lib/api.ts`).
+- [ ] **WS reconnect indicator** (yellow bar) wired to the market/bot socket backoff (§13.3).
+- [ ] **Charts wired** (Recharts): portfolio + bot performance fed from `investments/positions/` / `bots/orders/`.
+- [ ] **Skeletons + empty states** on every list page (bots, orders, transactions, referrals — §14.6).
+- [ ] Missing pages from §14.5 "TO ADD" list delivered (incl. `/auth/forgot-password` 404 fix, Referrals, Subscriptions/upgrade, QAI screens, admin section).

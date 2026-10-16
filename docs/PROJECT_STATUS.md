@@ -19,9 +19,12 @@ Current status:
 
 ## Source-of-truth rule
 
+**Product requirements:** `docs/FUNCTIONAL_REQUIREMENTS.md` Part A (locked 2026-10-11 grill-me). Engineering status: this document.
+
 The following documents are historical or supplemental, not authoritative live status:
 - `IMPLEMENTATION_COMPLETE.md`
 - `ZERO_ERRORS_VERIFICATION.md`
+- `docs/todo.md` (archived 2026-10-11 — stale)
 - older status summaries that claim full production readiness without current evidence
 
 Current operational status must be read from this document and the active audit reports in `docs/`.
@@ -64,11 +67,13 @@ Known remaining issues:
 Status: Not launch-ready.
 
 Open blockers:
-- KYC/AML flow not fully implemented or verified
-- GDPR / privacy / consent flow is not complete
-- terms and privacy acceptance are not fully in place
-- automated billing / payment lifecycle is not fully production-ready
+- terms and privacy acceptance are not fully in place (**hard launch blocker**)
+- automated billing lifecycle: manual payment codes + live quote lock shipped (FR A3 / G2, 2026-10-12); card rails (Stripe/PayPal) deferred to a later phase
 - finance reporting, risk controls, and customer-ops processes are still incomplete
+
+Deliberately deferred (decided 2026-10-11, FR A1 — not blockers):
+- KYC/AML — flag reserved, not built at launch; entity formation (Seychelles/RAK) later
+- US/EU marketing restrictions and geo gating — requirement noted (A1), enforcement not built
 
 ### 4) Operations / deployment
 Status: In progress.
@@ -110,6 +115,7 @@ The correct status is:
 3. Final financial and permission verification
 4. Launch-blocking compliance and legal gate setup
 5. Production deployment runbook and rollback verification
+6. Implement FR Part D gaps (G1–G9) — queue and detail in `FUNCTIONAL_REQUIREMENTS.md` Part D; Model C plans must be admin-driven (no hard-coded prices)
 
 ## P1 issues currently tracked
 

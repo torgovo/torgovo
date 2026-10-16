@@ -1360,12 +1360,14 @@ class TestPlanCacheInvalidation:
         from django.core.cache import cache
 
         assert cache.get("telegram_plans_v1") is not None
-        # seed the other key manually — receiver must drop BOTH on any save
+        # seed the other keys manually — receiver must drop ALL on any save
         cache.set("subscription_plans_v1", {"stale": True}, 300)
+        cache.set("subscription_plans_v2", {"stale": True}, 300)
         plan.price_monthly = 39.99
         plan.save()
         assert cache.get("telegram_plans_v1") is None
         assert cache.get("subscription_plans_v1") is None
+        assert cache.get("subscription_plans_v2") is None
 
     def test_telegram_plans_fresh_after_edit(self, auth_client):
         plan = TelegramSignalPlan.objects.create(
@@ -1400,12 +1402,14 @@ class TestPlanCacheInvalidation:
             max_webhooks_allowed=10,
             is_active=True,
         )
-        # populate subscription_plans_v1 via the bot endpoint
+        # populate subscription_plans_v2 via the endpoint
         assert auth_client.get(reverse("subscriptions:plan-list")).status_code == 200
-        assert cache.get("subscription_plans_v1") is not None
+        assert cache.get("subscription_plans_v2") is not None
         cache.set("telegram_plans_v1", {"stale": True}, 300)
+        cache.set("subscription_plans_v1", {"stale": True}, 300)
         plan.price_monthly = "19.99"
         plan.save()
+        assert cache.get("subscription_plans_v2") is None
         assert cache.get("subscription_plans_v1") is None
         assert cache.get("telegram_plans_v1") is None
 

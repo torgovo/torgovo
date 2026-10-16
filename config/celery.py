@@ -50,11 +50,11 @@ app.conf.beat_schedule = {
         "task": "apps.trading.tasks.check_stale_bots",
         "schedule": 30.0,
     },
-    # Distribute Quantum AI profits every 2 weeks (fortnightly)
-    "distribute-quantum-ai-profits": {
-        "task": "apps.trading.tasks.distribute_quantum_ai_profits",
-        "schedule": 60 * 60 * 24 * 14,  # 14 days in seconds
-    },
+    # A5 supersession: the fortnightly "distribute-quantum-ai-profits" and
+    # hourly "accrue-quantum-ai-profits" beat entries were removed — profit
+    # now flows only through per-investor Quantum AI locks
+    # (services/quantum_locks.py, FUNCTIONAL_REQUIREMENTS.md §A5 / gap G3).
+    # Task functions stay importable for legacy tests.
     "heartbeat-check": {
         "task": "apps.trading.tasks.heartbeat_check",
         "schedule": 60.0,  # Phase 5 (CHG-5-3): every 60 seconds
@@ -62,10 +62,6 @@ app.conf.beat_schedule = {
     "reset-monthly-signals": {
         "task": "apps.trading.tasks.reset_monthly_signal_limits",
         "schedule": crontab(day_of_month=1, hour=0, minute=0),
-    },
-    "accrue-quantum-ai-profits": {
-        "task": "apps.trading.tasks.accrue_quantum_ai_profits",
-        "schedule": 3600.0,  # 1 hour
     },
     # FIN-1: Process investor payouts daily at 00:05 UTC (after profit
     # distribution at 00:00 UTC). Moves accrued_profit → user balance.
@@ -78,5 +74,12 @@ app.conf.beat_schedule = {
     "cleanup-old-audit-logs": {
         "task": "core.tasks.cleanup_old_audit_logs",
         "schedule": crontab(day_of_month=1, hour=2, minute=0),
+    },
+    # G4 / FR A6: daily subscription expiry sweep at 00:10 UTC —
+    # persists status="expired" after grace + sends D-7/5/3/1 reminder
+    # emails (idempotent per paid term via BotSubscription.expiry_reminders_sent).
+    "check-subscription-expiry": {
+        "task": "apps.payments.tasks.check_subscription_expiry",
+        "schedule": crontab(hour=0, minute=10),
     },
 }

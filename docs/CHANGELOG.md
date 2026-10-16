@@ -1,5 +1,205 @@
 # Changelog
 
+## 2026-10-16 — G3: per-investor Quantum AI locks (FR A5)
+
+Closes gap G3: biweekly fund distribution replaced by investor-level
+term locks (30/90/180/365d). Nothing is withdrawable during the lock;
+post-lock withdrawals are admin-approved manual payouts within 7 days.
+
+- **Models** (`apps/bots/models.py`, migration `0018`): `InvestorLock`
+  (capital balance-of-record incl. rolled profit; `matures_at` derived
+  date-math, no sweep task — G4 lesson; term counters),
+  `QuantumProfitCredit` (audit row per maturity credit, DB unique
+  `(lock, term_number)` backstop mirroring G4 CAS),
+  `QuantumWithdrawalRequest` (pending/approved/rejected; admin-entered
+  payout incl. chain fees per grill Q12).
+- **Service** (`services/quantum_locks.py`): `create_lock` (guards:
+  valid term, amount > 0, active fund) / `credit_maturity`
+  (select_for_update; free-form admin % — 2–5% is guidance only, 0%
+  allowed, negative rejected; compounds capital; window rolls from the
+  credit moment so a late credit cannot double-fire) /
+  `request_withdrawal` (**hard rule**: raises while the lock is running;
+  amount ≤ capital; one pending request per lock) /
+  `approve_withdrawal` (debits lock, `PaymentTransaction` type
+  `quantum_withdrawal`, closes lock at zero, **never** touches
+  `UserBalance` — external crypto payout) / `reject_withdrawal`.
+- **Endpoints** (`apps/investments/`): `GET|POST
+  /api/investments/bots/quantum-ai/locks/` (own; staff see all;
+  `?status=`, `?matured=1` admin credit queue), `POST .../locks/{id}/
+  withdraw/`, `POST .../locks/{id}/credit/` (staff), `GET
+  .../quantum-ai/withdrawal-requests/`, `POST
+  .../withdrawal-requests/{id}/decide/` (staff; approve requires
+  `payout_amount`). Credit response reports `term_number` (credited)
+  and `current_term` (now running).
+- **Creation wiring**: lock auto-created when a Quantum subscription is
+  approved and when a Quantum deposit is approved (hard-fail 400 with no
+  active fund — no silent capital loss).
+- **Supersession**: beat entries `distribute-quantum-ai-profits` /
+  `accrue-quantum-ai-profits` removed from `config/celery.py`; legacy
+  task functions kept importable for their pinned unit tests.
+- **Tests**: `tests/bots/test_quantum_locks_a5.py` — 53 tests (creation
+  guards, maturity credit + compounding + unique backstop, lock-window
+  hard rule, approve/reject accounting incl. UserBalance-untouched,
+  endpoint auth/404/400/403 mapping, beat-entry removal). Full suite
+  **2422 passed / 13 skipped**.
+
+## 2026-10-15 — G4: subscription expiry lifecycle (FR A6)
+
+Closes gap G4: 2-day grace, hard stop, D-7/5/3/1 reminders, re-subscribe
+restore, indefinite data retention.
+
+- **Settings** (`config/settings/base.py`): `SUBSCRIPTION_GRACE_PERIOD_DAYS`
+  (default `2`) and `SUBSCRIPTION_REMINDER_OFFSET_DAYS` (default
+  `7,5,3,1`) — no hard-coded business values.
+- **Model** (`apps/payments/models.py`, migration `0012`):
+  `BotSubscription.grace_until` + `expiry_reminders_sent` (JSON ledger of
+  offsets already emailed this term).
+- **Expiry state machine** (`apps/payments/services/expiry.py`): live
+  date-math only — `subscription_state()` → `active` (≤ expires_at) /
+  `grace` (≤ grace_until; **full access**) / `hard_stopped` (after grace;
+  legacy rows with `grace_until=NULL` hard-stop at `expires_at`, grace is
+  never invented) / `inactive` (status ≠ active); `is_hard_stopped()`;
+  `get_usable_subscription(user, bot_type)` as the gate's single source of
+  truth; `transition_expired_subscriptions()` persistence sweep (active →
+  expired past grace; grace rows untouched).
+- **Gate** (`apps/bots/views.py`): all 5 create paths (grid/signal/
+  martingale/quantum-fund/quantum-invest) blocked with 403
+  `PERMISSION_DENIED` only when hard-stopped or no usable subscription;
+  active **and** grace rows allowed. Never touches open positions — they
+  keep riding SL/TP (grill Q9).
+- **Reminders** (`apps/payments/tasks.py` + `config/celery.py` beat
+  entry): daily `check_subscription_expiry` = sweep + D-N emails; ledger
+  stamped only after successful send (retry on transient failure);
+  hard-stopped rows never emailed.
+- **Email** (`core/email.py`): `send_email()` SMTP primary → Resend API
+  fallback → `False`, never raises (A6 email is the only support channel).
+- **Re-subscribe restore**: `approve()` now accepts status `expired`
+  (`services/subscription_service.py`) — stamps fresh
+  `started_at`/`expires_at` from `plan.duration_days`, recomputes
+  `grace_until` from settings, clears the reminder ledger; same row PK
+  retained → bot FKs/history/settings restored (indefinite retention,
+  grill Q17). `payments:bot-subscription-create` reuses the unique
+  `[user, plan]` row (no IntegrityError).
+- **Tests**: `tests/payments/test_subscription_expiry_g4.py` — **36
+  cases** (approve clock stamping, every state boundary incl. exact
+  expiry/grace-end instants, gate 403 vs allowed end-to-end, sweep,
+  reminder idempotency/retry, re-subscribe restore, email fallback);
+  `tests/services/test_subscription_service.py` expired-approval test
+  flipped to the new contract. Full suite: **2368 passed / 13 skipped**.
+
+## 2026-10-15 — FR A3 rule change: 5-min refresh + 6-h payment window + explicit re-request
+
+Implements the 2026-10-14 user decision that replaced the 1–60 s TTL /
+silent re-lock on payment-code quotes (combined amount only while the
+payment window is open; explicit re-request after expiry).
+
+- **Settings** (`config/settings/base.py`): `PAYMENT_QUOTE_TTL_SECONDS`
+  default `15` → `300` (5-min FE auto-update cadence; still clamped
+  60–3600 in `services/quote.py`).
+- **Models** (`apps/payments/models.py`, migration `0011`):
+  `PaymentCoin.network_fee` (per-chain fee buffer in coin units, default
+  0) + `PaymentCoin.quote_window_seconds` (default 6 h) — both
+  admin-configurable; `PaymentCode.quote_window_expires_at` (starts on
+  the first quote, never reset by automatic refreshes).
+- **Quote service** (`services/quote.py`): `crypto_amount` now includes
+  `network_fee` (combined payable, e.g. `15.00 + 0.20 → 15.20 USDT`);
+  `expires_at` truncated at the window end; new `is_window_open()`
+  (window closed → `get_or_refresh_quote` returns the expired quote,
+  never re-prices) and `renew_quote()` (explicit re-request: awaiting
+  codes only, resets the window, re-locks at the current rate).
+- **API**: new `POST /api/payments/payment-codes/<code>/quote/`
+  (`{coin_id?}` → 200 fresh quote + restarted window; 400 unknown
+  coin/non-awaiting, 404 cross-user, 401). Detail payload gained
+  `quote_window_expires_at`; `quote.coin.network_fee` and the coin list
+  expose the fee for the `TRC20 (fee: …)` breakdown. Proof submitted
+  after window expiry freezes the stale quote (no re-price).
+- **Admin**: `PaymentCoin` lists/edits `network_fee` +
+  `quote_window_seconds`; `PaymentCode` shows `quote_window_expires_at`
+  readonly.
+- **Tests**: `tests/payments/test_g2_payment_codes.py` — 3 TTL-clamp
+  cases rewritten (60/3600/300) + `TestQuoteWindowAndCombinedAmount`
+  (11 cases: combined amount, window start/truncation/no-extend,
+  closed-window no-relock incl. coin switch, renew rules) +
+  `TestPaymentCodeQuoteRerequest` (7 view cases) + window-closed detail
+  and proof-freeze cases → **76 in-file**. Full suite: **2332 passed /
+  13 skipped**, flake8 clean, `manage.py check` clean.
+- **Docs**: FRONTEND_PROMPT §8 (re-request endpoint, payload fields,
+  stale-proof rule) + flow row; BACKEND_PRODUCTION_TASKS rule-change
+  note marked implemented.
+
+## 2026-10-12 — G2: manual multi-coin payment codes (FR A3)
+
+Closes gap G2: users pick a receive coin, get a live quoted crypto
+amount, pay on-chain, and submit proof — with a server-clamped price
+lock instead of flat-USD assumptions.
+
+- **Models** (`apps/payments/models.py`): `PaymentCoin` (receive
+  coin/chain + address, idempotent `manage.py seed_payment_coins`,
+  `--dry-run` supported; addresses left blank until admin fills them),
+  `PaymentCode` (unique code, `order_kind`, status
+  `awaiting_payment → submitted → approved|rejected`, `locked_rate` /
+  `locked_crypto_amount`), `PaymentQuote` (rate + crypto amount + TTL).
+- **Services**: `services/quote.py` — `get_or_refresh_quote` re-locks an
+  expired quote at the current price, raises `QuoteUnavailable` when the
+  feed is down (never serves a stale amount as current);
+  `services/fulfill.py` — `check_order_allowed` / `plan_fiat_amount` /
+  `fulfill_payment_code` mirror the legacy subscribe row creation
+  (duplicate 409 with `details.subscription_id`, plan-capacity 409).
+- **API** (`apps/payments/urls.py` + `views.py`): `GET payment-coins/`
+  (public picker), `POST payment-codes/` (create + first quote; bot
+  orders forced to monthly), `GET payment-codes/<code>/` (detail + live
+  quote, `?coin_id=` switch, 400 on unknown coin), `POST
+  payment-codes/<code>/proof/` (TX hash or screenshot → pending_approval
+  subscription; final re-price then freeze). All errors use the standard
+  envelope — `ServiceUnavailable` (503 `SERVICE_UNAVAILABLE`) for feed
+  outages (`core/exceptions.py`). Admin approve/reject mirrors onto the
+  code status via `payments.signals`.
+- **Tests**: `tests/payments/test_g2_payment_codes.py` — 54 cases
+  (quote expiry/re-lock, coin switch, feed-down 503 envelope,
+  duplicate/capacity 409, proof validation + double-submit 409, cross-user
+  404, status mirroring, no-coin 400). Full suite: **2310 passed /
+  13 skipped**, flake8 clean.
+- **Docs**: FRONTEND_PROMPT §8 (endpoints + 3-step flow), §11 (503 row),
+  §12 (code lifecycle); BACKEND_PRODUCTION_TASKS A3 replaced the stale
+  `/api/subscriptions/subscribe/` contract; FR gap table G1+G2 marked
+  closed; PROJECT_STATUS blocker list updated.
+
+## 2026-10-12 — G1: admin-driven Model C subscription plans (FR A2)
+
+Plans are now fully DB-driven; editing a plan row propagates to every
+client with zero code changes. Docs were consolidated first against the
+locked grill-me (FUNCTIONAL_REQUIREMENTS.md Part A).
+
+- **Model** (`apps/payments/models.py` `SubscriptionPlan`): added
+  `description`, `sort_order` (display order — canonical Free→Creator, replaces
+  price sort), `bot_types` (JSON), `market` (spot/spot_futures),
+  `max_signals_per_month`, `max_exchanges`; derived `annual_discount_pct`
+  property (str-coerced, float/Decimal safe); `Meta.ordering` =
+  `sort_order, price_monthly`.
+- **Migration** `payments/0009_model_c_admin_driven_plans` (schema only) +
+  idempotent seeder `manage.py seed_model_c_plans` (`--dry-run` supported;
+  upserts locked Model C prices: Free 0, Basic 15, Standard 25, Premium 49,
+  Creator 20 monthly; annual = ×12×0.8). Seeding is a command, not a data
+  migration — test fixtures create plans with these slugs and would collide.
+  Free-tier limits per FR A2 (`['signal']`, spot, 10 signals/mo, 1 exchange,
+  1 bot); paid-tier non-priced limits are explicit placeholders (TBD FR A2).
+- **Admin**: `SubscriptionPlanAdmin` registered on the custom admin_site —
+  fieldsets (tier/pricing/limits/features), inline price+sort editing
+  (`list_display_links` set to satisfy admin.E124), derived annual-% column.
+- **API**: both plan endpoints (`subscriptions:bot-plans/`,
+  `payments:subscription-plans/`) expose all new fields; bot-plans cache key
+  bumped `subscription_plans_v1→v2` (old key dropped too); ordering by
+  `sort_order`. Cache-invalidation signals now clear v1+v2.
+- **Docs**: FRONTEND_PROMPT §4 + `SubscriptionPlan` TS interface updated
+  (contract sync rule); BACKEND_PRODUCTION_TASKS §1.1 corrected (endpoint is
+  `bot-plans/`, not `plans/` which serves Telegram plans) and marked DONE;
+  DEPLOYMENT.md gains the seed step.
+- **Tests**: `tests/payments/test_model_c_plans.py` (12 tests: seeder
+  create/idempotence/dry-run/drift-reassert/non-canonical preservation, API
+  field exposure, sort_order ordering, derived discount, admin-edit→API
+  propagation). Suite: **2256 passed / 13 skipped**; flake8 clean
+  (max-line-length=100).
+
 ## 2026-10-07 — c3b_report API-consistency fixes (A5/A7/A8/A9/A10/A14/A15/A16)
 
 Batch of report items across subscriptions, referrals and the shared error

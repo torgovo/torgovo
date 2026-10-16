@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+
+env:
+  PYTHON_VERSION: "3.11"
+  POSTGRES_DB: torgovo_test
+  POSTGRES_USER: testuser
+  POSTGRES_PASSWORD: testpass
+  FERNET_KEY: "test-key-for-ci-only-32-bytes-placeholder-xxxxx="
+  DJANGO_SETTINGS_MODULE: config.settings.development
+  REDIS_URL: redis://localhost:6379/1
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install flake8
+      - name: Run flake8
+        run: flake8 . --max-line-length=100 --count --show-source --statistics
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U ${{ env.POSTGRES_USER }}"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run migrations
+        run: python manage.py migrate
+        env:
+          DATABASE_URL: postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5432/$POSTGRES_DB
+
+      - name: Run tests
+        run: |
+          python -m pytest tests/ \
+            -q \
+            --tb=short \
+            --timeout=300 \
+            -x
+        env:
+          DATABASE_URL: postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5432/$POSTGRES_DB
+
+      - name: Check for pending migrations
+        run: python manage.py makemigrations --check --dry-run
+        env:
+          DATABASE_URL: postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5432/$POSTGRES_DB
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t torgovo:${{ github.sha }} .
+
+      - name: Verify image runs
+        run: |
+          docker run -d --name test \
+            -e DJANGO_SETTINGS_MODULE=config.settings.development \
+            -e FERNET_KEY="${{ env.FERNET_KEY }}" \
+            -e DATABASE_URL=sqlite:///tmp/test.db \
+            -p 8000:8000 \
+            torgovo:${{ github.sha }}
+          sleep 5
+          curl -f http://localhost:8000/health/ || exit 1
+          docker stop test

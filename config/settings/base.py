@@ -411,6 +411,37 @@ EXCHANGE_CONFIG = {
 # The old BOT_CONFIG dict was removed — SiteConfig.get_plan_limit() is the
 # single source of truth, runtime-configurable without redeploy.
 
+# Payment Quote Configuration (G2 / FR A3 — manual multi-coin payments)
+# Quote TTL: exchange-style price lock. Default 15s per product decision
+# (10-15s typical, hard max 60s — service clamps any config value to 1..60).
+# FR A3 quote refresh cadence (default 5 minutes — FE auto-updates the
+# combined amount while the payment window is open). Clamped to 60..3600 in
+# apps/payments/services/quote.py.
+PAYMENT_QUOTE_TTL_SECONDS = config("PAYMENT_QUOTE_TTL_SECONDS", default=300, cast=int)
+# CCXT exchange used for the public USD ticker when locking a quote price.
+PAYMENT_QUOTE_EXCHANGE = config("PAYMENT_QUOTE_EXCHANGE", default="bybit")
+# Coins assumed pegged 1:1 to USD when no live ticker pair is available.
+# Non-stable coins with no ticker MUST fail the quote (never silently peg).
+PAYMENT_STABLE_COINS = ["USDT", "USDC"]
+
+# Subscription expiry lifecycle (G4 / FR A6) — admin-driven, no hard-codes.
+# Grace days: after expires_at the user keeps FULL access for this long,
+# then hard-stop (no new bot entries). Open positions are never touched.
+SUBSCRIPTION_GRACE_PERIOD_DAYS = config("SUBSCRIPTION_GRACE_PERIOD_DAYS", default=2, cast=int)
+# Reminder offsets, in days BEFORE expires_at. Comma-separated env string
+# parsed to a list of ints, e.g. "7,5,3,1". Each offset emails once per
+# paid term (idempotency ledger on BotSubscription.expiry_reminders_sent).
+SUBSCRIPTION_REMINDER_OFFSET_DAYS = [
+    int(d.strip())
+    for d in config("SUBSCRIPTION_REMINDER_OFFSET_DAYS", default="7,5,3,1").split(",")
+    if d.strip().isdigit()
+]
+
+# Resend API key — FALLBACK delivery path behind core.email.send_email()
+# (FR Part B Q22: own SMTP primary, Resend/SendGrid fallback). Empty =
+# fallback disabled, SMTP only.
+RESEND_API_KEY = config("RESEND_API_KEY", default="")
+
 # Quantum AI Configuration
 QUANTUM_AI_CONFIG = {
     "SUPPORTED_COINS": ["USDT", "USDC", "BTC", "ETH", "BNB"],

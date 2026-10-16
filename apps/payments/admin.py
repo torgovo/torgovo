@@ -5,7 +5,13 @@ from django.shortcuts import render
 from django.urls import path, reverse
 from django.utils.html import format_html
 
-from apps.payments.models import BotSubscription, BotSubscriptionPlan
+from apps.payments.models import (
+    BotSubscription,
+    BotSubscriptionPlan,
+    PaymentCode,
+    PaymentCoin,
+    SubscriptionPlan,
+)
 from apps.users.admin_site import admin_site
 from services.subscription_service import SubscriptionService
 
@@ -14,6 +20,83 @@ class BotSubscriptionPlanAdmin(admin.ModelAdmin):
     list_display = ["name", "bot_type", "price", "duration_days", "is_active"]
     list_filter = ["bot_type", "is_active"]
     search_fields = ["name"]
+
+
+class SubscriptionPlanAdmin(admin.ModelAdmin):
+    """
+    G1 / FR A2: full admin surface for Model C plans.
+
+    Every price and limit below is DB-driven — editing a row here
+    immediately changes the plans API (cache is invalidated by
+    payments.signals) and therefore every client. Do NOT move any of
+    these values into code constants.
+    """
+
+    list_display = [
+        "sort_order",
+        "name",
+        "slug",
+        "price_monthly",
+        "price_yearly",
+        "annual_discount_display",
+        "market",
+        "max_bots_allowed",
+        "max_signals_per_month",
+        "is_active",
+    ]
+    list_editable = ["price_monthly", "price_yearly", "sort_order"]
+    list_display_links = ("name",)
+    list_filter = ["is_active", "market"]
+    search_fields = ["name", "slug"]
+    prepopulated_fields = {"slug": ("name",)}
+    readonly_fields = ["annual_discount_pct"]
+    ordering = ["sort_order", "price_monthly"]
+
+    fieldsets = (
+        (
+            "Tier",
+            {
+                "fields": ("name", "slug", "description", "sort_order", "is_active", "trial_days"),
+                "description": (
+                    "Model C ladder: Free / Basic / Standard / Premium / Creator (FR A2)."
+                ),
+            },
+        ),
+        (
+            "Pricing (admin-driven, USD)",
+            {
+                "fields": ("price_monthly", "price_yearly", "annual_discount_pct"),
+                "description": (
+                    "Set both prices directly; annual discount % is derived. "
+                    "Locked Model C reference: Free 0, Basic 15, Standard 25, "
+                    "Premium 49, Creator 20 (monthly)."
+                ),
+            },
+        ),
+        (
+            "Limits (FR A2)",
+            {
+                "fields": (
+                    "bot_types",
+                    "market",
+                    "max_signals_per_month",
+                    "max_exchanges",
+                    "max_bots_allowed",
+                    "max_webhooks_allowed",
+                ),
+                "description": (
+                    "Free (locked): bot_types ['signal'], spot only, 10 signals/mo, "
+                    "1 exchange, 1 bot. Paid-tier values are placeholders until "
+                    "approved — set them here (TBD, FR A2)."
+                ),
+            },
+        ),
+        ("Features (JSON extras)", {"fields": ("features", "stripe_price_id")}),
+    )
+
+    @admin.display(description="Annual % off")
+    def annual_discount_display(self, obj):
+        return f"{obj.annual_discount_pct}%"
 
 
 class BotSubscriptionAdmin(admin.ModelAdmin):
@@ -132,3 +215,84 @@ class BotSubscriptionAdmin(admin.ModelAdmin):
 
 admin_site.register(BotSubscriptionPlan, BotSubscriptionPlanAdmin)
 admin_site.register(BotSubscription, BotSubscriptionAdmin)
+admin_site.register(SubscriptionPlan, SubscriptionPlanAdmin)
+
+
+class PaymentCoinAdmin(admin.ModelAdmin):
+    """
+    G2 / FR A3: admin-configured receive list. Set the real on-chain
+    deposit_address here — the seed never invents addresses, and quote
+    creation 400s until an address exists for the chosen coin.
+
+    `network_fee` (per-chain buffer in coin units) and
+    `quote_window_seconds` (default 6h) are also admin-configurable and
+    seeded at defaults only — no invented values.
+    """
+
+    list_display = [
+        "coin",
+        "chain",
+        "deposit_address_set",
+        "network_fee",
+        "quote_window_seconds",
+        "min_amount",
+        "is_active",
+        "sort_order",
+    ]
+    list_editable = ["is_active", "sort_order"]
+    list_filter = ["coin", "chain", "is_active"]
+    search_fields = ["coin", "chain", "deposit_address"]
+    ordering = ["sort_order", "coin"]
+
+    @admin.display(description="Address configured")
+    def deposit_address_set(self, obj):
+        return "yes" if obj.deposit_address else "NO (set it!)"
+
+
+class PaymentCodeAdmin(admin.ModelAdmin):
+    """
+    G2 / FR A3: read-only audit surface for payment codes.
+
+    The approve/reject decision happens on the linked SUBSCRIPTION
+    (existing admin flows) — sync_payment_code_status mirrors it back onto
+    this row. status here is manually overridable as a break-glass only.
+    """
+
+    list_display = [
+        "code",
+        "user",
+        "order_kind",
+        "fiat_amount",
+        "status",
+        "locked_crypto_display",
+        "created_at",
+    ]
+    list_filter = ["status", "order_kind", "locked_coin"]
+    search_fields = ["code", "user__email", "subscription_id"]
+    readonly_fields = [
+        "code",
+        "user",
+        "order_kind",
+        "telegram_plan",
+        "bot_plan",
+        "billing_cycle",
+        "fiat_amount",
+        "subscription_id",
+        "locked_rate",
+        "locked_crypto_amount",
+        "locked_coin",
+        "quote_window_expires_at",
+        "created_at",
+        "updated_at",
+    ]
+    ordering = ["-created_at"]
+
+    @admin.display(description="Locked crypto")
+    def locked_crypto_display(self, obj):
+        if obj.locked_crypto_amount:
+            return f"{obj.locked_crypto_amount} {obj.locked_coin}"
+        return "—"
+
+
+admin_site.register(PaymentCoin, PaymentCoinAdmin)
+admin_site.register(PaymentCode, PaymentCodeAdmin)

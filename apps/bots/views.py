@@ -35,7 +35,7 @@ from apps.bots.serializers import (
     SignalBotCreateSerializer,
     SignalBotSerializer,
 )
-from apps.payments.models import BotSubscription
+from apps.payments.services.expiry import get_usable_subscription
 from core.pagination import StandardResultsSetPagination
 
 logger = logging.getLogger("bots")
@@ -98,9 +98,8 @@ class SignalBotViewSet(viewsets.ModelViewSet):
         return SignalBotSerializer
 
     def perform_create(self, serializer):
-        subscription = BotSubscription.objects.filter(
-            user=self.request.user, plan__bot_type="custom", status="active"
-        ).first()
+        # G4 gate: usable = active AND not hard-stopped (grace still counts).
+        subscription = get_usable_subscription(self.request.user, "custom")
 
         if not subscription:
             raise PermissionError("No active Signal Bot subscription")
@@ -148,9 +147,8 @@ class GridBotViewSet(viewsets.ModelViewSet):
         return GridBotSerializer
 
     def perform_create(self, serializer):
-        subscription = BotSubscription.objects.filter(
-            user=self.request.user, plan__bot_type="grid", status="active"
-        ).first()
+        # G4 gate: usable = active AND not hard-stopped (grace still counts).
+        subscription = get_usable_subscription(self.request.user, "grid")
 
         if not subscription:
             raise PermissionError("No active Grid Bot subscription")
@@ -231,9 +229,8 @@ class MartingaleBotViewSet(viewsets.ModelViewSet):
         return MartingaleBotSerializer
 
     def perform_create(self, serializer):
-        subscription = BotSubscription.objects.filter(
-            user=self.request.user, plan__bot_type="martingale", status="active"
-        ).first()
+        # G4 gate: usable = active AND not hard-stopped (grace still counts).
+        subscription = get_usable_subscription(self.request.user, "martingale")
 
         if not subscription:
             raise PermissionError("No active Martingale Bot subscription")
@@ -322,9 +319,8 @@ class InvestorPortfolioViewSet(viewsets.ModelViewSet):
     serializer_class = InvestorPortfolioSerializer
 
     def perform_create(self, serializer):
-        subscription = BotSubscription.objects.filter(
-            user=self.request.user, plan__bot_type="quantum_ai", status="active"
-        ).first()
+        # G4 gate: usable = active AND not hard-stopped (grace still counts).
+        subscription = get_usable_subscription(self.request.user, "quantum_ai")
 
         if not subscription:
             raise PermissionError("No active Quantum AI subscription")
@@ -364,9 +360,8 @@ class PairConfigViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         bot_type = serializer.validated_data.get("bot_type", "grid")
-        subscription = BotSubscription.objects.filter(
-            user=self.request.user, plan__bot_type=bot_type, status="active"
-        ).first()
+        # G4 gate: usable = active AND not hard-stopped (grace still counts).
+        subscription = get_usable_subscription(self.request.user, bot_type)
 
         if not subscription:
             raise PermissionError(f"No active subscription for {bot_type} bot")

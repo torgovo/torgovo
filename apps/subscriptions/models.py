@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import models
+from django.db import models, transaction
 
 from core.models import SoftDeleteModel, TimeStampedModel
 
@@ -140,6 +140,15 @@ class TelegramSubscription(SoftDeleteModel):
         max_length=20, blank=True, help_text="e.g., BEP20, ERC20, TRC20"
     )
     amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    # G5 / FR A7: referee discount percent taken off the cycle price at
+    # subscribe (null = none); amount_paid holds the net price actually due.
+    discount_applied = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Referee discount percent applied at subscribe (FR A7); null = none",
+    )
 
     # Admin approval fields
     status = models.CharField(
@@ -218,6 +227,7 @@ class TelegramSubscription(SoftDeleteModel):
 
         return self.status == "active" and self.end_date and self.end_date >= timezone.now().date()
 
+    @transaction.atomic  # G5: approval + commission accrual are all-or-nothing
     def approve(self, admin_user, notes=""):
         """
         Approve subscription: Admin adds user to Telegram group, timer starts.
@@ -256,6 +266,12 @@ class TelegramSubscription(SoftDeleteModel):
             models.Q(required_plan_id__isnull=True) | models.Q(required_plan_id=self.plan_id)
         )
         self.channels.set(eligible_channels)
+
+        # G5 / FR A7: book the payment tx + accrue creator-tier commission
+        # now that admin verified the money (local import — avoids app cycle).
+        from services.referral_rewards import ReferralRewardService
+
+        ReferralRewardService.record_subscription_payment(self, kind="telegram")
 
     def reject(self, admin_user, reason=""):
         """Reject subscription"""

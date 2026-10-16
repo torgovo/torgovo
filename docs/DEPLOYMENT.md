@@ -37,6 +37,9 @@ docker compose -f docker-compose.prod.yml up -d --build
 # Apply migrations
 docker compose -f docker-compose.prod.yml exec web python manage.py migrate
 
+# Seed the Model C subscription plans (idempotent; FR A2 admin-driven plans)
+docker compose -f docker-compose.prod.yml exec web python manage.py seed_model_c_plans
+
 # Create admin user
 docker compose -f docker-compose.prod.yml exec web python manage.py createsuperuser
 

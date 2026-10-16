@@ -6,7 +6,8 @@
 
 | Document | Description |
 |----------|-------------|
-| [PROJECT_STATUS.md](PROJECT_STATUS.md) | Current project status, launch readiness, and source-of-truth rules |
+| [FUNCTIONAL_REQUIREMENTS.md](FUNCTIONAL_REQUIREMENTS.md) | **Product requirements source of truth** — Part A locked grill-me decisions (pricing, payments, Quantum AI, referrals), Part B NFRs, Part C as-is baseline, Part D gaps |
+| [PROJECT_STATUS.md](PROJECT_STATUS.md) | Current engineering status, launch readiness, and source-of-truth rules |
 | [OVERVIEW.md](OVERVIEW.md) | Project overview, vision, bot types, features |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture, components, data flow |
 | [SETUP.md](SETUP.md) | Local development setup guide |
@@ -25,7 +26,7 @@
 
 ## Quick Links
 
-> The authoritative live status for the project is [PROJECT_STATUS.md](PROJECT_STATUS.md). Use it as the source of truth instead of marketing or completion summaries.
+> **Product:** [FUNCTIONAL_REQUIREMENTS.md](FUNCTIONAL_REQUIREMENTS.md) Part A wins on any product-behavior conflict. **Engineering status:** [PROJECT_STATUS.md](PROJECT_STATUS.md).
 
 - **Root:** [AGENTS.md](../AGENTS.md) — Master changelog + fix history
 - **Root:** [CLAUDE.md](../CLAUDE.md) — AI assistant rules

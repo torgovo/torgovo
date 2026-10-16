@@ -8,10 +8,11 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Sum
-from rest_framework import permissions, serializers
+from rest_framework import permissions, serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.payments.models import ReferralPayout, ReferralPayoutRequest
 from apps.referrals.models import Referral
 
 User = get_user_model()
@@ -62,7 +63,91 @@ class MyReferralStatsView(APIView):
             "referral_link": f"{settings.SITE_URL}/signup?ref={referral.code}",
         }
 
+        # G5 / FR A7 — hybrid reward model. Creator-tier referrers accrue a
+        # 10% cash commission (dashboard accrual -> payout request -> admin
+        # pays crypto -> ledger debit); everyone else makes their referee's
+        # FIRST payment cheaper instead — never both for one referrer.
+        # Legacy keys above are kept for contract stability (additive only).
+        from services.referral_rewards import ReferralRewardService, get_referral_config
+
+        is_commission = ReferralRewardService.referrer_earns_commission(user)
+        cfg = get_referral_config()
+        pending_total = ReferralPayout.objects.filter(referrer=user, status="pending").aggregate(
+            total=Sum("amount")
+        )["total"] or Decimal("0")
+        paid_total = ReferralPayout.objects.filter(referrer=user, status="paid").aggregate(
+            total=Sum("amount")
+        )["total"] or Decimal("0")
+        stats.update(
+            {
+                "reward_model": "commission" if is_commission else "referee_discount",
+                "commission_pct": cfg["commission_pct"] if is_commission else None,
+                "commission_pending_usd": pending_total,
+                "commission_paid_usd": paid_total,
+                "payout_minimum_usd": cfg["payout_minimum_usd"],
+                "referee_discount_pct": None if is_commission else cfg["referee_discount_pct"],
+                "has_pending_payout_request": ReferralPayoutRequest.objects.filter(
+                    user=user, status="pending"
+                ).exists(),
+            }
+        )
+
         return Response(stats)
+
+
+class PayoutRequestCreateSerializer(serializers.Serializer):
+    """G5 / FR A7 — file a commission payout request against pending accruals."""
+
+    amount = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0.01"))
+
+
+class PayoutRequestsView(APIView):
+    """
+    GET  /api/referrals/payout-requests/ — own requests, newest first.
+    POST /api/referrals/payout-requests/ — {amount} against pending balance.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        rows = (
+            ReferralPayoutRequest.objects.filter(user=request.user)
+            .order_by("-requested_at")
+            .values(
+                "id",
+                "amount_requested",
+                "status",
+                "admin_entered_payout",
+                "admin_notes",
+                "decided_at",
+                "requested_at",
+            )
+        )
+        return Response({"payout_requests": list(rows)})
+
+    def post(self, request):
+        serializer = PayoutRequestCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        from services.referral_rewards import ReferralRewardError, ReferralRewardService
+
+        try:
+            req = ReferralRewardService.request_payout(
+                user=request.user, amount=serializer.validated_data["amount"]
+            )
+        except ReferralRewardError as exc:
+            # A14: raised ValidationError renders the uniform error envelope
+            raise serializers.ValidationError(str(exc))
+
+        return Response(
+            {
+                "id": str(req.id),
+                "amount_requested": str(req.amount_requested),
+                "status": req.status,
+                "message": "Payout request submitted — admin will pay and record it.",
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class ApplyReferralCodeView(APIView):

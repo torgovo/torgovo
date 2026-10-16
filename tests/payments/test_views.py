@@ -204,6 +204,15 @@ class TestQuantumDepositViewSet:
 @pytest.mark.django_db
 class TestDepositAdminViews:
     def test_approve_deposit(self, admin_client, user):
+        from apps.bots.models import QuantumAIFund
+
+        # A5: approval now opens a Quantum AI lock — an active fund must exist
+        # (same hard requirement as subscription approval).
+        QuantumAIFund.objects.create(
+            name="Approve Test Fund",
+            master_api_key="k",
+            master_secret_key="s",
+        )
         deposit = InvestorDeposit.objects.create(
             user=user,
             amount=Decimal("100"),
@@ -215,6 +224,10 @@ class TestDepositAdminViews:
         url = reverse("payments:approve_deposit", args=[deposit.id])
         response = admin_client.post(url, {"notes": "Approved"}, format="json")
         assert response.status_code == status.HTTP_200_OK
+        # A5 lock opened for the deposit capital (USDT amount fallback)
+        assert response.data["lock_id"]
+        deposit.refresh_from_db()
+        assert deposit.status == "approved"
 
     def test_approve_already_approved(self, admin_client, user):
         deposit = InvestorDeposit.objects.create(

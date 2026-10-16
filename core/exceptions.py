@@ -221,6 +221,19 @@ class Conflict(APIException):
     default_code = "conflict"
 
 
+class ServiceUnavailable(APIException):
+    """G2/FR A3: live price feed down — 503 in the standard envelope.
+
+    Raised when a quote cannot be priced from the exchange ticker; the
+    client must retry rather than trust a stale or invented amount.
+    """
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    error_code = "SERVICE_UNAVAILABLE"
+    default_detail = "Service temporarily unavailable — please retry shortly."
+    default_code = "service_unavailable"
+
+
 class TradingBotException(Exception):
     """Base exception for trading bot errors."""
 

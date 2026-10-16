@@ -12,4 +12,10 @@ urlpatterns = [
     # User referral endpoints
     path("my-stats/", views.MyReferralStatsView.as_view(), name="my-referral-stats"),
     path("apply/", views.ApplyReferralCodeView.as_view(), name="apply-referral-code"),
+    # G5 / FR A7 — commission payout requests (list own / file new)
+    path(
+        "payout-requests/",
+        views.PayoutRequestsView.as_view(),
+        name="payout-requests",
+    ),
 ]

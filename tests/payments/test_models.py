@@ -313,18 +313,24 @@ class TestBotSubscriptionPlanModel:
         assert plan.requires_approval is True
         assert str(plan) == "Custom Bot Plan - $99.99"
 
-    def test_bot_type_unique(self):
+    def test_bot_type_not_unique_g5(self):
+        """G5/Model C: bot_type is a coarse discriminator, NOT unique.
+
+        The tier ladder needs one "custom" shim plan per Model C tier, so
+        duplicates must be allowed. See docs/regression-bot-type-unique-drop.md.
+        """
         BotSubscriptionPlan.objects.create(
             bot_type="grid",
             name="Grid Plan",
             price=49.99,
         )
-        with pytest.raises(Exception):
-            BotSubscriptionPlan.objects.create(
-                bot_type="grid",
-                name="Grid Plan 2",
-                price=59.99,
-            )
+        # Second plan with the same bot_type is allowed (constraint dropped)
+        plan2 = BotSubscriptionPlan.objects.create(
+            bot_type="grid",
+            name="Grid Plan 2",
+            price=59.99,
+        )
+        assert plan2.pk is not None
 
     def test_duration_choices(self):
         plan = BotSubscriptionPlan.objects.create(

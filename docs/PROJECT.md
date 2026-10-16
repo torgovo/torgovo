@@ -1,5 +1,7 @@
 # Torgovo — Project Documentation
 
+**Product requirements SoT:** `docs/FUNCTIONAL_REQUIREMENTS.md` (Part A = locked grill-me decisions). Where this file and that one disagree on product behavior, Part A there wins.
+
 ## Overview
 Subscription-based crypto trading bot platform. Users create bots, connect exchanges, receive TradingView webhook signals, and auto-execute trades via CCXT.
 
@@ -15,9 +17,19 @@ Subscription-based crypto trading bot platform. Users create bots, connect excha
 | **SignalBot** | TradingView webhook → execute 1 trade → done | User | No |
 | **GridBot** | Places buy/sell at grid levels, auto-manages | User | Yes |
 | **MartingaleBot** | Progressive strategy, doubles on loss | User | Yes |
-| **QuantumAIBot** | Admin trades pooled user funds, distributes proportional P/L | Admin | Yes |
+| **QuantumAIBot** | Admin trades pooled user funds. Target (FR A5): locks + profit-only post-lock withdrawals; current code: proportional P/L distribution | Admin | Yes |
 
 ### Quantum AI Flow
+
+**Target (FR A5) — the product requirement:**
+1. User deposits USDT → `InvestorDeposit` (pending) → admin approves
+2. User chooses a lock period: **30 / 90 / 180 / 365 days** — no early withdrawal while locked
+3. After lock expiry, user may request a **profit-only withdrawal** (principal withdrawal terms TBD) — admin processes **manually within 7 days**; user sees pending/approved/rejected
+4. **20% of fund profits** form a pro-rata pool for locked investors — hidden from UI/marketing; marketing may state 2–10% projected returns with fine print
+5. Users see ONLY their balance + changes — NO trade details
+6. Fund assets traded on **Bybit**
+
+**Current code (as-is, to be replaced per gap G3):**
 1. User deposits USDT → `QuantumDeposit` (pending)
 2. Admin approves → updates `InvestorPortfolio.amount` + `QuantumAIFund.total_deposits`
 3. Admin runs `QuantumAIBot` against fund's master API keys
@@ -87,10 +99,10 @@ services/            → BotExecutorService, QuantumAIFundService, SubscriptionS
 - API keys encrypted via Fernet (`core/utils.py`)
 - Use factory functions (`get_adapter()`, `get_strategy()`)
 - Bot views in `apps/bots/views.py`, payment views in `apps/payments/views.py`
-- Old code in `trading/` and `oldbybit.py` is **reference only — DO NOT MODIFY**
+- Old code in `trading/` and `oldbybit.py` is **reference only — do not build on it**. Removal is **approved (Phase 0 roadmap)** — 0 active imports from `apps/` verified 2026-10-11; remove once a green test run confirms no import side effects
 
 ### What NOT to Do
 - Don't merge `StrategyConfig` into bot models
 - Don't create new Django models for engine runtime state — use dicts
 - Don't put bot views in `apps/payments/`
-- Don't remove `oldbybit.py` or the `trading/` legacy directory
+- Don't build new features on `oldbybit.py` or the root `trading/` legacy directory (removal approved — see Workflow rules above)

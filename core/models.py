@@ -157,6 +157,19 @@ class SiteConfig(models.Model):
         ),
     )
 
+    # G5 / FR A7 referral rewards config (admin-editable; NO hard-coded
+    # business values in code — services/referral_rewards.get_referral_config()
+    # merges these keys over the built-in defaults):
+    #   {"commission_pct": 10, "referee_discount_pct": 15, "payout_minimum_usd": 50}
+    referral_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Referral rewards settings: commission_pct, referee_discount_pct, "
+            "payout_minimum_usd (empty dict = use defaults)"
+        ),
+    )
+
     class Meta:
         verbose_name = "Site Configuration"
         verbose_name_plural = "Site Configuration"

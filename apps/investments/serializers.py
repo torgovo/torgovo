@@ -8,6 +8,7 @@ import logging
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
+from apps.bots.models import InvestorLock, QuantumWithdrawalRequest
 from apps.exchanges.models import Exchange, TradingPair
 
 from .models import InvestmentBalance, Order, Position, TechnicalIndicator
@@ -282,3 +283,82 @@ class UserBalanceSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data["user"] = self.context["request"].user
         return super().create(validated_data)
+
+
+# ========== A5 QUANTUM AI LOCKS (G3 — FUNCTIONAL_REQUIREMENTS.md §A5) ==========
+
+
+class QuantumLockSerializer(serializers.ModelSerializer):
+    """InvestorLock with A5 derived state exposed read-only."""
+
+    user = UserNestedSerializer(read_only=True)
+    fund = serializers.PrimaryKeyRelatedField(read_only=True)
+    # Derived A5 properties (computed, never client-writable)
+    available_balance = serializers.ReadOnlyField()
+    is_matured = serializers.ReadOnlyField()
+    is_withdrawable = serializers.ReadOnlyField()
+    credit_available = serializers.ReadOnlyField()
+    terms_credited = serializers.ReadOnlyField()
+
+    class Meta:
+        model = InvestorLock
+        fields = [
+            "id",
+            "user",
+            "fund",
+            "subscription",
+            "deposit",
+            "amount",
+            "lock_days",
+            "status",
+            "term_number",
+            "credited_term",
+            "terms_credited",
+            "profit_credited_total",
+            "withdrawn_total",
+            "available_balance",
+            "starts_at",
+            "matures_at",
+            "is_matured",
+            "is_withdrawable",
+            "credit_available",
+            "cancelled_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class QuantumWithdrawalRequestSerializer(serializers.ModelSerializer):
+    """Withdrawal request incl. admin decision fields + pending age (7-day SLA)."""
+
+    user = UserNestedSerializer(read_only=True)
+    lock = serializers.PrimaryKeyRelatedField(read_only=True)
+    decided_by = UserNestedSerializer(read_only=True)
+    days_pending = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuantumWithdrawalRequest
+        fields = [
+            "id",
+            "user",
+            "lock",
+            "amount_requested",
+            "status",
+            "admin_entered_payout",
+            "admin_notes",
+            "requested_at",
+            "decided_at",
+            "decided_by",
+            "payment_transaction",
+            "days_pending",
+        ]
+        read_only_fields = fields
+
+    def get_days_pending(self, obj) -> int | None:
+        """Age of a pending request in whole days — surfaces the 7-day SLA."""
+        if obj.status != "pending":
+            return None
+        from django.utils import timezone as _tz
+
+        return (_tz.now() - obj.requested_at).days

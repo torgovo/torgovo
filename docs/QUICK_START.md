@@ -46,11 +46,13 @@ for exchange_data in exchanges:
         defaults=exchange_data
     )
 
-# Create subscription plans
+# Create subscription plans (Model C — admin-editable; FR A2)
 plans = [
-    {'name': 'Free', 'description': 'Basic trading features', 'price_per_month': 0, 'currency': 'USD'},
-    {'name': 'Premium', 'description': 'Advanced trading features', 'price_per_month': 29.99, 'currency': 'USD'},
-    {'name': 'Enterprise', 'description': 'Professional trading platform', 'price_per_month': 99.99, 'currency': 'USD'},
+    {'name': 'Free', 'description': 'Signal bots only, 10 signals/mo, 1 bot, 1 exchange, spot only', 'price_per_month': 0, 'currency': 'USD'},
+    {'name': 'Basic', 'description': 'Paid tier', 'price_per_month': 15, 'currency': 'USD'},
+    {'name': 'Standard', 'description': 'Paid tier', 'price_per_month': 25, 'currency': 'USD'},
+    {'name': 'Premium', 'description': 'Paid tier', 'price_per_month': 49, 'currency': 'USD'},
+    {'name': 'Creator', 'description': 'Includes referral cash commissions (FR A7)', 'price_per_month': 20, 'currency': 'USD'},
 ]
 
 for plan_data in plans:

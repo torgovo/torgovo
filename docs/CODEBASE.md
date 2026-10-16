@@ -29,9 +29,9 @@
 
 ## Tests
 
-### Current Coverage (~1949 passing, 13 skipped)
+### Current Coverage (2170 passed, 13 skipped — full suite, verified 2026-09-28)
 
-Collected ~1962 test nodes across `tests/` (verified 2026-08, `config.settings.test`). 13 skipped are demo/exchange integration tests.
+Historical: ~1949 passing (2026-08). Latest verified run: **2170 passed / 13 skipped**.
 
 | Test Directory | Files | Nodes |
 |----------------|-------|-------|

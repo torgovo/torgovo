@@ -1,4 +1,4 @@
-> **Note:** This is the original spec document from early development. Some details are outdated. See ARCHITECTURE.md and SETUP.md for current implementation details.
+> **Note:** This is the original spec document from early development. Some details are outdated. See ARCHITECTURE.md and SETUP.md for current implementation details. **Product requirements (pricing, Quantum AI locks/payouts, referrals): FUNCTIONAL_REQUIREMENTS.md Part A wins** — the "every 2 weeks" Quantum cadence below is current-code description only, superseded by FR A5 (30–365d locks, profit-only post-lock withdrawals processed manually within 7 days).
 
 # Torgovo - Crypto Trading Bot Platform
 
@@ -66,8 +66,8 @@ A subscription-based platform where users create and manage cryptocurrency tradi
 
 **Rules:**
 - Apply same logic for losses
-- Recalculate pool automatically every 2 weeks
-- Manual withdrawals processed every 2 weeks only
+- Recalculate pool automatically every 2 weeks (current code; target: FR A5 lock model)
+- Manual withdrawals processed every 2 weeks only (current code; target: profit-only post-lock, manual within 7 days — FR A5)
 - Admin can adjust shown percentage (5-20%) from dashboard
 
 ## Webhook Flow (Critical)
@@ -138,7 +138,7 @@ Features:
 - Configure Quantum AI profit parameters
 - View all users, restrict/disable accounts
 - View trade logs (filter by user, bot, exchange, date)
-- Process manual withdrawals every 2 weeks
+- Process manual withdrawals within 7 days of post-lock request (FR A5; current code: 2-week cadence)
 - Send emails (system-wide or targeted)
 - Adjust referral bonus amounts
 

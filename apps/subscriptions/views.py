@@ -508,17 +508,30 @@ class TelegramSubscribeView(APIView):
                 raise Conflict("Plan has reached maximum subscribers")
 
         # Create subscription
-        subscription = TelegramSubscription.objects.create(
-            user=request.user,
-            plan=plan,
-            status="pending_approval",
-            telegram_handle=telegram_handle,
-            payment_screenshot=payment_screenshot,
-            payment_transaction_hash=payment_tx_hash,
-            payment_blockchain=payment_blockchain,
-            amount_paid=cycle_prices[billing_cycle],
-            billing_cycle=billing_cycle,
-        )
+        # G5 / FR A7: referee discount frozen at purchase — quoted price is
+        # never re-evaluated at approval time.
+        # G5 race guard: claim_referee_discount locks the Referral row so two
+        # concurrent first-purchases cannot both receive the discount.
+        from django.db import transaction as _txn
+
+        from services.referral_rewards import ReferralRewardService, apply_discount
+
+        full_price = cycle_prices[billing_cycle]
+        with _txn.atomic():
+            pct = ReferralRewardService.claim_referee_discount(request.user)
+
+            subscription = TelegramSubscription.objects.create(
+                user=request.user,
+                plan=plan,
+                status="pending_approval",
+                telegram_handle=telegram_handle,
+                payment_screenshot=payment_screenshot,
+                payment_transaction_hash=payment_tx_hash,
+                payment_blockchain=payment_blockchain,
+                amount_paid=apply_discount(full_price, pct) if pct > 0 else full_price,
+                discount_applied=pct if pct > 0 else None,
+                billing_cycle=billing_cycle,
+            )
 
         # A15: the subscribe-time cache.delete("telegram_plans_v1") was
         # removed — subscribing cannot change plan data; invalidation now
@@ -528,6 +541,13 @@ class TelegramSubscribeView(APIView):
             {
                 "subscription_id": str(subscription.id),
                 "status": subscription.status,
+                # G5 / FR A7: null = full cycle price (frontend shows plan price)
+                "amount_paid": str(subscription.amount_paid),
+                "discount_applied": (
+                    str(subscription.discount_applied)
+                    if subscription.discount_applied is not None
+                    else None
+                ),
                 "message": "Payment received. Admin approval pending.",
             },
             status=status.HTTP_201_CREATED,
@@ -540,13 +560,22 @@ class TelegramSubscribeView(APIView):
 
 
 class SubscriptionPlanSerializer(serializers.Serializer):
+    # G1 (FR A2): full admin-driven plan shape — all values come from the
+    # SubscriptionPlan row, never from code constants.
     id = serializers.IntegerField()
     name = serializers.CharField()
     slug = serializers.CharField()
+    description = serializers.CharField()
     price_monthly = serializers.DecimalField(max_digits=10, decimal_places=2)
     price_yearly = serializers.DecimalField(max_digits=10, decimal_places=2)
+    annual_discount_pct = serializers.IntegerField()
+    sort_order = serializers.IntegerField()
     max_bots_allowed = serializers.IntegerField()
     max_webhooks_allowed = serializers.IntegerField()
+    bot_types = serializers.JSONField()
+    market = serializers.CharField()
+    max_signals_per_month = serializers.IntegerField()
+    max_exchanges = serializers.IntegerField()
     features = serializers.JSONField()
     trial_days = serializers.IntegerField()
 
@@ -562,10 +591,13 @@ class PlanListView(APIView):
     def get(self, request):
         from apps.payments.models import SubscriptionPlan
 
-        cache_key = "subscription_plans_v1"
+        # v2: G1 added Model C fields (old v1 shape may be cached)
+        cache_key = "subscription_plans_v2"
         data = cache.get(cache_key)
         if not data:
-            plans = SubscriptionPlan.objects.filter(is_active=True).order_by("price_monthly")
+            plans = SubscriptionPlan.objects.filter(is_active=True).order_by(
+                "sort_order", "price_monthly"
+            )
             serializer = SubscriptionPlanSerializer(plans, many=True)
             data = {"plans": serializer.data}
             cache.set(cache_key, data, 3600)
@@ -604,8 +636,17 @@ class SubscribeView(APIView):
                     "max_webhooks": plan.max_webhooks_allowed,
                 },
                 "is_active": True,
+                # G5 tier bridge: the referral commission ladder walks
+                # subscription.plan.subscription_plan — keep it set on new
+                # shims (legacy rows linked by migration 0013 backfill).
+                "subscription_plan": plan,
             },
         )
+        if not bot_plan.subscription_plan_id:
+            # Defensive: a pre-G5 shim whose name missed the 0013 backfill
+            # (e.g. plan renamed afterwards).
+            bot_plan.subscription_plan = plan
+            bot_plan.save(update_fields=["subscription_plan"])
 
         user = request.user
 
@@ -625,16 +666,33 @@ class SubscribeView(APIView):
                 }
             )
 
+        # G5 / FR A7: referee discount frozen at purchase — the quoted price
+        # is never re-evaluated at approval time.
+        from services.referral_rewards import ReferralRewardService, apply_discount
+
+        pct = ReferralRewardService.referee_discount_pct(user)
+
         subscription = BotSubscription.objects.create(
             user=user,
             plan=bot_plan,
             status="pending_payment",
+            discount_applied=pct if pct > 0 else None,
+            amount_due=apply_discount(bot_plan.price, pct) if pct > 0 else None,
         )
 
         return Response(
             {
                 "subscription_id": str(subscription.id),
                 "status": subscription.status,
+                # G5 / FR A7: null = full plan price (frontend shows plan price)
+                "amount_due": (
+                    str(subscription.amount_due) if subscription.amount_due is not None else None
+                ),
+                "discount_applied": (
+                    str(subscription.discount_applied)
+                    if subscription.discount_applied is not None
+                    else None
+                ),
                 "message": "Subscription created. Upload payment proof to proceed.",
             },
             status=status.HTTP_201_CREATED,

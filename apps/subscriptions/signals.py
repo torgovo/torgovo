@@ -13,10 +13,11 @@ from django.dispatch import receiver
 
 from apps.subscriptions.models import TelegramSignalPlan
 
-# Both keys are dropped on any plan save/delete: each cache only holds plan
+# All keys are dropped on any plan save/delete: each cache only holds plan
 # payloads, so a full flush is cheap (next request rebuilds it in 1 query)
 # and it covers cross-effects (shared serializer/route changes) for free.
-PLAN_CACHE_KEYS = ("telegram_plans_v1", "subscription_plans_v1")
+# v1 kept in the set for one release so any pre-upgrade stale entry dies too.
+PLAN_CACHE_KEYS = ("telegram_plans_v1", "subscription_plans_v1", "subscription_plans_v2")
 
 
 @receiver(post_save, sender=TelegramSignalPlan)

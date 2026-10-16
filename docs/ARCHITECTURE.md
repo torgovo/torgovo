@@ -131,7 +131,7 @@ Adapters wrap raw CCXT calls. `BotEngine` calls `self.exchange.create_order()` d
 **Beat** (DatabaseScheduler via django-celery-beat):
 - Heartbeat check — every 60s
 - Signal reset — every 24h
-- Profit accrual/distribution (Quantum AI) — every 2 weeks
+- Profit accrual/distribution (Quantum AI) — every 2 weeks (current code; target model = 30–365d locks + post-lock manual payouts within 7 days — FR A5)
 - Process fund payouts — periodic
 - Cleanup old audit logs — periodic
 

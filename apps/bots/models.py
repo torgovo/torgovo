@@ -13,6 +13,16 @@ from core.utils import decrypt_api_key, encrypt_api_key, generate_secret_key, lo
 
 User = get_user_model()
 
+# A5 (FUNCTIONAL_REQUIREMENTS.md §A5): allowed Quantum AI investment lock
+# terms. Shared by QuantumAIFund.default_lock_days and InvestorLock.lock_days
+# so both fields are validated against the same closed set.
+QUANTUM_LOCK_DAYS_CHOICES = [
+    (30, "30 days"),
+    (90, "90 days"),
+    (180, "180 days"),
+    (365, "365 days"),
+]
+
 # ==================== SIGNAL BOT (TradingView Webhook) ====================
 
 
@@ -474,6 +484,15 @@ class QuantumAIFund(SoftDeleteModel):
         help_text="Target reserve as percentage of total deposits (e.g. 10%)",
     )
 
+    # A5 (G3): default lock term applied when an investment creates an
+    # InvestorLock without an explicit term (subscription / deposit approval).
+    # Admin-editable → satisfies the Part B "DB-backed admin config" rule.
+    default_lock_days = models.PositiveSmallIntegerField(
+        choices=QUANTUM_LOCK_DAYS_CHOICES,
+        default=30,
+        help_text="Default lock term (days) for new Quantum AI investments (A5)",
+    )
+
     # Admin Controls
     is_active = models.BooleanField(default=True)
     admin_notes = models.TextField(blank=True)
@@ -926,6 +945,216 @@ class QuantumWeeklyProfit(SoftDeleteModel):
 
     def __str__(self):
         return f"Week of {self.week_start} - {self.user.email}"
+
+
+# ==================== A5 QUANTUM AI INVESTMENT LOCKS (G3) ====================
+# Implements FUNCTIONAL_REQUIREMENTS.md §A5 (locked 2026-10-14), replacing the
+# biweekly reserve/smoothing distribution model:
+#   * per-investor 30/90/180/365-day locks (hard rule: nothing withdrawable
+#     while the lock window is running),
+#   * admin-triggered credit at per-investor maturity: capital x (1 + %/100),
+#     exactly one credit per term, credited capital rolls into the next term
+#     (compounding), rate is lock-independent,
+#   * post-lock withdrawal requests (any partial amount up to capital+profit),
+#     admin approves within 7 days and enters the payout amount including
+#     chain fees; the system debits the lock ledger (grill Q12).
+# Accounting model: `amount` is the single balance-of-record (capital + rolled
+# credit); profit_credited_total / withdrawn_total are cumulative reporting.
+
+
+class InvestorLock(SoftDeleteModel):
+    """A single investor's term-locked capital in the Quantum AI fund (A5)."""
+
+    class Meta:
+        db_table = "bots_investor_locks"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "status"]),
+            models.Index(fields=["fund", "status"]),
+            models.Index(fields=["matures_at"]),  # admin "matured, awaiting credit" queue
+        ]
+
+    STATUS_CHOICES = [
+        ("active", "Active"),  # lock running or matured awaiting credit/withdrawal
+        ("cancelled", "Cancelled"),  # voided by admin (capital already 0/paid out)
+        ("closed", "Closed"),  # capital fully withdrawn — terminal
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="quantum_locks")
+    fund = models.ForeignKey(QuantumAIFund, on_delete=models.PROTECT, related_name="locks")
+
+    # Optional provenance links (either may be absent: locks can also be
+    # created directly by admin credit flows during migration from old data).
+    subscription = models.ForeignKey(
+        "payments.BotSubscription",
+        on_delete=models.CASCADE,
+        related_name="quantum_locks",
+        null=True,
+        blank=True,
+    )
+    deposit = models.ForeignKey(
+        "payments.InvestorDeposit",
+        on_delete=models.SET_NULL,
+        related_name="locks",
+        null=True,
+        blank=True,
+    )
+
+    # --- capital accounting -------------------------------------------------
+    amount = models.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        help_text="Current capital (balance-of-record): includes credited profit "
+        "rolled into subsequent terms; reduced by approved withdrawals.",
+    )
+    lock_days = models.PositiveSmallIntegerField(choices=QUANTUM_LOCK_DAYS_CHOICES)
+
+    # --- term tracking (one credit per maturity, then roll) -----------------
+    term_number = models.PositiveIntegerField(
+        default=1, help_text="Current term (1-based); bumped by each credit."
+    )
+    credited_term = models.PositiveIntegerField(
+        default=0,
+        help_text="Last term credited; 0 = never credited. "
+        "Credit allowed only when is_matured and credited_term < term_number.",
+    )
+    profit_credited_total = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+    withdrawn_total = models.DecimalField(max_digits=20, decimal_places=8, default=0)
+
+    # --- lock window ---------------------------------------------------------
+    starts_at = models.DateTimeField(default=timezone.now)
+    matures_at = models.DateTimeField(db_index=True)  # derived state, G4-style
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # --- derived state (no sweep task: state is computed, G4 lesson) ---------
+    @property
+    def is_matured(self) -> bool:
+        """Lock window has elapsed — the only gate for credit/withdrawal."""
+        return self.matures_at <= timezone.now()
+
+    @property
+    def is_withdrawable(self) -> bool:
+        """A5 hard rule: nothing is ever withdrawable while the lock runs."""
+        return self.status == "active" and self.is_matured and self.amount > 0
+
+    @property
+    def credit_available(self) -> bool:
+        """True when this term's maturity has not been credited yet."""
+        return self.is_matured and self.status == "active" and self.credited_term < self.term_number
+
+    @property
+    def available_balance(self) -> Decimal:
+        """Withdrawable balance = current capital (incl. rolled credit)."""
+        return self.amount
+
+    @property
+    def terms_credited(self) -> int:
+        return self.credited_term
+
+    def __str__(self):
+        return f"{self.user.email} - {self.amount} USDT / {self.lock_days}d ({self.status})"
+
+
+class QuantumProfitCredit(TimeStampedModel):
+    """Audit row for one admin-triggered maturity credit (A5 mechanism step)."""
+
+    class Meta:
+        db_table = "bots_quantum_profit_credits"
+        ordering = ["-created_at"]
+        # DB-level backstop for "one credit per term" (guards alongside the
+        # service's select_for_update — mirrors the G4 CAS pattern).
+        constraints = [
+            models.UniqueConstraint(fields=["lock", "term_number"], name="uniq_credit_per_term"),
+        ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lock = models.ForeignKey(InvestorLock, on_delete=models.CASCADE, related_name="credits")
+    term_number = models.PositiveIntegerField()  # term the credit applied to
+
+    pct_entered = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        help_text="Admin-entered profit % from actual P/L (2-5% is guidance only)",
+    )
+    profit_amount = models.DecimalField(max_digits=20, decimal_places=8)  # amount credited
+    capital_before = models.DecimalField(max_digits=20, decimal_places=8)
+    capital_after = models.DecimalField(max_digits=20, decimal_places=8)
+
+    credited_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quantum_profit_credits",
+    )
+
+    def __str__(self):
+        return (
+            f"{self.lock_id} term {self.term_number}: +{self.pct_entered}% ({self.profit_amount})"
+        )
+
+
+class QuantumWithdrawalRequest(TimeStampedModel):
+    """Post-lock withdrawal request with admin payout approval (A5)."""
+
+    class Meta:
+        db_table = "bots_quantum_withdrawal_requests"
+        ordering = ["-requested_at"]
+        indexes = [
+            models.Index(fields=["user", "status"]),
+            models.Index(fields=["status", "-requested_at"]),  # admin queue + 7-day SLA age
+        ]
+
+    STATUS_CHOICES = [
+        ("pending", "Pending"),  # awaiting admin decision (SLA: <= 7 days)
+        ("approved", "Approved"),  # admin entered payout incl. chain fees; ledger debited
+        ("rejected", "Rejected"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="quantum_withdrawal_requests"
+    )
+    lock = models.ForeignKey(
+        InvestorLock, on_delete=models.CASCADE, related_name="withdrawal_requests"
+    )
+
+    amount_requested = models.DecimalField(max_digits=20, decimal_places=8)
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True
+    )
+
+    # Admin decision fields (grill Q12: payout incl. chain fees entered by admin)
+    admin_entered_payout = models.DecimalField(
+        max_digits=20, decimal_places=8, null=True, blank=True
+    )
+    admin_notes = models.TextField(blank=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="decided_quantum_withdrawals",
+    )
+    payment_transaction = models.ForeignKey(
+        "payments.PaymentTransaction",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quantum_withdrawal_requests",
+    )
+
+    requested_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.email} - {self.amount_requested} USDT ({self.status})"
 
 
 # ==================== PAIR CONFIG (Keep Your Model) ====================
