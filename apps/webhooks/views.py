@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 
 from django.core.cache import cache
+from django.db.models import Sum
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
@@ -237,9 +238,14 @@ class SignalBotWebhookView(APIView):
                 logger.warning(f"Timestamp too old for bot {bot_id}: {age:.0f}s")
                 return Response({"error": "Timestamp expired"}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Find bot by bot_id
+            # Find bot by bot_id (plan chain joined for the Model C quota below)
             try:
-                bot = SignalBot.objects.select_related("user", "subscription").get(
+                bot = SignalBot.objects.select_related(
+                    "user",
+                    "subscription",
+                    "subscription__plan",
+                    "subscription__plan__subscription_plan",
+                ).get(
                     bot_id=bot_id,
                     is_deleted=False,
                 )
@@ -329,6 +335,34 @@ class SignalBotWebhookView(APIView):
                     {"error": f"Subscription is {bot.subscription.status}"},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+
+            # FR A2 Model C quota: signals/month is a PLAN-level entitlement,
+            # counted across all of the user's signal bots (sum of the same
+            # per-bot counters, reset monthly by reset_monthly_signal_limits).
+            # Runs BEFORE the legacy block: Model C bots always have a
+            # subscription, so `not bot.subscription` never fires for them;
+            # legacy subs have plan.subscription_plan=NULL and skip this
+            # branch — the subscribed-legacy bypass stays byte-stable.
+            model_c_plan = None
+            if bot.subscription and bot.subscription.plan:
+                model_c_plan = bot.subscription.plan.subscription_plan
+            if model_c_plan is not None:
+                used = (
+                    SignalBot.objects.filter(user=bot.user, is_deleted=False).aggregate(
+                        total=Sum("signals_used_this_month")
+                    )["total"]
+                    or 0
+                )
+                plan_limit = model_c_plan.max_signals_per_month
+                if used >= plan_limit:
+                    logger.info(
+                        f"User {bot.user_id} Model C signal limit reached "
+                        f"({used}/{plan_limit}, plan {model_c_plan.slug})"
+                    )
+                    return Response(
+                        {"error": "Monthly signal limit reached"},
+                        status=status.HTTP_429_TOO_MANY_REQUESTS,
+                    )
 
             # Signal limit enforcement: free users get `signal_limit` per month
             if bot.signals_used_this_month >= bot.signal_limit and not bot.subscription:

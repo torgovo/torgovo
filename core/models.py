@@ -195,7 +195,23 @@ class SiteConfig(models.Model):
         SiteConfig.get.cache_clear()
 
     def get_plan_limit(self, plan: str, default: int = 3) -> int:
-        """Get bot limit for a plan, with built-in defaults as fallback."""
+        """Get bot limit for a plan, with built-in defaults as fallback.
+
+        FR A2: a Model C SubscriptionPlan row (seeded, admin-editable) is
+        authoritative for its slug — consulted BEFORE the legacy JSON so an
+        admin edit on the row propagates to every profile recompute via
+        User.save(). Deliberately not filtered on is_active: deactivation
+        gates sales, it must not silently loosen limits for existing holders.
+        """
+        from apps.payments.models import SubscriptionPlan
+
+        row = (
+            SubscriptionPlan.objects.filter(slug=plan)
+            .values_list("max_bots_allowed", flat=True)
+            .first()
+        )
+        if row is not None:
+            return row
         defaults = {"free": 3, "basic": 10, "premium": 25, "enterprise": 100}
         plan_limits = {**defaults, **self.plan_limits}
         return plan_limits.get(plan, default)

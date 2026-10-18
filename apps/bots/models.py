@@ -205,7 +205,11 @@ class GridBot(SoftDeleteModel):
     class Meta:
         db_table = "bots_grid_bots"
         ordering = ["-created_at"]
-        unique_together = ["subscription"]  # 1 bot per subscription
+        # unique_together = ["subscription"] REMOVED 2026-10-18: Model C
+        # users attach every bot to ONE shared subscription, so the DB
+        # constraint blocked seat-eligible 2nd+ grids (IntegrityError 500).
+        # Legacy still gets 1-per-sub from the view-level duplicate check
+        # (source != "model_c" → 400). See docs/model-c-shared-sub-multi-bot.md.
         indexes = [
             models.Index(fields=["user", "is_running"]),
             models.Index(fields=["exchange_name", "trading_pair"]),
@@ -347,7 +351,10 @@ class MartingaleBot(SoftDeleteModel):
     class Meta:
         db_table = "bots_martingale_bots"
         ordering = ["-created_at"]
-        unique_together = ["subscription"]  # 1 bot per subscription
+        # unique_together = ["subscription"] REMOVED 2026-10-18: same reason
+        # as GridBot — shared Model C subscription holds many bots; legacy
+        # 1-per-sub stays enforced by the create-view 400 check.
+        # See docs/model-c-shared-sub-multi-bot.md.
         indexes = [
             models.Index(fields=["user", "is_running"]),
             models.Index(fields=["exchange_name", "trading_pair"]),

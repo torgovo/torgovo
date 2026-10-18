@@ -35,11 +35,16 @@ class CustomUser(AbstractUser):
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["username"]
 
-    # Subscription Plans (matching your business logic)
+    # Subscription Plans. FR A2 Model C slugs are DB-seeded (SubscriptionPlan
+    # rows) — labels stay generic on purpose: the bot-count matrix lives on
+    # the row, never hard-coded here. "enterprise" is a pre-A2 value kept so
+    # existing rows stay valid.
     SUBSCRIPTION_PLAN_CHOICES = [
-        ("free", _("Free - 3 bots max")),
-        ("basic", _("Basic - 10 bots max")),
-        ("premium", _("Premium - Unlimited bots")),
+        ("free", _("Free")),
+        ("basic", _("Basic")),
+        ("standard", _("Standard")),
+        ("premium", _("Premium")),
+        ("creator", _("Creator")),
         ("enterprise", _("Enterprise - White label")),
     ]
 
@@ -312,13 +317,16 @@ class CustomUser(AbstractUser):
         return True
 
     def can_create_more_bots(self):
-        from apps.bots.models import GridBot, MartingaleBot, QuantumAIBot, SignalBot
+        # QuantumAIBot excluded (same basis as services.plan_limits.
+        # count_user_bots): it has no `user` field — rows belong to the
+        # admin QuantumAIFund master fund, so a user= filter raised
+        # FieldError. See docs/regression-quantum-aibot-seat-count-fielderror.md.
+        from apps.bots.models import GridBot, MartingaleBot, SignalBot
 
         current_bot_count = (
             SignalBot.objects.filter(user=self, is_deleted=False).count()
             + GridBot.objects.filter(user=self, is_deleted=False).count()
             + MartingaleBot.objects.filter(user=self, is_deleted=False).count()
-            + QuantumAIBot.objects.filter(user=self, is_deleted=False).count()
         )
         return current_bot_count < self.max_bots_allowed
 

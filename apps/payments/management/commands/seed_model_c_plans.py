@@ -8,9 +8,9 @@ Run at deploy (and any time the canonical prices need re-asserting):
 
 Creates the 5 canonical rows by slug; on re-run it upserts only the Model C
 spec fields (prices, sort order, limits) and never touches name/slug of
-custom rows. All values below are the LOCKED grill-me decisions; paid-tier
-non-priced limits are placeholders (TBD per FR A2) and are admin-editable
-afterwards — plan data is DB-driven, this seed only establishes it.
+custom rows. All values below are the LOCKED grill-me decisions (Q6 matrix).
+Paid tiers open signal/grid/martingale; quantum_ai is always exempt from the
+bot_types gate. Plan data is DB-driven — this seed only establishes it.
 """
 
 from decimal import Decimal
@@ -20,7 +20,9 @@ from django.db import IntegrityError
 
 from apps.payments.models import SubscriptionPlan
 
-# slug, name, monthly, yearly, sort, bot_types, market, signals/mo, exchanges, description
+# slug, name, monthly, yearly, sort, max_bots, bot_types, market, signals/mo, exchanges, description
+# Q6 matrix locked via grill-me (2026-10-17): paid tiers open signal/grid/martingale;
+# quantum_ai always exempt from the bot_types gate (Q2 decision).
 MODEL_C = [
     (
         "free",
@@ -28,25 +30,63 @@ MODEL_C = [
         "0.00",
         "0.00",
         10,
+        1,
         ["signal"],
         "spot",
         10,
         1,
         "10 signals/mo, 1 bot, 1 exchange, spot only",
     ),
-    ("basic", "Basic", "15.00", "144.00", 20, [], "spot", 10, 1, ""),
-    ("standard", "Standard", "25.00", "240.00", 30, [], "spot", 10, 1, ""),
-    ("premium", "Premium", "49.00", "470.40", 40, [], "spot", 10, 1, ""),
+    (
+        "basic",
+        "Basic",
+        "15.00",
+        "144.00",
+        20,
+        3,
+        ["signal", "grid", "martingale"],
+        "spot",
+        50,
+        3,
+        "",
+    ),
+    (
+        "standard",
+        "Standard",
+        "25.00",
+        "240.00",
+        30,
+        5,
+        ["signal", "grid", "martingale"],
+        "spot",
+        300,
+        6,
+        "",
+    ),
+    (
+        "premium",
+        "Premium",
+        "49.00",
+        "470.40",
+        40,
+        10,
+        ["signal", "grid", "martingale"],
+        "spot",
+        1500,
+        15,
+        "",
+    ),
     (
         "creator",
         "Creator",
         "20.00",
         "192.00",
         50,
-        [],
+        5,
+        ["signal", "grid", "martingale"],
         "spot",
-        10,
-        1,
+        100,
+        3,
         "Includes referral cash commissions (FR A7)",
     ),
 ]
@@ -80,15 +120,26 @@ class Command(BaseCommand):
         created = updated = unchanged = 0
 
         for row in MODEL_C:
-            slug, name, monthly, yearly, sort, bot_types, market, signals, exchanges, desc = row
+            (
+                slug,
+                name,
+                monthly,
+                yearly,
+                sort,
+                max_bots,
+                bot_types,
+                market,
+                signals,
+                exchanges,
+                desc,
+            ) = row
             defaults = {
                 "name": name,
                 "description": desc,
                 "price_monthly": Decimal(monthly),
                 "price_yearly": Decimal(yearly),
                 "sort_order": sort,
-                # Paid-tier bot limit TBD (FR A2) — placeholder until approved
-                "max_bots_allowed": 1,
+                "max_bots_allowed": max_bots,
                 "max_webhooks_allowed": 10,
                 "bot_types": bot_types,
                 "market": market,

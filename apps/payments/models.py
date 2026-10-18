@@ -740,6 +740,19 @@ class BotSubscription(SoftDeleteModel):
         self.notes = notes
         self.save()
 
+        # FR A2 / Q15: Model C approval makes the profile match the approved
+        # tier — user.subscription_plan feeds get_plan_limit (seat recompute)
+        # and all plan displays. Upgrades apply instantly here; downgrades
+        # only ever happen at expiry (expiry.py). Legacy approvals (shim with
+        # no FK) never touch the profile. update_fields must include
+        # max_bots_allowed because User.save() recomputes it.
+        if self.plan.subscription_plan_id:
+            self.user.subscription_plan = self.plan.subscription_plan.slug
+            # referral_code rides along: User.save() generates it in memory
+            # when empty, and update_fields would otherwise drop that write
+            # while still creating the matching Referral row.
+            self.user.save(update_fields=["subscription_plan", "max_bots_allowed", "referral_code"])
+
     def reject(self, admin_user, reason):
         self.status = "rejected"
         self.rejection_reason = reason

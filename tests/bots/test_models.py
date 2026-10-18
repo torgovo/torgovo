@@ -245,11 +245,15 @@ class TestGridBotModel:
         assert bot.active_orders == orders
         assert bot.current_grid_levels == levels
 
-    def test_meta_unique_together(self):
-        from apps.bots.models import GridBot
+    def test_meta_no_subscription_uniqueness(self):
+        # Model C shared-sub contract (2026-10-18): the per-subscription
+        # unique_together was removed (migration bots/0019) so one shared
+        # Model C sub can hold many grid/martingale bots; legacy 1-per-sub
+        # is the view-level 400 check. See docs/model-c-shared-sub-multi-bot.md.
+        from apps.bots.models import GridBot, MartingaleBot
 
-        constraint = GridBot._meta.unique_together
-        assert ("subscription",) in constraint
+        assert ("subscription",) not in GridBot._meta.unique_together
+        assert ("subscription",) not in MartingaleBot._meta.unique_together
 
     def test_defaults(self, user, bot_subscription):
         from apps.bots.models import GridBot

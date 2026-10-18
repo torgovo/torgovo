@@ -37,6 +37,7 @@ from apps.bots.serializers import (
 )
 from apps.payments.services.expiry import get_usable_subscription
 from core.pagination import StandardResultsSetPagination
+from services.plan_limits import enforce_bot_creation
 
 logger = logging.getLogger("bots")
 
@@ -98,13 +99,22 @@ class SignalBotViewSet(viewsets.ModelViewSet):
         return SignalBotSerializer
 
     def perform_create(self, serializer):
-        # G4 gate: usable = active AND not hard-stopped (grace still counts).
-        subscription = get_usable_subscription(self.request.user, "custom")
+        # FR A2 Model C gates (type 403 / seats 429); no-op for legacy/none,
+        # so the G4 block below stays byte-stable for per-bot subscriptions.
+        user = self.request.user
+        limits = enforce_bot_creation(user, "signal")
 
-        if not subscription:
-            raise PermissionError("No active Signal Bot subscription")
+        if limits.source == "model_c":
+            # Model C: the shared Model C subscription row IS the usable sub.
+            subscription = limits.subscription
+        else:
+            # G4 gate: usable = active AND not hard-stopped (grace still counts).
+            subscription = get_usable_subscription(user, "custom")
 
-        bot = serializer.save(user=self.request.user, subscription=subscription)
+            if not subscription:
+                raise PermissionError("No active Signal Bot subscription")
+
+        bot = serializer.save(user=user, subscription=subscription)
         bot.generate_webhook_credentials()
 
     @action(detail=True, methods=["post"])
@@ -147,23 +157,38 @@ class GridBotViewSet(viewsets.ModelViewSet):
         return GridBotSerializer
 
     def perform_create(self, serializer):
-        # G4 gate: usable = active AND not hard-stopped (grace still counts).
-        subscription = get_usable_subscription(self.request.user, "grid")
+        # FR A2 Model C gates (type 403 / seats 429); no-op for legacy/none.
+        user = self.request.user
+        limits = enforce_bot_creation(user, "grid")
 
-        if not subscription:
-            raise PermissionError("No active Grid Bot subscription")
+        if limits.source == "model_c":
+            # Model C rows are bot_type="custom" shims — the per-type G4
+            # lookup below would never find them, so use the resolved row.
+            subscription = limits.subscription
+        else:
+            # G4 gate: usable = active AND not hard-stopped (grace still counts).
+            subscription = get_usable_subscription(user, "grid")
 
-        existing_bot = GridBot.objects.filter(subscription=subscription, is_deleted=False).first()
+            if not subscription:
+                raise PermissionError("No active Grid Bot subscription")
 
-        if existing_bot:
-            from rest_framework.exceptions import ValidationError
+        # Legacy per-bot subs keep the 1-per-sub 400 guard byte-stable;
+        # Model C's ONE shared sub is expected to hold many bots — seats are
+        # the only cap there (enforce_bot_creation above, 429).
+        if limits.source != "model_c":
+            existing_bot = GridBot.objects.filter(
+                subscription=subscription, is_deleted=False
+            ).first()
 
-            raise ValidationError(
-                "You already have a Grid Bot for this subscription. "
-                "You can update the existing bot's settings instead."
-            )
+            if existing_bot:
+                from rest_framework.exceptions import ValidationError
 
-        serializer.save(user=self.request.user, subscription=subscription)
+                raise ValidationError(
+                    "You already have a Grid Bot for this subscription. "
+                    "You can update the existing bot's settings instead."
+                )
+
+        serializer.save(user=user, subscription=subscription)
 
     @action(detail=True, methods=["post"])
     def start(self, request, pk=None):
@@ -229,25 +254,37 @@ class MartingaleBotViewSet(viewsets.ModelViewSet):
         return MartingaleBotSerializer
 
     def perform_create(self, serializer):
-        # G4 gate: usable = active AND not hard-stopped (grace still counts).
-        subscription = get_usable_subscription(self.request.user, "martingale")
+        # FR A2 Model C gates (type 403 / seats 429); no-op for legacy/none.
+        user = self.request.user
+        limits = enforce_bot_creation(user, "martingale")
 
-        if not subscription:
-            raise PermissionError("No active Martingale Bot subscription")
+        if limits.source == "model_c":
+            # Model C rows are bot_type="custom" shims — the per-type G4
+            # lookup below would never find them, so use the resolved row.
+            subscription = limits.subscription
+        else:
+            # G4 gate: usable = active AND not hard-stopped (grace still counts).
+            subscription = get_usable_subscription(user, "martingale")
 
-        existing_bot = MartingaleBot.objects.filter(
-            subscription=subscription, is_deleted=False
-        ).first()
+            if not subscription:
+                raise PermissionError("No active Martingale Bot subscription")
 
-        if existing_bot:
-            from rest_framework.exceptions import ValidationError
+        # Same legacy/Model C split as the grid view: shared Model C sub
+        # holds many bots (seat-capped above), legacy keeps 1-per-sub 400.
+        if limits.source != "model_c":
+            existing_bot = MartingaleBot.objects.filter(
+                subscription=subscription, is_deleted=False
+            ).first()
 
-            raise ValidationError(
-                "You already have a Martingale Bot for this subscription. "
-                "You can update the existing bot's settings instead."
-            )
+            if existing_bot:
+                from rest_framework.exceptions import ValidationError
 
-        serializer.save(user=self.request.user, subscription=subscription)
+                raise ValidationError(
+                    "You already have a Martingale Bot for this subscription. "
+                    "You can update the existing bot's settings instead."
+                )
+
+        serializer.save(user=user, subscription=subscription)
 
     @action(detail=True, methods=["post"])
     def start(self, request, pk=None):
@@ -319,11 +356,16 @@ class InvestorPortfolioViewSet(viewsets.ModelViewSet):
     serializer_class = InvestorPortfolioSerializer
 
     def perform_create(self, serializer):
-        # G4 gate: usable = active AND not hard-stopped (grace still counts).
+        # G4 gate FIRST (quantum is a separate legacy purchase): a user with
+        # a Model C sub but no quantum sub must see the historical message.
         subscription = get_usable_subscription(self.request.user, "quantum_ai")
 
         if not subscription:
             raise PermissionError("No active Quantum AI subscription")
+
+        # FR A2: quantum_ai is type-exempt (Q2 — not a Model C bot type), but
+        # a Model C user's seat count still applies (design-locked gate).
+        enforce_bot_creation(self.request.user, "quantum_ai")
 
         serializer.save(user=self.request.user, subscription=subscription)
 

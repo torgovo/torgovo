@@ -224,7 +224,7 @@ Indicator webhooks (TradingView push, public with `X-Webhook-Token`, **not** for
 **Key contracts:**
 - `bot_id` is a hyphenated string (`xxxxx-xxxxx-xxxxx`) — opaque.
 - Each bot has a generated `secret_key` (CSPRNG) used only for webhook auth — **never shown to end users beyond creation**.
-- Grid/martingale bots are one-per-subscription (`unique_together`); creating a second for the same subscription → `400`/`409`.
+- Grid/martingale bots on a **legacy per-bot subscription** are one-per-subscription → creating a second for the same subscription → `400`/`409`. **Model C (shared subscription) exception:** every grid/martingale/signal on the one shared `Model C` subscription succeeds until `max_bots_allowed` seats are used (`429` `BOT_LIMIT_EXCEEDED` past that) — the one-per-sub check and DB constraint are skipped for source=`model_c` (since 2026-10-18, `model-c-shared-sub-multi-bot.md`).
 - `orders/` here is the bot-order model. Consumer hit: a `BotOrder` requires a user to persist (post-save sync signal) — treat bot order creation as user-scoped.
 
 ---

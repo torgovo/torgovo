@@ -57,8 +57,9 @@ Produced for every exception DRF (or the handler) converts to a response:
   traceback) is appended. Never present in production.
 - `message` resolution (`get_error_message`):
   1. `detail` is a string → that string;
-  2. dict containing `non_field_errors` → its first entry (e.g. the
-     "You already have a Grid Bot for this subscription…" text);
+  2. dict containing `non_field_errors` → its first entry (e.g. the legacy
+     "You already have a Grid Bot for this subscription…" text — see §5
+     Gate 2 for when that check still fires);
   3. list → first entry;
   4. other dict → generic `"Validation failed. Please check your input."`
      (per-field text lives in `field_errors`);
@@ -231,11 +232,15 @@ routes above.
   - `exchange_name` choices: `binance, bybit, okx, mexc, alpaca, coinbase`.
   - **Gate 1:** active subscription `plan__bot_type="grid"` → else 403
     (generic message in production).
-  - **Gate 2:** one bot per subscription — model `unique_together =
-    ["subscription"]` + explicit pre-check → DRF `ValidationError`
+  - **Gate 2 (legacy only):** one bot per subscription for per-bot (legacy)
+    subscriptions — view pre-check → DRF `ValidationError`
     (400, `VALIDATION_ERROR`) with message *"You already have a Grid Bot for
     this subscription. You can update the existing bot's settings instead."*
-    (surfaces in `message` via `non_field_errors`).
+    (surfaces in `message` via `non_field_errors`). **Model C exception
+    (2026-10-18):** source=`model_c` skips this check and the model no longer
+    has `unique_together = ["subscription"]` — the ONE shared Model C
+    subscription holds many grids, capped only by `max_bots_allowed` (429
+    `BOT_LIMIT_EXCEEDED`). See `model-c-shared-sub-multi-bot.md`.
   - **201 body does NOT contain `id`** (create serializer omits it; `user` is
     hidden). Re-list the collection to obtain the id.
 - **Read/update** via `GridBotSerializer`: adds `level_spacing_percent`,
@@ -257,8 +262,11 @@ Identical pattern to §5 with these differences:
 
 - Create adds writable `multiplier_factor`; read adds read-only
   `current_level`, `max_level_reached`, `last_execution_price`.
-- Subscription must be `plan__bot_type="martingale"`; duplicate message
-  *"You already have a Martingale Bot for this subscription…"*.
+- Subscription must be `plan__bot_type="martingale"`; duplicate check for
+  legacy per-bot subscriptions only, message
+  *"You already have a Martingale Bot for this subscription…"*. Model C
+  shared subscriptions skip it (many martingales, seat-capped) — same
+  contract as grid, see `model-c-shared-sub-multi-bot.md`.
 - Start/stop call `BotExecutorService.start_martingale_bot` /
   `stop_martingale_bot`; success messages say "Martingale bot started/stopped".
 

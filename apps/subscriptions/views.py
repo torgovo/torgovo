@@ -13,7 +13,7 @@ A9 — canonical plan-endpoint map (two models, three shapes; report §3.6):
 
 from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework import generics, serializers, status, viewsets
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
@@ -727,10 +727,40 @@ class MyUsageView(APIView):
             + MartingaleBot.objects.filter(user=user, is_deleted=False).count()
             + SignalBot.objects.filter(user=user, is_deleted=False).count()
         )
+        # FR A2 additive usage: same per-bot counters the webhook quota sums
+        # (reset monthly by reset_monthly_signal_limits).
+        signals_used = (
+            SignalBot.objects.filter(user=user, is_deleted=False).aggregate(
+                total=Sum("signals_used_this_month")
+            )["total"]
+            or 0
+        )
+        # Additive Model C keys. Legacy/none have no plan-level signal quota →
+        # UNLIMITED sentinel (frontend renders "unlimited" for >= this value).
+        UNLIMITED = 2_147_483_647
 
         if active_sub:
             plan = active_sub.plan
             features = plan.features if isinstance(plan.features, dict) else {}
+            # FR A2: the linked Model C row is authoritative (admin edits on
+            # the row must propagate without touching the shim's features).
+            model_c_plan = plan.subscription_plan
+            if model_c_plan is not None:
+                plan_limits = {
+                    "max_bots": model_c_plan.max_bots_allowed,
+                    "max_webhooks": model_c_plan.max_webhooks_allowed,
+                    "max_signals_per_month": model_c_plan.max_signals_per_month,
+                    "bot_types": model_c_plan.bot_types,
+                    "plan_slug": model_c_plan.slug,
+                }
+            else:
+                plan_limits = {
+                    "max_bots": features.get("max_bots", 1),
+                    "max_webhooks": features.get("max_webhooks", 10),
+                    "max_signals_per_month": UNLIMITED,
+                    "bot_types": None,
+                    "plan_slug": None,
+                }
             return Response(
                 {
                     "plan": {
@@ -738,12 +768,10 @@ class MyUsageView(APIView):
                         "price": str(plan.price),
                         "duration_days": plan.duration_days,
                     },
-                    "limits": {
-                        "max_bots": features.get("max_bots", 1),
-                        "max_webhooks": features.get("max_webhooks", 10),
-                    },
+                    "limits": plan_limits,
                     "usage": {
                         "bots_created": bots_created,
+                        "signals_used_this_month": signals_used,
                     },
                     "status": active_sub.status,
                     "expires_at": active_sub.expires_at,
@@ -753,8 +781,14 @@ class MyUsageView(APIView):
         return Response(
             {
                 "plan": None,
-                "limits": {"max_bots": 0, "max_webhooks": 0},
-                "usage": {"bots_created": bots_created},
+                "limits": {
+                    "max_bots": 0,
+                    "max_webhooks": 0,
+                    "max_signals_per_month": UNLIMITED,
+                    "bot_types": None,
+                    "plan_slug": None,
+                },
+                "usage": {"bots_created": bots_created, "signals_used_this_month": signals_used},
                 "status": None,
                 "expires_at": None,
             }

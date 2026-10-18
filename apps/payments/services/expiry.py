@@ -76,6 +76,9 @@ def transition_expired_subscriptions(now=None) -> int:
     now = now or timezone.now()
     qs = BotSubscription.objects.filter(status="active").exclude(expires_at=None)
     count = 0
+    # (user_id, sub_pk, slug) of Model C rows that actually flipped this pass
+    # — consumed by the profile fallback below.
+    model_c_expired = []
     for sub in qs.iterator():
         if is_hard_stopped(sub, now):
             # Adversarial review 2026-10-15 (CRITICAL): compare-and-swap.
@@ -90,6 +93,37 @@ def transition_expired_subscriptions(now=None) -> int:
                 pk=sub.pk, status="active", expires_at=sub.expires_at
             ).update(status="expired", updated_at=timezone.now())
             count += flipped
+            # FR A2 / Q15: remember flipped Model C rows (plan chain is still
+            # on the in-memory sub — .update() does not touch it).
+            if flipped and sub.plan.subscription_plan_id:
+                model_c_expired.append((sub.user_id, sub.pk, sub.plan.subscription_plan.slug))
+    # FR A2 / Q15 downgrade rule: the profile drops to free only when the
+    # expired tier governs it (profile slug == expired slug) AND no other
+    # usable Model C sub remains. Upgrades were applied at approve(); this is
+    # the single place a downgrade lands. Legacy profiles are never touched.
+    if model_c_expired:
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        for user_id, sub_pk, slug in model_c_expired:
+            others = (
+                BotSubscription.objects.filter(
+                    user_id=user_id,
+                    status="active",
+                    plan__subscription_plan__isnull=False,
+                )
+                .exclude(pk=sub_pk)
+                .select_related("plan")
+            )
+            # Grace counts as usable (full access per A6) — only a second
+            # hard stop would leave the user with no Model C tier at all.
+            if any(not is_hard_stopped(o, now) for o in others):
+                continue
+            user = User.objects.filter(pk=user_id).first()
+            if user is None or user.subscription_plan != slug:
+                continue
+            user.subscription_plan = "free"
+            user.save(update_fields=["subscription_plan", "max_bots_allowed"])
     if count:
         logger.info("G4: transitioned %d subscription(s) to expired", count)
     return count

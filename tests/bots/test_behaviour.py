@@ -12,7 +12,6 @@ import uuid
 from decimal import Decimal
 
 import pytest
-from django.db import IntegrityError
 
 pytestmark = pytest.mark.django_db
 
@@ -196,14 +195,19 @@ class TestGridBot:
         assert bot.active_orders == ["new"]
         assert bot.current_grid_levels == {}
 
-    def test_one_grid_bot_per_subscription(self, user, bot_subscription):
-        _grid_bot(user, subscription=bot_subscription)
-        with pytest.raises(IntegrityError):
-            _grid_bot(user, subscription=bot_subscription)
+    def test_two_grid_bots_may_share_subscription(self, user, bot_subscription):
+        # Model C shared-sub contract (2026-10-18): DB unique_together on
+        # subscription was removed — one shared sub holds many seat-eligible
+        # bots. Legacy 1-per-sub stays enforced at the view (400).
+        # See docs/model-c-shared-sub-multi-bot.md.
+        _grid_bot(user, subscription=bot_subscription, bot_name="G1")
+        second = _grid_bot(user, subscription=bot_subscription, bot_name="G2")
+        assert second.subscription_id == bot_subscription.id
 
 
 class TestMartingaleBot:
-    def test_one_martingale_bot_per_subscription(self, user, martingale_bot_subscription):
+    def test_two_martingale_bots_may_share_subscription(self, user, martingale_bot_subscription):
+        # Same Model C shared-sub contract as the grid test above.
         from apps.bots.models import MartingaleBot
 
         MartingaleBot.objects.create(
@@ -216,17 +220,17 @@ class TestMartingaleBot:
             favor_levels=3,
             against_levels=3,
         )
-        with pytest.raises(IntegrityError):
-            MartingaleBot.objects.create(
-                user=user,
-                subscription=martingale_bot_subscription,
-                bot_name="M2",
-                exchange_name="binance",
-                trading_pair="BTC/USDT",
-                base_amount=Decimal("100"),
-                favor_levels=3,
-                against_levels=3,
-            )
+        second = MartingaleBot.objects.create(
+            user=user,
+            subscription=martingale_bot_subscription,
+            bot_name="M2",
+            exchange_name="binance",
+            trading_pair="BTC/USDT",
+            base_amount=Decimal("100"),
+            favor_levels=3,
+            against_levels=3,
+        )
+        assert second.subscription_id == martingale_bot_subscription.id
 
 
 class TestReserveFund:
