@@ -71,8 +71,9 @@ constraint (deleted row still occupied the unique) → 500; now allowed
 `bots/0019_alter_gridbot_unique_together_and_more` applied to the real
 Postgres on 2026-10-18. Live DB setup changed that day: 5432 was taken by
 the ClearAlignersHub user-space cluster (left untouched), so torgovo2 now
-runs its own cluster from `/home/arcore/pgdata` on **port 5433** (PG 18.6,
-role `postgres`, db `torgovo`, `.env` `DB_PORT=5433`). Verified:
+runs its own cluster from `/home/arcore/pgdata` on **port 5444** (PG 18.6,
+role `postgres`, db `torgovo`, `.env` `DB_PORT=5444`; port pinned in
+`postgresql.conf`). Verified:
 `manage.py migrate --check` OK, no UNIQUE index on `subscription` in
 `bots_grid_bots`/`bots_martingale_bots` (pkey only), `seed_model_c_plans`
 idempotently created the 5 plans.

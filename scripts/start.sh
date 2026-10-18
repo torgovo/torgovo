@@ -65,14 +65,15 @@ start_postgres_local() {
         NAME=$(echo "$PG_CLUSTER" | awk '{print $2}')
         sudo pg_ctlcluster "$VERSION" "$NAME" start 2>/dev/null || true
     elif command -v pg_ctl &>/dev/null; then
-        PGDATA="${PGDATA:-/var/lib/postgres/data}"
+        # torgovo2's dedicated user-space cluster (port pinned in postgresql.conf)
+        PGDATA="${PGDATA:-/home/arcore/pgdata}"
         if [ -f "$PGDATA/PG_VERSION" ]; then
-            pg_ctl start -D "$PGDATA" -l /tmp/pg.log 2>/dev/null || true
+            pg_ctl start -D "$PGDATA" -l "$PGDATA/server.log" 2>/dev/null || true
         fi
     fi
     for i in $(seq 1 15); do
-        if pg_isready -q 2>/dev/null; then
-            echo "Postgres is running (local)"
+        if pg_isready -q -h 127.0.0.1 -p "${DB_PORT:-5444}" 2>/dev/null; then
+            echo "Postgres is running (local on ${DB_PORT:-5444})"
             return 0
         fi
         sleep 2
@@ -80,7 +81,7 @@ start_postgres_local() {
     return 1
 }
 
-if pg_isready -q 2>/dev/null; then
+if pg_isready -q -h 127.0.0.1 -p "${DB_PORT:-5444}" 2>/dev/null; then
     echo "Postgres is already running"
 elif command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
     start_postgres_docker || start_postgres_local || {
@@ -96,7 +97,12 @@ fi
 
 # --- 4. Create database if it doesn't exist ---
 echo "Ensuring database exists..."
-sudo -u postgres createdb "${DB_NAME:-torgovo}" 2>/dev/null || true
+PG_SOCK="/run/user/$(id -u)"
+DB_EXISTS=$(psql -h "$PG_SOCK" -p "${DB_PORT:-5444}" -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME:-torgovo}'" 2>/dev/null || true)
+if [ "$DB_EXISTS" != "1" ]; then
+    createdb -h "$PG_SOCK" -p "${DB_PORT:-5444}" -U postgres "${DB_NAME:-torgovo}" 2>/dev/null || \
+        sudo -u postgres createdb "${DB_NAME:-torgovo}" 2>/dev/null || true
+fi
 
 # --- 5. Run migrations ---
 echo "Running migrations..."
@@ -107,7 +113,9 @@ echo "Checking for plaintext QuantumAIFund keys..."
 python manage.py encrypt_quantum_fund_keys --dry-run 2>/dev/null || true
 
 # --- 7. Start dev server ---
+# Dedicated torgovo2 backend port (2026-10-18) — must match BACKEND_PORT in .env
+BACKEND_PORT="${BACKEND_PORT:-8600}"
 echo ""
-echo "Starting development server on http://0.0.0.0:8000"
+echo "Starting development server on http://0.0.0.0:${BACKEND_PORT}"
 echo ""
-python manage.py runserver 0.0.0.0:8000
+python manage.py runserver "0.0.0.0:${BACKEND_PORT}"

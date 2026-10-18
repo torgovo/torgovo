@@ -86,7 +86,7 @@ MockAdapter + mock_exchange fixture for exchange-level testing.
 
 ### Medium
 
-15. **`BASE_API_URL`** — hardcoded `http://localhost:8000/` in 2 files
+15. **`BASE_API_URL`** — hardcoded `http://localhost:8600/` in 1 file (`frontend/src/services/auth.js`)
 16. **Middleware order** — `SecurityMiddleware` before `CorsMiddleware`
 17. **`apps/bots/models.py`** — `InvestmentPlan` references `SupportedNetwork` via ID (no FK)
 18. **`apps/investments/admin.py`** — imports `InvestmentBotViewset` from wrong app

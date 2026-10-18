@@ -28,7 +28,8 @@
 
 ### Base URLs & headers
 ```
-Development: http://localhost:8000
+Development: http://localhost:8600
+Frontend dev server: http://localhost:5175 (vite, strictPort; /api proxied to :8600)
 Production:  https://api.torgovo.com
 ```
 ```
