@@ -66,9 +66,13 @@ Recreating a grid/martingale after **soft-deleting** one used to hit the DB
 constraint (deleted row still occupied the unique) → 500; now allowed
 (view check already filters `is_deleted=False`). No test asserted the 500.
 
-## Deferred
+## Migration applied (2026-10-18)
 
-Migration `bots/0019` not applied to the real Postgres (DB down,
-`role "postgres" does not exist` — pre-existing open item; tests run on
-SQLite where migrations apply at test-DB setup). Apply with
-`manage.py migrate` when the DB is restored.
+`bots/0019_alter_gridbot_unique_together_and_more` applied to the real
+Postgres on 2026-10-18. Live DB setup changed that day: 5432 was taken by
+the ClearAlignersHub user-space cluster (left untouched), so torgovo2 now
+runs its own cluster from `/home/arcore/pgdata` on **port 5433** (PG 18.6,
+role `postgres`, db `torgovo`, `.env` `DB_PORT=5433`). Verified:
+`manage.py migrate --check` OK, no UNIQUE index on `subscription` in
+`bots_grid_bots`/`bots_martingale_bots` (pkey only), `seed_model_c_plans`
+idempotently created the 5 plans.
